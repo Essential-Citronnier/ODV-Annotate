@@ -17,8 +17,16 @@ struct OpenDicomViewerApp: App {
         WindowGroup {
             ContentView(model: model)
                 .task {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    await updateChecker.checkForUpdates()
+                    // Auto-open directory if passed via --benchmark /path
+                    if let benchIdx = CommandLine.arguments.firstIndex(of: "--benchmark"),
+                       benchIdx + 1 < CommandLine.arguments.count {
+                        let path = CommandLine.arguments[benchIdx + 1]
+                        let url = URL(fileURLWithPath: path)
+                        model.load(url: url)
+                    } else {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        await updateChecker.checkForUpdates()
+                    }
                 }
                 .alert(
                     updateAlertTitle,

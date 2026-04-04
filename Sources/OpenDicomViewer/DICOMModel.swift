@@ -587,7 +587,10 @@ class DICOMModel: ObservableObject {
     func load(url: URL) {
         let secured = url.startAccessingSecurityScopedResource()
         defer { if secured { url.stopAccessingSecurityScopedResource() } }
-        
+
+        BenchmarkLogger.shared.start("load_total")
+        BenchmarkLogger.shared.log(event: "load_start", dataset: url.lastPathComponent, detail: url.path)
+
         // Cancel any pending background work
         cachingQueue.cancelAllOperations()
         
@@ -906,6 +909,9 @@ class DICOMModel: ObservableObject {
         guard isValidIndex() else { return }
         let images = allSeries[currentSeriesIndex].images
         let seriesUID = allSeries[currentSeriesIndex].id
+        let seriesDesc = allSeries[currentSeriesIndex].seriesDescription
+        BenchmarkLogger.shared.start("precache_series")
+        let precacheBenchCount = images.count
         
         // Determine Target W/L
         var targetWW: Double = 0
@@ -997,6 +1003,13 @@ class DICOMModel: ObservableObject {
             }
             precachingQueue.addOperation(op)
         }
+
+        // Completion sentinel to log when all images are cached
+        let sentinel = BlockOperation { [weak self] in
+            BenchmarkLogger.shared.stop("precache_series", dataset: seriesDesc, detail: "\(precacheBenchCount) images cached")
+            _ = self // prevent unused warning
+        }
+        precachingQueue.addOperation(sentinel)
     }
 
     private func extractEncapsulatedData(_ data: Data) -> [Data]? {
@@ -1597,6 +1610,8 @@ class DICOMModel: ObservableObject {
 
     // MARK: - Directory
     private func scanDirectory(_ url: URL, selecting targetUrl: URL? = nil) {
+        BenchmarkLogger.shared.start("scan_directory")
+        let benchDataset = url.lastPathComponent
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             let fileManager = FileManager.default
@@ -1729,6 +1744,8 @@ class DICOMModel: ObservableObject {
                     // FAST LOAD: First Image
                     if !firstFound && targetUrl == nil {
                         firstFound = true
+                        BenchmarkLogger.shared.stop("first_image_found", dataset: benchDataset, detail: "First DICOM file parsed")
+                        BenchmarkLogger.shared.start("first_image_display")
                         DispatchQueue.main.async {
                             // Only set if we are still empty (avoid race conditions)
                             if self.allSeries.isEmpty {
@@ -1757,6 +1774,10 @@ class DICOMModel: ObservableObject {
             
             // Final Update
             updateUI(isFinal: true)
+            let fileCount = contexts.count
+            let seriesCount = Dictionary(grouping: contexts, by: { $0.seriesUID }).count
+            BenchmarkLogger.shared.stop("scan_directory", dataset: benchDataset, detail: "\(fileCount) files, \(seriesCount) series")
+            BenchmarkLogger.shared.stop("load_total", dataset: benchDataset, detail: "Scan complete")
 
             // Auto-assign series to panels when in multi-panel mode
             if self.panels.count > 1 {
@@ -3325,7 +3346,9 @@ class DICOMModel: ObservableObject {
         // Build in background
         isVolumeBuildingInProgress = true
         volumeBuildProgress = 0.0
+        let volSeriesDesc = series.seriesDescription
 
+        BenchmarkLogger.shared.start("volume_build")
         volumeBuildQueue.addOperation { [weak self] in
             guard let self = self else { return }
 
@@ -3345,6 +3368,7 @@ class DICOMModel: ObservableObject {
                     self.volumeCache[series.id] = volume
                     self.isVolumeBuildingInProgress = false
                     self.volumeBuildProgress = 1.0
+                    BenchmarkLogger.shared.stop("volume_build", dataset: volSeriesDesc, detail: "\(volume.width)x\(volume.height)x\(volume.depth) voxels")
                     completion(volume, nil)
                 }
             } catch {
@@ -3591,6 +3615,7 @@ class DICOMModel: ObservableObject {
             let ww = panel.windowWidth > 0 ? panel.windowWidth : (panel.initialWindowWidth > 0 ? panel.initialWindowWidth : 2000)
             let wc = (panel.windowWidth > 0) ? panel.windowCenter : (panel.initialWindowWidth > 0 ? panel.initialWindowCenter : 500)
 
+            BenchmarkLogger.shared.start("mip_render")
             let engine = MPREngine(volume: volume)
             guard let slice = engine.axialSlabProjection(
                 mode: mode,
@@ -3603,6 +3628,7 @@ class DICOMModel: ObservableObject {
             }
 
             if let image = MPREngine.renderSlice(slice, ww: ww, wc: wc, invert: panel.isInverted) {
+                BenchmarkLogger.shared.stop("mip_render", detail: "slab=\(panel.mipSlabThickness), mode=\(mode)")
                 panel.setDisplayImage(image)
                 panel.imageWidth = slice.width
                 panel.imageHeight = slice.height

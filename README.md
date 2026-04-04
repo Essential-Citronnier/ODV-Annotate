@@ -65,6 +65,12 @@ cd open-dicom-viewer
 cp -r OpenDicomViewer.app /Applications/
 ```
 
+To run the test suite:
+
+```bash
+swift test
+```
+
 Pre-built static libraries for DCMTK and OpenJPEG are included in `libs/`. To rebuild them from source (e.g., for a different architecture):
 
 ```bash
