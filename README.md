@@ -249,7 +249,12 @@ This project is built on top of [OpenDicomViewer](https://github.com/jnheo-md/op
 
 This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
 
-DCMTK is licensed under the BSD license. OpenJPEG is licensed under BSD-2-Clause. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full license texts.
+- [OpenDicomViewer](https://github.com/jnheo-md/open-dicom-viewer) (original project) — MIT License
+- [Gemma 4](https://deepmind.google/models/gemma/gemma-4/) — Apache 2.0 License
+- DCMTK — BSD License
+- OpenJPEG — BSD-2-Clause License
+
+See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full license texts.
 
 ## Dependencies
 
@@ -259,6 +264,6 @@ DCMTK is licensed under the BSD license. OpenJPEG is licensed under BSD-2-Clause
 | [OpenJPEG](https://www.openjpeg.org/) | 2.5.0 | JPEG 2000 decompression | BSD-2-Clause |
 | [MLX](https://github.com/ml-explore/mlx) | latest | Apple Silicon ML framework for local inference | MIT |
 | [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) | latest | Vision-language model inference on MLX | MIT |
-| [Gemma 4 E4B](https://huggingface.co/mlx-community/gemma-4-E4B-it-4bit) | 4-bit | Vision-language model for DICOM annotation | Gemma |
+| [Gemma 4 E4B](https://huggingface.co/mlx-community/gemma-4-E4B-it-4bit) | 4-bit | Vision-language model for DICOM annotation | Apache 2.0 |
 
 DCMTK and OpenJPEG are included as pre-built static libraries (`libs/`). Python 3.11, MLX, and Gemma are bundled with or automatically downloaded by the app.
