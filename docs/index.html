@@ -335,7 +335,6 @@
     .video-container {
       position: relative;
       width: 100%;
-      padding-bottom: 56.25%; /* 16:9 */
       border-radius: 16px;
       overflow: hidden;
       background: #000;
@@ -344,17 +343,12 @@
         0 0 0 1px rgba(255,255,255,0.03),
         0 24px 80px rgba(0,0,0,0.5),
         0 8px 24px rgba(0,0,0,0.3);
-      cursor: pointer;
     }
 
-    .video-container::before {
-      content: '';
-      position: absolute;
-      inset: -1px;
-      border-radius: 16px;
-      background: linear-gradient(135deg, rgba(59,130,246,0.1), transparent 40%, transparent 60%, rgba(6,182,212,0.08));
-      pointer-events: none;
-      z-index: 0;
+    .video-container video {
+      display: block;
+      width: 100%;
+      height: auto;
     }
 
     .video-thumb {
@@ -1291,8 +1285,8 @@
         <p class="section-desc" style="margin:0 auto;">Watch Gemma 4 annotate DICOM images in real-time &mdash; entirely on your Mac.</p>
       </div>
       <div class="reveal">
-        <div class="video-container" style="aspect-ratio:16/9;">
-          <video controls preload="metadata" poster="screenshot2.png" style="width:100%;height:100%;display:block;">
+        <div class="video-container">
+          <video controls preload="metadata" poster="screenshot2.png">
             <source src="demo.mp4" type="video/mp4">
             Your browser does not support the video tag.
           </video>
