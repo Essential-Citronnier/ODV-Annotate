@@ -49,6 +49,39 @@ cp "mlx-server/server.py" "${RESOURCES_DIR}/mlx-server/"
 cp "mlx-server/requirements.txt" "${RESOURCES_DIR}/mlx-server/"
 [ -f "mlx-server/README.md" ] && cp "mlx-server/README.md" "${RESOURCES_DIR}/mlx-server/" || true
 
+# --- Bundle standalone Python runtime (no system Python dependency) ---
+# Update these variables when a newer build is available from:
+# https://github.com/astral-sh/python-build-standalone/releases
+PYTHON_FULL_VERSION="3.11.11"
+PYTHON_BUILD_DATE="20250212"
+PYTHON_ARCH="aarch64"
+PYTHON_TARBALL_NAME="cpython-${PYTHON_FULL_VERSION}+${PYTHON_BUILD_DATE}-${PYTHON_ARCH}-apple-darwin-install_only.tar.gz"
+PYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_BUILD_DATE}/${PYTHON_TARBALL_NAME}"
+PYTHON_CACHE_DIR=".cache/python-standalone"
+PYTHON_CACHED_TARBALL="${PYTHON_CACHE_DIR}/${PYTHON_TARBALL_NAME}"
+
+echo "Bundling standalone Python ${PYTHON_FULL_VERSION}..."
+mkdir -p "${PYTHON_CACHE_DIR}"
+if [ ! -f "${PYTHON_CACHED_TARBALL}" ]; then
+    echo "  Downloading from python-build-standalone..."
+    curl -L --fail -o "${PYTHON_CACHED_TARBALL}" "${PYTHON_URL}"
+fi
+
+echo "  Extracting to app bundle..."
+tar xzf "${PYTHON_CACHED_TARBALL}" -C "${RESOURCES_DIR}/"
+# Tarball extracts to python/ — gives us Resources/python/bin/python3 etc.
+
+# Trim unnecessary files to reduce bundle size (~60 MB savings)
+echo "  Trimming unnecessary files..."
+rm -rf "${RESOURCES_DIR}/python/share"
+rm -rf "${RESOURCES_DIR}/python/include"
+PYLIB="${RESOURCES_DIR}/python/lib/python${PYTHON_FULL_VERSION%.*}"
+rm -rf "${PYLIB}/test" "${PYLIB}/unittest/test" "${PYLIB}/lib2to3"
+rm -rf "${PYLIB}/idlelib" "${PYLIB}/tkinter" "${PYLIB}/turtledemo"
+# Note: keep ensurepip intact — python3 -m venv needs it to bootstrap pip
+find "${RESOURCES_DIR}/python" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+find "${RESOURCES_DIR}/python" -name "*.pyc" -delete 2>/dev/null || true
+
 echo "Creating Info.plist..."
 cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -83,10 +116,28 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 </plist>
 EOF
 
+ENTITLEMENTS="scripts/OpenDicomViewer.entitlements"
+
 if $NOTARIZE; then
     echo "Code signing with Developer ID..."
-    codesign --force --options runtime --sign "${SIGNING_IDENTITY}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
-    codesign --force --options runtime --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
+
+    # 1) Sign all shared libraries inside bundled Python (innermost first)
+    echo "  Signing bundled Python shared libraries..."
+    find "${RESOURCES_DIR}/python" -type f \( -name "*.so" -o -name "*.dylib" \) | while read -r lib; do
+        codesign --force --options runtime --sign "${SIGNING_IDENTITY}" "$lib"
+    done
+
+    # 2) Sign Python executables with entitlements
+    echo "  Signing bundled Python executables..."
+    find "${RESOURCES_DIR}/python/bin" -type f -perm +111 ! -name "*.py" | while read -r bin; do
+        codesign --force --options runtime --entitlements "${ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "$bin"
+    done
+
+    # 3) Sign the main app executable with entitlements
+    codesign --force --options runtime --entitlements "${ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
+
+    # 4) Sign the entire app bundle
+    codesign --force --options runtime --entitlements "${ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
     codesign --verify --deep --strict "${APP_BUNDLE}"
     echo "Signature OK"
 else

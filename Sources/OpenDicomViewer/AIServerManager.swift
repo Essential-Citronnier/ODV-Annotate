@@ -112,6 +112,37 @@ class AIServerManager: ObservableObject {
         venvDirectory.appendingPathComponent("bin/python3").path
     }
 
+    /// Path to the standalone Python bundled inside the .app (Resources/python/bin/python3).
+    private var bundledPythonPath: String? {
+        guard let resourceURL = Bundle.main.resourceURL else { return nil }
+        let path = resourceURL.appendingPathComponent("python/bin/python3").path
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
+    /// Whether we are running from an .app bundle (vs. a dev build).
+    private var isAppBundle: Bool {
+        Bundle.main.bundlePath.hasSuffix(".app")
+    }
+
+    /// Build an environment dictionary with correct PATH for bundled Python + venv.
+    private func buildPythonEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        var pathParts: [String] = []
+        pathParts.append(venvDirectory.appendingPathComponent("bin").path)
+        if let bundled = bundledPythonPath {
+            pathParts.append(URL(fileURLWithPath: bundled).deletingLastPathComponent().path)
+        }
+        if let existing = env["PATH"] {
+            pathParts.append(existing)
+        }
+        env["PATH"] = pathParts.joined(separator: ":")
+        // Ensure HOME is set (hardened runtime may strip it)
+        if env["HOME"] == nil {
+            env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
+        }
+        return env
+    }
+
     // MARK: - Setup State Check
 
     func checkSetupState() {
@@ -122,15 +153,36 @@ class AIServerManager: ObservableObject {
         }
     }
 
-    // MARK: - Find System Python 3
+    // MARK: - Find Python 3
 
-    private func findSystemPython3() -> String? {
+    /// Locate a working Python 3 interpreter.
+    /// Priority: 1) bundled Python in app Resources  2) system Python (dev only).
+    /// Skips /usr/bin/python3 (macOS CLT shim that triggers an install dialog).
+    private func findPython3() -> String? {
+        // 1. Bundled Python — always preferred
+        if let bundled = bundledPythonPath {
+            return bundled
+        }
+        // 2. System Python — development builds only (never /usr/bin/python3)
         let candidates = [
-            "/opt/homebrew/bin/python3",  // Homebrew on Apple Silicon
-            "/usr/local/bin/python3",     // Homebrew on Intel
-            "/usr/bin/python3",           // macOS built-in (CLT shim)
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
         ]
-        return candidates.first { FileManager.default.fileExists(atPath: $0) }
+        for candidate in candidates {
+            guard FileManager.default.fileExists(atPath: candidate) else { continue }
+            // Verify it actually runs (not a broken symlink / stub)
+            let probe = Process()
+            probe.executableURL = URL(fileURLWithPath: candidate)
+            probe.arguments = ["--version"]
+            probe.standardOutput = Pipe()
+            probe.standardError = Pipe()
+            do {
+                try probe.run()
+                probe.waitUntilExit()
+                if probe.terminationStatus == 0 { return candidate }
+            } catch { continue }
+        }
+        return nil
     }
 
     // MARK: - Setup Environment
@@ -157,22 +209,26 @@ class AIServerManager: ObservableObject {
             )
 
             // Locate Python 3
-            guard let python3 = self.findSystemPython3() else {
+            guard let python3 = self.findPython3() else {
+                let message = self.isAppBundle
+                    ? "AI setup failed: Python runtime missing from app bundle.\nPlease re-download the application from the official source."
+                    : "Python 3 not found.\nInstall Python 3.10+ from python.org or via Homebrew, then try again."
                 await MainActor.run {
-                    self.setupState = .failed(
-                        "Python 3 not found.\nInstall Python 3.10+ from python.org or via Homebrew, then try again."
-                    )
-                    self.appendSetupLog("ERROR: python3 not found in standard locations.\n")
+                    self.setupState = .failed(message)
+                    self.appendSetupLog("ERROR: \(message)\n")
                 }
                 return
             }
             await MainActor.run { self.appendSetupLog("Python: \(python3)\n") }
+
+            let env = self.buildPythonEnvironment()
 
             // Create virtual environment
             await MainActor.run { self.appendSetupLog("Creating virtual environment...\n") }
             let venvOK = await self.runSetupProcess(
                 executable: python3,
                 arguments: ["-m", "venv", venvDir.path],
+                environment: env,
                 onOutput: { str in Task { @MainActor [weak self] in self?.appendSetupLog(str) } }
             )
             guard venvOK else {
@@ -188,6 +244,7 @@ class AIServerManager: ObservableObject {
             _ = await self.runSetupProcess(
                 executable: pip,
                 arguments: ["install", "--upgrade", "pip", "-q"],
+                environment: env,
                 onOutput: { _ in }
             )
 
@@ -202,6 +259,7 @@ class AIServerManager: ObservableObject {
             let installOK = await self.runSetupProcess(
                 executable: pip,
                 arguments: ["install", "-r", requirementsPath],
+                environment: env,
                 onOutput: { str in Task { @MainActor [weak self] in self?.appendSetupLog(str) } }
             )
             guard installOK else {
@@ -224,12 +282,14 @@ class AIServerManager: ObservableObject {
     private func runSetupProcess(
         executable: String,
         arguments: [String],
+        environment: [String: String]? = nil,
         onOutput: @escaping @Sendable (String) -> Void
     ) async -> Bool {
         await withCheckedContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
+            if let environment { process.environment = environment }
 
             let outPipe = Pipe()
             let errPipe = Pipe()
@@ -307,7 +367,7 @@ class AIServerManager: ObservableObject {
         process.executableURL = URL(fileURLWithPath: venvPythonPath)
         process.arguments = [serverScript]
         process.currentDirectoryURL = serverDirectory
-        process.environment = ProcessInfo.processInfo.environment
+        process.environment = buildPythonEnvironment()
 
         let pipe = Pipe()
         let errorPipe = Pipe()
@@ -394,7 +454,9 @@ class AIServerManager: ObservableObject {
 
     // MARK: - Check Existing Server
 
-    /// Called on app launch to detect a server already running (e.g. started externally).
+    /// Called on app launch. Detects a server already running (e.g. started externally).
+    /// On first install (no venv), automatically triggers setup + model download.
+    /// If setup is already done but server is not running, auto-starts the server.
     func checkExistingServer() {
         checkSetupState()
         Task {
@@ -403,6 +465,19 @@ class AIServerManager: ObservableObject {
                 if aiService.serverStatus.isReady {
                     isServerRunning = true
                     appendLog("Connected to existing MLX server.")
+                } else {
+                    // Auto-start based on current setup state so the user doesn't
+                    // have to manually trigger anything after a fresh install.
+                    switch setupState {
+                    case .notSetup:
+                        // First install: create venv, install deps, download model, start server.
+                        setupEnvironment()
+                    case .ready:
+                        // Deps already installed; just launch the server process.
+                        launchServerProcess()
+                    default:
+                        break
+                    }
                 }
             }
         }

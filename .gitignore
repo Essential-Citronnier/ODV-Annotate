@@ -49,3 +49,6 @@ temp.md
 
 # MLX server runtime
 mlx-server/.server.pid
+
+# Cached Python standalone build (downloaded by package_app.sh)
+.cache/

@@ -1877,33 +1877,31 @@ struct AIInspectorView: View {
 
 // MARK: - Setup State Sub-Views
 
-/// Shown when the Python venv has never been created
+/// Shown when the Python venv has never been created.
+/// Auto-triggers setup on appear; the manual button is a fallback.
 private struct AISetupRequiredView: View {
     @ObservedObject private var manager = AIServerManager.shared
 
     var body: some View {
         VStack(spacing: 16) {
-            Image(systemName: "brain.head.profile")
-                .font(.system(size: 36))
-                .foregroundStyle(.yellow.opacity(0.8))
+            ProgressView()
+                .tint(.yellow)
+                .scaleEffect(1.2)
 
             VStack(spacing: 6) {
-                Text("AI Setup Required")
+                Text("Setting Up AI Engine…")
                     .font(.headline)
-                Text("The on-device AI engine needs a Python environment and model weights (~4.5 GB).")
+                Text("Installing Python packages and preparing the model environment. This runs once.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
 
             VStack(spacing: 4) {
-                Label("Requires Python 3.10+ (python.org or Homebrew)", systemImage: "checkmark.circle")
+                Label("~500 MB Python packages (mlx, mlx-vlm…)", systemImage: "arrow.down.circle")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Label("~500 MB Python packages (mlx, mlx-vlm…)", systemImage: "checkmark.circle")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Label("~4.5 GB model download on first launch", systemImage: "checkmark.circle")
+                Label("~4.5 GB model download on first launch", systemImage: "arrow.down.circle")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -1917,9 +1915,16 @@ private struct AISetupRequiredView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)
             .tint(.yellow)
+            .opacity(0)  // Hidden — auto-setup already triggered on launch
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            // Belt-and-suspenders: trigger setup if it hasn't started yet
+            if manager.setupState == .notSetup || manager.setupState == .unknown {
+                manager.setupEnvironment()
+            }
+        }
     }
 }
 
@@ -2000,28 +2005,29 @@ private struct AISetupFailedView: View {
     }
 }
 
-/// Shown when the venv is ready but the server process is not running
+/// Shown when the venv is ready but the server process is not running.
+/// Auto-starts the server on appear if it was never manually stopped.
 private struct AIServerStoppedView: View {
     let isFirstRun: Bool
     @ObservedObject private var manager = AIServerManager.shared
 
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "bolt.slash")
-                .font(.system(size: 30))
-                .foregroundStyle(.secondary)
+            ProgressView()
+                .tint(.yellow)
+                .scaleEffect(1.2)
 
-            Text("AI Server Offline")
+            Text("Starting AI Server…")
                 .font(.headline)
 
             if isFirstRun {
-                Text("First launch: the model will be downloaded from Hugging Face (~4.5 GB). Keep the app open while it downloads.")
+                Text("First launch: downloading Gemma 4 (~4.5 GB) from Hugging Face.\nKeep the app open — this takes 10–30 minutes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 8)
             } else {
-                Text("Start the server to enable AI-assisted analysis.")
+                Text("Loading model into memory…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -2034,9 +2040,16 @@ private struct AIServerStoppedView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)
             .tint(.yellow)
+            .opacity(0)  // Hidden — auto-start already triggered; shown only as fallback
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            // Auto-start if not already starting/running
+            if !manager.isServerRunning {
+                manager.startServer()
+            }
+        }
     }
 }
 
