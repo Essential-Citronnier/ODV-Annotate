@@ -13,7 +13,7 @@ let package = Package(
         .executable(name: "OpenDicomViewer", targets: ["OpenDicomViewer"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-testing.git", branch: "main")
+        .package(url: "https://github.com/apple/swift-testing.git", from: "0.12.0")
     ],
     targets: [
         .target(
