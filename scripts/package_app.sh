@@ -1,11 +1,14 @@
 #!/bin/bash
-# package_app.sh — OpenDicomViewer
+# package_app.sh — OpenDicomViewer-Annotate
 # Builds a release binary and creates the .app bundle + DMG for distribution.
 # Use --notarize to sign with Developer ID and notarize with Apple.
 # Licensed under the MIT License. See LICENSE for details.
 set -e
 
-APP_NAME="OpenDicomViewer"
+# EXECUTABLE_NAME: Swift target name (must match Package.swift)
+EXECUTABLE_NAME="OpenDicomViewer"
+# DISPLAY_NAME: app bundle name and DMG filename shown to users
+DISPLAY_NAME="OpenDicomViewer-Annotate"
 SIGNING_IDENTITY="Developer ID Application: DAESEONG KIM (58S28HKMB9)"
 NOTARY_PROFILE="OpenDicomViewer"
 NOTARIZE=false
@@ -17,11 +20,11 @@ fi
 # Ensure we are in project root
 cd "$(dirname "$0")/.."
 
-echo "Building ${APP_NAME} (Release)..."
+echo "Building ${DISPLAY_NAME} (Release)..."
 swift build -c release --arch arm64
 
 BUILD_DIR=".build/release"
-APP_BUNDLE="${APP_NAME}.app"
+APP_BUNDLE="${DISPLAY_NAME}.app"
 CONTENTS_DIR="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
@@ -32,7 +35,7 @@ mkdir -p "${MACOS_DIR}"
 mkdir -p "${RESOURCES_DIR}"
 
 echo "Copying Executable..."
-cp "${BUILD_DIR}/${APP_NAME}" "${MACOS_DIR}/"
+cp "${BUILD_DIR}/${EXECUTABLE_NAME}" "${MACOS_DIR}/"
 
 echo "Copying App Icon..."
 cp "AppIcon.icns" "${RESOURCES_DIR}/"
@@ -53,11 +56,11 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>${APP_NAME}</string>
+    <string>${EXECUTABLE_NAME}</string>
     <key>CFBundleIdentifier</key>
-    <string>com.opendicomviewer.app</string>
+    <string>com.opendicomviewer.annotate</string>
     <key>CFBundleName</key>
-    <string>${APP_NAME}</string>
+    <string>${DISPLAY_NAME}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -71,18 +74,18 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSDocumentsFolderUsageDescription</key>
-    <string>OpenDicomViewer needs access to open DICOM files.</string>
+    <string>${DISPLAY_NAME} needs access to open DICOM files.</string>
     <key>NSDesktopFolderUsageDescription</key>
-    <string>OpenDicomViewer needs access to open DICOM files.</string>
+    <string>${DISPLAY_NAME} needs access to open DICOM files.</string>
     <key>NSDownloadsFolderUsageDescription</key>
-    <string>OpenDicomViewer needs access to open DICOM files.</string>
+    <string>${DISPLAY_NAME} needs access to open DICOM files.</string>
 </dict>
 </plist>
 EOF
 
 if $NOTARIZE; then
     echo "Code signing with Developer ID..."
-    codesign --force --options runtime --sign "${SIGNING_IDENTITY}" "${MACOS_DIR}/${APP_NAME}"
+    codesign --force --options runtime --sign "${SIGNING_IDENTITY}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
     codesign --force --options runtime --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
     codesign --verify --deep --strict "${APP_BUNDLE}"
     echo "Signature OK"
@@ -94,7 +97,7 @@ fi
 echo "Successfully created ${APP_BUNDLE}"
 
 # --- Create DMG for distribution ---
-DMG_NAME="${APP_NAME}.dmg"
+DMG_NAME="${DISPLAY_NAME}.dmg"
 DMG_TEMP="dmg_tmp"
 
 echo "Creating DMG at ${DMG_NAME}..."
@@ -104,7 +107,7 @@ mkdir -p "${DMG_TEMP}"
 cp -R "${APP_BUNDLE}" "${DMG_TEMP}/"
 ln -s /Applications "${DMG_TEMP}/Applications"
 
-hdiutil create -volname "${APP_NAME}" \
+hdiutil create -volname "${DISPLAY_NAME}" \
     -srcfolder "${DMG_TEMP}" \
     -ov -format UDZO \
     "${DMG_NAME}" \
@@ -127,4 +130,4 @@ else
     echo ""
     echo "Successfully created ${DMG_NAME} (not notarized)"
 fi
-echo "To install: open ${DMG_NAME} and drag ${APP_NAME} to Applications"
+echo "To install: open ${DMG_NAME} and drag ${DISPLAY_NAME} to Applications"
