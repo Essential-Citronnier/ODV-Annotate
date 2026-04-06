@@ -221,6 +221,10 @@ struct ContentView: View {
                 case "e":
                     model.activeTool = .eraser
                     return .handled
+                // G = AI Analyze tool
+                case "g":
+                    model.activeTool = .aiAnalyze
+                    return .handled
                 // ] or . = Rotate clockwise 90°
                 case "]", ".":
                     model.rotateClockwiseForPanel(model.activePanel)

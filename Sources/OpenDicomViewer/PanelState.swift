@@ -81,6 +81,7 @@ enum ActiveTool: String, CaseIterable, Identifiable {
     case ruler = "Ruler"
     case angle = "Angle"
     case eraser = "Eraser"
+    case aiAnalyze = "AI Analyze"
 
     var id: String { rawValue }
 
@@ -95,6 +96,7 @@ enum ActiveTool: String, CaseIterable, Identifiable {
         case .ruler: return "ruler"
         case .angle: return "angle"
         case .eraser: return "eraser"
+        case .aiAnalyze: return "brain"
         }
     }
 
@@ -109,6 +111,7 @@ enum ActiveTool: String, CaseIterable, Identifiable {
         case .ruler: return "D"
         case .angle: return "N"
         case .eraser: return "E"
+        case .aiAnalyze: return "G"
         }
     }
 }
@@ -118,11 +121,17 @@ enum AnnotationType {
     case ruler(start: CGPoint, end: CGPoint, distanceMM: Double)
     case angle(vertex: CGPoint, arm1: CGPoint, arm2: CGPoint, degrees: Double)
     case roiStats(rect: CGRect, mean: Double, max: Double, min: Double, stdDev: Double, count: Int)
+
+    // AI-generated annotations (coordinates are in pixel space, same as manual annotations)
+    case aiStructure(rect: CGRect, label: String, confidence: Double)
+    case aiFinding(rect: CGRect, description: String, severity: String)
+    case aiROILabel(rect: CGRect, label: String, description: String, confidence: Double)
 }
 
 struct Annotation: Identifiable {
     let id = UUID()
     let type: AnnotationType
+    var isAI: Bool = false
 }
 
 // MARK: - Panel State
@@ -244,6 +253,12 @@ class PanelState: ObservableObject, Identifiable {
     @Published var rulerPreviewEnd: CGPoint? = nil
     @Published var anglePreviewPoints: [CGPoint] = []
 
+    // AI Analysis State
+    @Published var aiAnalysisInProgress: Bool = false
+    @Published var aiError: String? = nil
+    @Published var aiDescription: String? = nil
+    @Published var showAIAnnotations: Bool = true
+
     /// Reset panel to empty state
     func reset() {
         seriesIndex = -1
@@ -300,5 +315,16 @@ class PanelState: ObservableObject, Identifiable {
         rulerPreviewStart = nil
         rulerPreviewEnd = nil
         anglePreviewPoints = []
+        aiAnalysisInProgress = false
+        aiError = nil
+        aiDescription = nil
+        showAIAnnotations = true
+    }
+
+    /// Remove only AI-generated annotations
+    func clearAIAnnotations() {
+        annotations.removeAll(where: { $0.isAI })
+        aiDescription = nil
+        aiError = nil
     }
 }

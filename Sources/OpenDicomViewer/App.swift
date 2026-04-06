@@ -12,6 +12,8 @@ import SwiftUI
 struct OpenDicomViewerApp: App {
     @StateObject private var model = DICOMModel()
     @StateObject private var updateChecker = UpdateChecker()
+    @StateObject private var aiServerManager = AIServerManager.shared
+    @ObservedObject private var aiService = AIService.shared
 
     var body: some Scene {
         WindowGroup {
@@ -27,6 +29,8 @@ struct OpenDicomViewerApp: App {
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
                         await updateChecker.checkForUpdates()
                     }
+                    // Check if AI server is already running (e.g., started via launch.sh)
+                    aiServerManager.checkExistingServer()
                 }
                 .alert(
                     updateAlertTitle,
@@ -154,6 +158,58 @@ struct OpenDicomViewerApp: App {
                 Divider()
 
                 Button("Eraser (E)") { model.activeTool = .eraser }
+
+                Divider()
+
+                Button("AI Analyze (G)") { model.activeTool = .aiAnalyze }
+            }
+
+            CommandMenu("AI") {
+                Button("Analyze Image") {
+                    if let panel = model.activePanel {
+                        model.triggerAIAnalysis(for: panel)
+                    }
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+                .disabled(!aiService.serverStatus.isReady || model.activePanel?.image == nil)
+
+                Button("Detect Abnormalities") {
+                    if let panel = model.activePanel {
+                        model.triggerAIAbnormalityDetection(for: panel)
+                    }
+                }
+                .disabled(!aiService.serverStatus.isReady || model.activePanel?.image == nil)
+
+                Divider()
+
+                Button("Clear AI Annotations") {
+                    model.activePanel?.clearAIAnnotations()
+                }
+
+                Toggle("Show AI Annotations", isOn: Binding(
+                    get: { model.activePanel?.showAIAnnotations ?? true },
+                    set: { model.activePanel?.showAIAnnotations = $0 }
+                ))
+
+                Divider()
+
+                Button(aiServerManager.isServerRunning ? "Restart AI Server" : "Start AI Server") {
+                    if aiServerManager.isServerRunning {
+                        aiServerManager.restartServer()
+                    } else {
+                        aiServerManager.startServer()
+                    }
+                }
+
+                if aiServerManager.isServerRunning {
+                    Button("Stop AI Server") {
+                        aiServerManager.stopServer()
+                    }
+                }
+
+                Divider()
+
+                Text(aiService.serverStatus.displayText)
             }
 
             CommandGroup(replacing: .help) {

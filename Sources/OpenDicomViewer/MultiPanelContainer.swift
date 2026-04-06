@@ -196,10 +196,91 @@ struct PanelView: View {
                     .zIndex(12)
             }
 
-            // Annotation overlay (rulers, angles, ROI stats)
+            // Annotation overlay (rulers, angles, ROI stats, AI annotations)
             if panel.image != nil {
                 AnnotationOverlay(panel: panel)
                     .zIndex(13)
+            }
+
+            // AI analysis loading overlay
+            if panel.aiAnalysisInProgress {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                                .tint(.white)
+                            Text("AI Analyzing...")
+                                .font(.system(.caption, design: .rounded))
+                                .foregroundStyle(.white)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.black.opacity(0.7))
+                        .cornerRadius(8)
+                        Spacer()
+                    }
+                    .padding(.bottom, 40)
+                }
+                .allowsHitTesting(false)
+                .zIndex(14)
+            }
+
+            // AI description overlay
+            if let desc = panel.aiDescription, !desc.isEmpty, panel.showAIAnnotations {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 4) {
+                                Text("AI")
+                                    .font(.system(.caption2, weight: .bold))
+                                    .foregroundStyle(.black)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(Color.yellow)
+                                    .cornerRadius(3)
+                                Text("Analysis")
+                                    .font(.system(.caption2, weight: .semibold))
+                                    .foregroundStyle(.yellow)
+                            }
+                            Text(desc)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(.white)
+                                .lineLimit(4)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(6)
+                        .background(Color.black.opacity(0.8))
+                        .cornerRadius(6)
+                        .frame(maxWidth: 280)
+                        .padding(8)
+                    }
+                }
+                .allowsHitTesting(false)
+                .zIndex(14)
+            }
+
+            // AI error overlay
+            if let error = panel.aiError {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Text(error)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.red)
+                            .padding(6)
+                            .background(Color.black.opacity(0.8))
+                            .cornerRadius(6)
+                            .padding(8)
+                    }
+                }
+                .allowsHitTesting(false)
+                .zIndex(14)
             }
 
             // Orientation labels (A/P/R/L/S/I)
@@ -560,6 +641,8 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 desiredCursor = .crosshair
             case .eraser:
                 desiredCursor = .disappearingItem
+            case .aiAnalyze:
+                desiredCursor = .crosshair
             }
 
             if tool == .select {
@@ -733,6 +816,10 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                         panel.annotations.remove(at: idx)
                     }
                 }
+
+            case .aiAnalyze:
+                // AI analyze triggered by clicking on image
+                model.triggerAIAnalysis(for: panel)
             }
         }
 
@@ -750,6 +837,16 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 let closest = CGPoint(
                     x: max(rect.minX, min(point.x, rect.maxX)),
                     y: max(rect.minY, min(point.y, rect.maxY))
+                )
+                return hypot(point.x - closest.x, point.y - closest.y)
+            case .aiStructure(let rect, _, _), .aiFinding(let rect, _, _), .aiROILabel(let rect, _, _, _):
+                let imgW = max(1, panel?.displayImageWidth ?? 1)
+                let imgH = max(1, panel?.displayImageHeight ?? 1)
+                let pixelRect = CGRect(x: rect.origin.x * imgW, y: rect.origin.y * imgH,
+                                       width: rect.width * imgW, height: rect.height * imgH)
+                let closest = CGPoint(
+                    x: max(pixelRect.minX, min(point.x, pixelRect.maxX)),
+                    y: max(pixelRect.minY, min(point.y, pixelRect.maxY))
                 )
                 return hypot(point.x - closest.x, point.y - closest.y)
             }
@@ -961,6 +1058,9 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 }
 
             case .eraser:
+                break
+
+            case .aiAnalyze:
                 break
             }
         }
@@ -1753,6 +1853,137 @@ struct AnnotationOverlay: View {
                 .cornerRadius(3)
                 .position(x: screenRect.midX, y: screenRect.maxY + 30)
             }
+
+        // MARK: AI Annotation Types
+
+        case .aiStructure(let rect, let label, let confidence):
+            if panel.showAIAnnotations {
+                let sr = aiScreenRect(rect, viewSize: viewSize)
+                ZStack {
+                    Rectangle()
+                        .stroke(Color.yellow, style: StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
+                        .frame(width: sr.width, height: sr.height)
+                        .position(x: sr.midX, y: sr.midY)
+
+                    HStack(spacing: 3) {
+                        Text("AI")
+                            .font(.system(.caption2, weight: .bold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Color.yellow)
+                            .cornerRadius(2)
+                        Text("\(label) (\(Int(confidence * 100))%)")
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.yellow)
+                    }
+                    .padding(2)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(3)
+                    .position(x: sr.midX, y: sr.minY - 12)
+                }
+            }
+
+        case .aiFinding(let rect, let description, let severity):
+            if panel.showAIAnnotations {
+                let sr = aiScreenRect(rect, viewSize: viewSize)
+                let severityColor = aiFindingSeverityColor(severity)
+                ZStack {
+                    Rectangle()
+                        .fill(severityColor.opacity(0.15))
+                        .frame(width: sr.width, height: sr.height)
+                        .position(x: sr.midX, y: sr.midY)
+                    Rectangle()
+                        .stroke(severityColor, lineWidth: 2)
+                        .frame(width: sr.width, height: sr.height)
+                        .position(x: sr.midX, y: sr.midY)
+
+                    HStack(spacing: 3) {
+                        Text("AI")
+                            .font(.system(.caption2, weight: .bold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(severityColor)
+                            .cornerRadius(2)
+                        Text(severity.uppercased())
+                            .font(.system(.caption2, weight: .bold))
+                            .foregroundStyle(severityColor)
+                        Text(description)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+                    .padding(3)
+                    .background(Color.black.opacity(0.8))
+                    .cornerRadius(3)
+                    .position(x: sr.midX, y: sr.maxY + 14)
+                }
+            }
+
+        case .aiROILabel(let rect, let label, let description, let confidence):
+            if panel.showAIAnnotations {
+                let sr = aiScreenRect(rect, viewSize: viewSize)
+                ZStack {
+                    Rectangle()
+                        .stroke(Color.blue, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                        .frame(width: sr.width, height: sr.height)
+                        .position(x: sr.midX, y: sr.midY)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 3) {
+                            Text("AI")
+                                .font(.system(.caption2, weight: .bold))
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 3)
+                                .padding(.vertical, 1)
+                                .background(Color.blue)
+                                .cornerRadius(2)
+                            Text("\(label) (\(Int(confidence * 100))%)")
+                                .font(.system(.caption2, weight: .semibold))
+                                .foregroundStyle(.blue)
+                        }
+                        Text(description)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                    }
+                    .padding(3)
+                    .background(Color.black.opacity(0.8))
+                    .cornerRadius(3)
+                    .position(x: sr.midX, y: sr.maxY + 22)
+                }
+            }
+        }
+    }
+
+    /// Convert a normalized (0-1) AI bounding box rect to screen coordinates
+    private func aiScreenRect(_ rect: CGRect, viewSize: CGSize) -> CGRect {
+        let imgW = max(1, panel.displayImageWidth)
+        let imgH = max(1, panel.displayImageHeight)
+        let topLeft = pixelToScreen(
+            CGPoint(x: rect.origin.x * imgW, y: rect.origin.y * imgH),
+            viewSize: viewSize
+        )
+        let bottomRight = pixelToScreen(
+            CGPoint(x: (rect.origin.x + rect.width) * imgW,
+                    y: (rect.origin.y + rect.height) * imgH),
+            viewSize: viewSize
+        )
+        return CGRect(
+            x: min(topLeft.x, bottomRight.x),
+            y: min(topLeft.y, bottomRight.y),
+            width: abs(bottomRight.x - topLeft.x),
+            height: abs(bottomRight.y - topLeft.y)
+        )
+    }
+
+    private func aiFindingSeverityColor(_ severity: String) -> Color {
+        switch severity.lowercased() {
+        case "severe": return .red
+        case "moderate": return .orange
+        case "mild": return .yellow
+        default: return .green
         }
     }
 
@@ -1804,22 +2035,40 @@ struct AnnotationOverlay: View {
 
 struct ToolPalette: View {
     @ObservedObject var model: DICOMModel
+    @ObservedObject private var aiService = AIService.shared
 
     var body: some View {
         VStack(spacing: 2) {
             ForEach(ActiveTool.allCases) { tool in
+                if tool == .aiAnalyze {
+                    Divider()
+                        .padding(.vertical, 2)
+                        .padding(.horizontal, 4)
+                }
                 Button(action: { model.activeTool = tool }) {
-                    Image(systemName: tool.icon)
-                        .font(.system(size: 14))
-                        .frame(width: 32, height: 28)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(model.activeTool == tool ? Color.accentColor.opacity(0.3) : Color.clear)
-                        )
-                        .foregroundStyle(model.activeTool == tool ? .white : .secondary)
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: tool.icon)
+                            .font(.system(size: 14))
+                            .frame(width: 32, height: 28)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(model.activeTool == tool ? Color.accentColor.opacity(0.3) : Color.clear)
+                            )
+                            .foregroundStyle(model.activeTool == tool ? .white : .secondary)
+
+                        // AI server status dot
+                        if tool == .aiAnalyze {
+                            Circle()
+                                .fill(aiService.serverStatus.color)
+                                .frame(width: 6, height: 6)
+                                .offset(x: -2, y: 2)
+                        }
+                    }
                 }
                 .buttonStyle(.plain)
-                .help("\(tool.rawValue) (\(tool.shortcutHint))")
+                .help(tool == .aiAnalyze
+                    ? "\(tool.rawValue) (\(tool.shortcutHint)) - \(aiService.serverStatus.displayText)"
+                    : "\(tool.rawValue) (\(tool.shortcutHint))")
             }
         }
         .padding(4)

@@ -3726,6 +3726,173 @@ class DICOMModel: ObservableObject {
             self.updatePanelInfoStrings(panel)
         }
     }
+
+    // MARK: - AI Analysis
+
+    private let aiService = AIService.shared
+
+    /// Trigger AI analysis for the active panel's current image
+    func triggerAIAnalysis(for panel: PanelState) {
+        guard let image = panel.image else { return }
+        guard !panel.aiAnalysisInProgress else { return }
+        guard aiService.serverStatus.isReady else {
+            panel.aiError = "AI server is not running. Start it from the AI menu."
+            return
+        }
+
+        // Get modality and series description from current series
+        let modality: String
+        let seriesDesc: String
+        if panel.seriesIndex >= 0 && panel.seriesIndex < allSeries.count {
+            let series = allSeries[panel.seriesIndex]
+            seriesDesc = series.seriesDescription
+            // Extract modality from DICOM tags if available
+            if let modalityTag = panel.tags.first(where: { $0.tag == DicomTag(group: 0x0008, element: 0x0060) }) {
+                modality = modalityTag.stringValue ?? "Unknown"
+            } else {
+                modality = "Unknown"
+            }
+        } else {
+            modality = "Unknown"
+            seriesDesc = ""
+        }
+
+        panel.aiAnalysisInProgress = true
+        panel.aiError = nil
+
+        Task {
+            do {
+                let result = try await aiService.analyzeImage(
+                    image,
+                    modality: modality,
+                    seriesDescription: seriesDesc,
+                    windowCenter: panel.windowCenter,
+                    windowWidth: panel.windowWidth
+                )
+
+                await MainActor.run {
+                    // Convert AI bounding boxes to annotations
+                    for box in result.bounding_boxes {
+                        let rect = CGRect(x: box.x, y: box.y, width: box.width, height: box.height)
+                        let annotation = Annotation(
+                            type: .aiStructure(rect: rect, label: box.label, confidence: box.confidence),
+                            isAI: true
+                        )
+                        panel.annotations.append(annotation)
+                    }
+
+                    panel.aiDescription = result.description
+                    panel.aiAnalysisInProgress = false
+                    self.objectWillChange.send()
+                }
+            } catch {
+                await MainActor.run {
+                    panel.aiError = error.localizedDescription
+                    panel.aiAnalysisInProgress = false
+                    self.objectWillChange.send()
+                }
+            }
+        }
+    }
+
+    /// Trigger AI abnormality detection for the active panel
+    func triggerAIAbnormalityDetection(for panel: PanelState) {
+        guard let image = panel.image else { return }
+        guard !panel.aiAnalysisInProgress else { return }
+        guard aiService.serverStatus.isReady else {
+            panel.aiError = "AI server is not running. Start it from the AI menu."
+            return
+        }
+
+        let modality: String
+        if panel.seriesIndex >= 0 && panel.seriesIndex < allSeries.count,
+           let modalityTag = panel.tags.first(where: { $0.tag == DicomTag(group: 0x0008, element: 0x0060) }) {
+            modality = modalityTag.stringValue ?? "Unknown"
+        } else {
+            modality = "Unknown"
+        }
+
+        panel.aiAnalysisInProgress = true
+        panel.aiError = nil
+
+        Task {
+            do {
+                let result = try await aiService.detectAbnormalities(image, modality: modality)
+
+                await MainActor.run {
+                    for region in result.regions {
+                        let rect = CGRect(x: region.x, y: region.y, width: region.width, height: region.height)
+                        let annotation = Annotation(
+                            type: .aiFinding(rect: rect, description: region.label, severity: region.severity),
+                            isAI: true
+                        )
+                        panel.annotations.append(annotation)
+                    }
+                    panel.aiAnalysisInProgress = false
+                    self.objectWillChange.send()
+                }
+            } catch {
+                await MainActor.run {
+                    panel.aiError = error.localizedDescription
+                    panel.aiAnalysisInProgress = false
+                    self.objectWillChange.send()
+                }
+            }
+        }
+    }
+
+    /// Trigger AI ROI description for a selected region
+    func triggerAIDescribeROI(for panel: PanelState, roi: CGRect) {
+        guard let image = panel.image else { return }
+        guard !panel.aiAnalysisInProgress else { return }
+        guard aiService.serverStatus.isReady else {
+            panel.aiError = "AI server is not running. Start it from the AI menu."
+            return
+        }
+
+        // Normalize ROI to 0-1 coordinates
+        let imgW = max(1, panel.displayImageWidth)
+        let imgH = max(1, panel.displayImageHeight)
+        let normalizedROI = CGRect(
+            x: roi.origin.x / imgW,
+            y: roi.origin.y / imgH,
+            width: roi.width / imgW,
+            height: roi.height / imgH
+        )
+
+        let context: String
+        if panel.seriesIndex >= 0 && panel.seriesIndex < allSeries.count {
+            context = allSeries[panel.seriesIndex].seriesDescription
+        } else {
+            context = ""
+        }
+
+        panel.aiAnalysisInProgress = true
+        panel.aiError = nil
+
+        Task {
+            do {
+                let result = try await aiService.describeROI(image, roi: normalizedROI, context: context)
+
+                await MainActor.run {
+                    let annotation = Annotation(
+                        type: .aiROILabel(rect: normalizedROI, label: result.label,
+                                         description: result.description, confidence: result.confidence),
+                        isAI: true
+                    )
+                    panel.annotations.append(annotation)
+                    panel.aiAnalysisInProgress = false
+                    self.objectWillChange.send()
+                }
+            } catch {
+                await MainActor.run {
+                    panel.aiError = error.localizedDescription
+                    panel.aiAnalysisInProgress = false
+                    self.objectWillChange.send()
+                }
+            }
+        }
+    }
 }
 
 // Force update
