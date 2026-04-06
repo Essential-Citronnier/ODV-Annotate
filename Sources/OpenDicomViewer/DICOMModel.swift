@@ -2917,9 +2917,29 @@ class DICOMModel: ObservableObject {
             }
         case .mprSagittal, .mprCoronal, .mip:
             // Re-render MPR/MIP slice with updated W/L
-            // panel.pixelSpacing stores (row_spacing, col_spacing) per DICOM convention,
-            // but MPRSlice expects (horizontal=X, vertical=Y), so swap .0↔.1
-            if let data = panel.rawPixelData {
+            if panel.panelMode == .mip, panel.rawPixelData == nil,
+               let renderer = self.metalRenderer,
+               let seriesID = allSeries[safe: panel.seriesIndex]?.id,
+               let volume = volumeCache[seriesID] {
+                // GPU re-render with updated W/L (volume already on GPU)
+                let slabMM = Float(panel.mipSlabThickness) * Float(volume.spacingZ)
+                let center = SIMD3<Float>(Float(volume.width) / 2.0, Float(volume.height) / 2.0, Float(panel.mipSlabPosition))
+                if let newImg = renderer.renderProjection(
+                    volume: volume, mode: .mip,
+                    viewMatrix: matrix_identity_float4x4,
+                    outputWidth: volume.width, outputHeight: volume.height,
+                    windowWidth: Float(panel.windowWidth), windowCenter: Float(panel.windowCenter),
+                    slabThickness: slabMM, slabCenterVoxel: center, invert: panel.isInverted
+                ) {
+                    let physW = Double(volume.width) * volume.spacingX
+                    let physH = Double(volume.height) * volume.spacingY
+                    newImg.size = NSSize(width: CGFloat(volume.width), height: CGFloat(Double(volume.width) * physH / physW))
+                    panel.setDisplayImage(newImg)
+                }
+            } else if let data = panel.rawPixelData {
+                // CPU fallback: re-render from raw pixel data
+                // panel.pixelSpacing stores (row_spacing, col_spacing) per DICOM convention,
+                // but MPRSlice expects (horizontal=X, vertical=Y), so swap .0↔.1
                 let slice = MPRSlice(
                     pixelData: data, width: panel.imageWidth, height: panel.imageHeight,
                     planeOrigin: .zero,
@@ -3616,23 +3636,45 @@ class DICOMModel: ObservableObject {
             let wc = (panel.windowWidth > 0) ? panel.windowCenter : (panel.initialWindowWidth > 0 ? panel.initialWindowCenter : 500)
 
             BenchmarkLogger.shared.start("mip_render")
-            let engine = MPREngine(volume: volume)
-            guard let slice = engine.axialSlabProjection(
-                mode: mode,
-                slabCenter: panel.mipSlabPosition,
-                slabThickness: panel.mipSlabThickness
-            ) else {
-                panel.isLoading = false
-                panel.errorMessage = "Slab MIP rendering failed"
-                return
+
+            // Try GPU (Metal) path first, fall back to CPU
+            let slabThicknessMM = Float(panel.mipSlabThickness) * Float(volume.spacingZ)
+            let slabCenter = SIMD3<Float>(
+                Float(volume.width) / 2.0,
+                Float(volume.height) / 2.0,
+                Float(panel.mipSlabPosition)
+            )
+
+            var metalImage: NSImage? = nil
+            if let renderer = self.metalRenderer {
+                metalImage = renderer.renderProjection(
+                    volume: volume,
+                    mode: mode,
+                    viewMatrix: matrix_identity_float4x4,
+                    outputWidth: volume.width,
+                    outputHeight: volume.height,
+                    windowWidth: Float(ww),
+                    windowCenter: Float(wc),
+                    slabThickness: slabThicknessMM,
+                    slabCenterVoxel: slabCenter,
+                    invert: panel.isInverted
+                )
             }
 
-            if let image = MPREngine.renderSlice(slice, ww: ww, wc: wc, invert: panel.isInverted) {
-                BenchmarkLogger.shared.stop("mip_render", detail: "slab=\(panel.mipSlabThickness), mode=\(mode)")
+            if let image = metalImage {
+                // GPU path succeeded — apply aspect ratio correction
+                let physW = Double(volume.width) * volume.spacingX
+                let physH = Double(volume.height) * volume.spacingY
+                let aspectRatio = physH / physW
+                let displayW = CGFloat(volume.width)
+                let displayH = CGFloat(Double(volume.width) * aspectRatio)
+                image.size = NSSize(width: displayW, height: displayH)
+
+                BenchmarkLogger.shared.stop("mip_render", detail: "GPU slab=\(panel.mipSlabThickness), mode=\(mode)")
                 panel.setDisplayImage(image)
-                panel.imageWidth = slice.width
-                panel.imageHeight = slice.height
-                panel.rawPixelData = slice.pixelData
+                panel.imageWidth = volume.width
+                panel.imageHeight = volume.height
+                panel.rawPixelData = nil
                 panel.bitDepth = 16
                 panel.isSigned = true
                 panel.samples = 1
@@ -3646,7 +3688,38 @@ class DICOMModel: ObservableObject {
                     volume.colDirection.x, volume.colDirection.y, volume.colDirection.z
                 ]
             } else {
-                panel.errorMessage = "Slab MIP rendering failed"
+                // CPU fallback
+                let engine = MPREngine(volume: volume)
+                guard let slice = engine.axialSlabProjection(
+                    mode: mode,
+                    slabCenter: panel.mipSlabPosition,
+                    slabThickness: panel.mipSlabThickness
+                ) else {
+                    panel.isLoading = false
+                    panel.errorMessage = "Slab MIP rendering failed"
+                    return
+                }
+
+                if let image = MPREngine.renderSlice(slice, ww: ww, wc: wc, invert: panel.isInverted) {
+                    BenchmarkLogger.shared.stop("mip_render", detail: "CPU slab=\(panel.mipSlabThickness), mode=\(mode)")
+                    panel.setDisplayImage(image)
+                    panel.imageWidth = slice.width
+                    panel.imageHeight = slice.height
+                    panel.rawPixelData = slice.pixelData
+                    panel.bitDepth = 16
+                    panel.isSigned = true
+                    panel.samples = 1
+                    panel.pixelSpacing = (volume.spacingY, volume.spacingX)
+
+                    let origin = volume.voxelToWorld(SIMD3<Double>(0, 0, Double(panel.mipSlabPosition)))
+                    panel.imagePositionPatient = (origin.x, origin.y, origin.z)
+                    panel.imageOrientationPatient = [
+                        volume.rowDirection.x, volume.rowDirection.y, volume.rowDirection.z,
+                        volume.colDirection.x, volume.colDirection.y, volume.colDirection.z
+                    ]
+                } else {
+                    panel.errorMessage = "Slab MIP rendering failed"
+                }
             }
             panel.isLoading = false
             self.objectWillChange.send()

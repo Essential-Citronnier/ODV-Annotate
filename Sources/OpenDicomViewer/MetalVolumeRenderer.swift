@@ -118,6 +118,8 @@ final class MetalVolumeRenderer {
         windowWidth: Float,
         windowCenter: Float,
         slabThickness: Float,
+        slabCenterVoxel: SIMD3<Float> = SIMD3<Float>(0, 0, 0),
+        invert: Bool = false,
         thresholdMin: Float = -Float.greatestFiniteMagnitude,
         thresholdMax: Float = Float.greatestFiniteMagnitude
     ) -> NSImage? {
@@ -159,7 +161,9 @@ final class MetalVolumeRenderer {
             mode: Int32(modeToInt(mode)),
             thresholdMin: thresholdMin,
             thresholdMax: thresholdMax,
-            outputSize: SIMD2<Float>(Float(outputWidth), Float(outputHeight))
+            outputSize: SIMD2<Float>(Float(outputWidth), Float(outputHeight)),
+            slabCenterVoxel: slabCenterVoxel,
+            invert: invert ? 1 : 0
         )
         encoder.setBytes(&uniforms, length: MemoryLayout<MIPUniforms>.stride, index: 0)
 
@@ -235,6 +239,8 @@ struct MIPUniforms {
     var thresholdMin: Float
     var thresholdMax: Float
     var outputSize: SIMD2<Float>
+    var slabCenterVoxel: SIMD3<Float>
+    var invert: Int32
 }
 
 // MARK: - Metal Shader Source
@@ -256,6 +262,8 @@ extension MetalVolumeRenderer {
         float thresholdMin;
         float thresholdMax;
         float2 outputSize;
+        float3 slabCenterVoxel;
+        int invert;
     };
 
     // Ray-AABB intersection
@@ -318,9 +326,10 @@ extension MetalVolumeRenderer {
             float slabT = (mmPerT > 0) ? uniforms.slabThickness / mmPerT : uniforms.slabThickness;
 
             if (slabT < (tFar - tNear)) {
-                float mid = (tNear + tFar) * 0.5;
-                tNear = mid - slabT * 0.5;
-                tFar = mid + slabT * 0.5;
+                // Center slab at the specified voxel position instead of volume midpoint
+                float mid = dot(uniforms.slabCenterVoxel - rayOrigin, rayDir);
+                tNear = max(tNear, mid - slabT * 0.5);
+                tFar = min(tFar, mid + slabT * 0.5);
             }
         }
 
@@ -371,6 +380,9 @@ extension MetalVolumeRenderer {
         float windowBottom = uniforms.windowCenter - uniforms.windowWidth * 0.5;
         float normalized = (result - windowBottom) / uniforms.windowWidth;
         normalized = clamp(normalized, 0.0, 1.0);
+
+        // Apply inversion if requested
+        if (uniforms.invert != 0) normalized = 1.0 - normalized;
 
         output.write(float4(normalized, normalized, normalized, 1.0), gid);
     }
