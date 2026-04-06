@@ -6,7 +6,7 @@
 set -e
 
 APP_NAME="OpenDicomViewer"
-SIGNING_IDENTITY="Developer ID Application: Joon Heo (KCRAUWJ5MM)"
+SIGNING_IDENTITY="Developer ID Application: DAESEONG KIM (58S28HKMB9)"
 NOTARY_PROFILE="OpenDicomViewer"
 NOTARIZE=false
 
@@ -39,6 +39,12 @@ cp "AppIcon.icns" "${RESOURCES_DIR}/"
 
 echo "Copying DCMTK Dictionary..."
 cp "libs/dcmtk/share/dcmtk-3.6.8/dicom.dic" "${RESOURCES_DIR}/"
+
+echo "Copying mlx-server scripts..."
+mkdir -p "${RESOURCES_DIR}/mlx-server"
+cp "mlx-server/server.py" "${RESOURCES_DIR}/mlx-server/"
+cp "mlx-server/requirements.txt" "${RESOURCES_DIR}/mlx-server/"
+[ -f "mlx-server/README.md" ] && cp "mlx-server/README.md" "${RESOURCES_DIR}/mlx-server/" || true
 
 echo "Creating Info.plist..."
 cat > "${CONTENTS_DIR}/Info.plist" <<EOF

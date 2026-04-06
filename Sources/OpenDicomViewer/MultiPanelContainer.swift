@@ -1663,6 +1663,7 @@ struct OrientationLabelsOverlay: View {
 struct AIInspectorView: View {
     @ObservedObject var model: DICOMModel
     @ObservedObject private var aiService = AIService.shared
+    @ObservedObject private var aiServerManager = AIServerManager.shared
     @State private var dotCount: Int = 0
 
     private let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
@@ -1674,22 +1675,29 @@ struct AIInspectorView: View {
     }
 
     private var statusText: String {
-        if panel?.aiAnalysisInProgress == true {
-            return "Analyzing..."
+        switch aiServerManager.setupState {
+        case .notSetup:    return "Setup required"
+        case .installingDeps: return "Setting up…"
+        case .failed:      return "Setup failed"
+        default: break
         }
+        if panel?.aiAnalysisInProgress == true { return "Analyzing…" }
         return aiService.serverStatus.displayText
     }
 
     private var statusColor: Color {
-        if panel?.aiAnalysisInProgress == true {
-            return aiService.serverStatus.color  // keep green
+        switch aiServerManager.setupState {
+        case .notSetup:       return .orange
+        case .installingDeps: return .yellow
+        case .failed:         return .red
+        default: break
         }
         return aiService.serverStatus.color
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
+            // Header — always visible
             HStack {
                 HStack(spacing: 4) {
                     Image(systemName: "brain")
@@ -1698,7 +1706,6 @@ struct AIInspectorView: View {
                         .font(.headline)
                 }
                 Spacer()
-                // Server status
                 HStack(spacing: 4) {
                     Circle()
                         .fill(statusColor)
@@ -1711,8 +1718,8 @@ struct AIInspectorView: View {
             .padding(.horizontal)
             .padding(.vertical, 10)
 
-            // Analysis mode picker
-            if !aiService.availableModes.isEmpty {
+            // Mode picker — only when server is ready
+            if !aiService.availableModes.isEmpty && aiService.serverStatus.isReady {
                 Picker("Mode", selection: $aiService.selectedMode) {
                     ForEach(aiService.availableModes) { mode in
                         Text(mode.label).tag(mode.key)
@@ -1726,126 +1733,344 @@ struct AIInspectorView: View {
 
             Divider()
 
-            if let panel = panel {
-                if panel.aiAnalysisInProgress {
-                    // Loading state
-                    VStack(spacing: 12) {
-                        ProgressView()
-                            .tint(.yellow)
-                        Text("Analyzing" + String(repeating: ".", count: dotCount))
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .onReceive(timer) { _ in
-                                dotCount = (dotCount % 3) + 1
-                            }
+            // Main content — driven by setup state first, then server/panel state
+            Group {
+                switch aiServerManager.setupState {
+                case .notSetup:
+                    AISetupRequiredView()
+                case .installingDeps:
+                    AIInstallingView(log: aiServerManager.setupLog)
+                case .failed(let msg):
+                    AISetupFailedView(message: msg)
+                default:
+                    if !aiService.serverStatus.isReady && !aiServerManager.isServerRunning {
+                        AIServerStoppedView(isFirstRun: aiServerManager.isFirstRun)
+                    } else {
+                        panelContent
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let error = panel.aiError {
-                    // Error state
-                    VStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.title2)
-                            .foregroundStyle(.red)
-                        Text(error)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .multilineTextAlignment(.center)
+                }
+            }
 
-                        Button("Retry") {
+            Divider()
+
+            // Bottom action bar — only shown when server is active
+            if aiService.serverStatus.isReady || aiServerManager.isServerRunning {
+                HStack {
+                    Button(action: {
+                        if let panel = panel {
                             panel.clearAIAnnotations()
                             model.triggerAIAnalysis(for: panel)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                    }) {
+                        Label("Reanalyze", systemImage: "arrow.clockwise")
+                            .font(.caption)
                     }
-                    .padding()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if aiAnnotations.isEmpty && panel.aiDescription == nil {
-                    // Empty state
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(panel?.image == nil || panel?.aiAnalysisInProgress == true || !aiService.serverStatus.isReady)
+                    .help("⌘G")
+
+                    Spacer()
+
+                    Button(action: {
+                        panel?.clearAIAnnotations()
+                        model.objectWillChange.send()
+                    }) {
+                        Label("Clear", systemImage: "trash")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(aiAnnotations.isEmpty && panel?.aiDescription == nil)
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+            }
+        }
+    }
+
+    // MARK: - Panel Content (when server is running)
+
+    @ViewBuilder
+    private var panelContent: some View {
+        if let panel = panel {
+            if panel.aiAnalysisInProgress {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .tint(.yellow)
+                    Text("Analyzing" + String(repeating: ".", count: dotCount))
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .onReceive(timer) { _ in dotCount = (dotCount % 3) + 1 }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let error = panel.aiError {
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.title2)
+                        .foregroundStyle(.red)
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                    Button("Retry") {
+                        panel.clearAIAnnotations()
+                        model.triggerAIAnalysis(for: panel)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if aiAnnotations.isEmpty && panel.aiDescription == nil {
+                // Server is starting/loading — may be downloading model on first run
+                if aiService.serverStatus == .starting || aiServerManager.isFirstRun {
+                    AIModelLoadingView()
+                } else {
                     ContentUnavailableView {
                         Label("No Analysis", systemImage: "brain")
                     } description: {
                         Text("Press G or ⌘G to analyze the current image")
                     }
-                } else {
-                    // Results
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 8) {
-                            // General description
-                            if let desc = panel.aiDescription, !desc.isEmpty {
-                                Text(desc)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.white)
-                                    .padding(8)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(Color.white.opacity(0.05))
-                                    .cornerRadius(6)
-                            }
-
-                            // Per-annotation list
-                            if !aiAnnotations.isEmpty {
-                                Text("Findings")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .padding(.top, 4)
-
-                                ForEach(aiAnnotations) { annotation in
-                                    AIAnnotationRow(
-                                        annotation: annotation,
-                                        isSelected: panel.selectedAnnotationID == annotation.id,
-                                        onTap: {
-                                            if panel.selectedAnnotationID == annotation.id {
-                                                panel.selectedAnnotationID = nil
-                                            } else {
-                                                panel.selectedAnnotationID = annotation.id
-                                            }
-                                            model.objectWillChange.send()
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                        .padding()
-                    }
                 }
             } else {
-                ContentUnavailableView("No Panel", systemImage: "rectangle.slash")
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let desc = panel.aiDescription, !desc.isEmpty {
+                            Text(desc)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.white)
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.white.opacity(0.05))
+                                .cornerRadius(6)
+                        }
+                        if !aiAnnotations.isEmpty {
+                            Text("Findings")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 4)
+                            ForEach(aiAnnotations) { annotation in
+                                AIAnnotationRow(
+                                    annotation: annotation,
+                                    isSelected: panel.selectedAnnotationID == annotation.id,
+                                    onTap: {
+                                        if panel.selectedAnnotationID == annotation.id {
+                                            panel.selectedAnnotationID = nil
+                                        } else {
+                                            panel.selectedAnnotationID = annotation.id
+                                        }
+                                        model.objectWillChange.send()
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    .padding()
+                }
+            }
+        } else {
+            ContentUnavailableView("No Panel", systemImage: "rectangle.slash")
+        }
+    }
+}
+
+// MARK: - Setup State Sub-Views
+
+/// Shown when the Python venv has never been created
+private struct AISetupRequiredView: View {
+    @ObservedObject private var manager = AIServerManager.shared
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "brain.head.profile")
+                .font(.system(size: 36))
+                .foregroundStyle(.yellow.opacity(0.8))
+
+            VStack(spacing: 6) {
+                Text("AI Setup Required")
+                    .font(.headline)
+                Text("The on-device AI engine needs a Python environment and model weights (~4.5 GB).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
 
-            Divider()
+            VStack(spacing: 4) {
+                Label("Requires Python 3.10+ (python.org or Homebrew)", systemImage: "checkmark.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Label("~500 MB Python packages (mlx, mlx-vlm…)", systemImage: "checkmark.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Label("~4.5 GB model download on first launch", systemImage: "checkmark.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
 
-            // Bottom actions
-            HStack {
-                Button(action: {
-                    if let panel = panel {
-                        panel.clearAIAnnotations()
-                        model.triggerAIAnalysis(for: panel)
-                    }
-                }) {
-                    Label("Reanalyze", systemImage: "arrow.clockwise")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(panel?.image == nil || panel?.aiAnalysisInProgress == true || !aiService.serverStatus.isReady)
-                .help("⌘G")
+            Button(action: { manager.setupEnvironment() }) {
+                Label("Set Up AI Engine", systemImage: "arrow.down.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .tint(.yellow)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
 
-                Spacer()
+/// Shown while pip install is running
+private struct AIInstallingView: View {
+    let log: String
+    @State private var scrollProxy: ScrollViewProxy? = nil
 
-                Button(action: {
-                    panel?.clearAIAnnotations()
-                    model.objectWillChange.send()
-                }) {
-                    Label("Clear", systemImage: "trash")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(aiAnnotations.isEmpty && panel?.aiDescription == nil)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.yellow)
+                Text("Installing AI dependencies…")
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
             }
             .padding(.horizontal)
-            .padding(.vertical, 8)
+            .padding(.top, 12)
+
+            Text("This runs once. Do not quit the app.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(log.isEmpty ? " " : log)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.green.opacity(0.85))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .id("logBottom")
+                }
+                .background(Color.black.opacity(0.4))
+                .cornerRadius(6)
+                .padding(.horizontal)
+                .frame(maxHeight: .infinity)
+                .onChange(of: log) {
+                    withAnimation { proxy.scrollTo("logBottom", anchor: .bottom) }
+                }
+            }
+            .padding(.bottom, 12)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Shown when setup failed
+private struct AISetupFailedView: View {
+    let message: String
+    @ObservedObject private var manager = AIServerManager.shared
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 30))
+                .foregroundStyle(.red)
+
+            Text("Setup Failed")
+                .font(.headline)
+
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 8)
+
+            Button(action: { manager.retrySetup() }) {
+                Label("Retry Setup", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Shown when the venv is ready but the server process is not running
+private struct AIServerStoppedView: View {
+    let isFirstRun: Bool
+    @ObservedObject private var manager = AIServerManager.shared
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "bolt.slash")
+                .font(.system(size: 30))
+                .foregroundStyle(.secondary)
+
+            Text("AI Server Offline")
+                .font(.headline)
+
+            if isFirstRun {
+                Text("First launch: the model will be downloaded from Hugging Face (~4.5 GB). Keep the app open while it downloads.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 8)
+            } else {
+                Text("Start the server to enable AI-assisted analysis.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            Button(action: { manager.startServer() }) {
+                Label("Start AI Server", systemImage: "play.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .tint(.yellow)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Shown while the server process is starting / loading the model
+private struct AIModelLoadingView: View {
+    @ObservedObject private var manager = AIServerManager.shared
+    @State private var dotCount = 0
+    private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .tint(.yellow)
+                .scaleEffect(1.2)
+
+            VStack(spacing: 6) {
+                Text("Loading AI Model" + String(repeating: ".", count: dotCount))
+                    .font(.subheadline)
+                    .onReceive(timer) { _ in dotCount = (dotCount % 3) + 1 }
+
+                if manager.isFirstRun {
+                    Text("First launch: downloading Gemma 4 E4B (~4.5 GB).\nThis may take 10–30 minutes.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                } else {
+                    Text("Model is loading into memory…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

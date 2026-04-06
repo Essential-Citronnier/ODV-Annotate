@@ -38,3 +38,14 @@ DerivedData/
 
 # Sample data
 *.dcm
+
+
+# workspace
+temp.md
+
+# certificate
+*.p12
+*.cer
+
+# MLX server runtime
+mlx-server/.server.pid
