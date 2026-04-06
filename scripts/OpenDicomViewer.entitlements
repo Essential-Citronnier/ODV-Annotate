@@ -3,6 +3,14 @@
 <plist version="1.0">
 <dict>
 
+    <!-- NOTE: App Sandbox (com.apple.security.app-sandbox) is intentionally NOT enabled.
+         The app creates a Python venv in ~/Library/Application Support, runs pip install,
+         and downloads models from HuggingFace — all of which require unrestricted file
+         system and process execution access that App Sandbox does not permit.
+         This means: Mac App Store distribution is not possible with the current architecture.
+         TODO: For future App Store / MDM compatibility, consider pre-bundling all Python
+         dependencies and the model inside the app bundle to eliminate runtime downloads. -->
+
     <!-- Allow the app to access files selected by the user -->
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>

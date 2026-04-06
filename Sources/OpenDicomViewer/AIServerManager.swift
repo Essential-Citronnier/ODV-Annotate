@@ -185,12 +185,55 @@ class AIServerManager: ObservableObject {
         return nil
     }
 
+    // MARK: - Pre-flight Checks
+
+    /// MLX requires Apple Silicon. Returns a user-friendly error message on Intel Macs.
+    private func checkArchitecture() -> String? {
+        #if !arch(arm64)
+        return "This app requires Apple Silicon (M1 or later).\nMLX AI engine is not compatible with Intel Macs."
+        #else
+        return nil
+        #endif
+    }
+
+    /// Check available disk space. Returns error message if below the required threshold.
+    /// First-run needs ~5 GB: venv+packages (~500 MB) + model (~4.5 GB).
+    private static let requiredDiskSpaceBytes: Int64 = 5_000_000_000  // 5 GB
+
+    private func checkDiskSpace() -> String? {
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+        do {
+            let values = try homeDir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            if let available = values.volumeAvailableCapacityForImportantUsage,
+               available < Self.requiredDiskSpaceBytes {
+                let availableGB = String(format: "%.1f", Double(available) / 1_000_000_000)
+                return "Disk space insufficient: \(availableGB) GB available, ~5 GB required.\nFree up space and try again.\n(Python packages ~500 MB + AI model ~4.5 GB)"
+            }
+        } catch {}
+        return nil
+    }
+
     // MARK: - Setup Environment
 
     /// Creates the Python venv and installs all requirements.
     /// Automatically calls `startServer()` on success.
     func setupEnvironment() {
         guard setupState == .notSetup || setupState == .unknown else { return }
+
+        // Architecture check — fail fast on Intel Macs
+        if let archError = checkArchitecture() {
+            setupState = .failed(archError)
+            appendSetupLog("ERROR: \(archError)\n")
+            return
+        }
+
+        // Disk space check — fail fast if insufficient
+        if let diskError = checkDiskSpace() {
+            setupState = .failed(diskError)
+            appendSetupLog("ERROR: \(diskError)\n")
+            return
+        }
+
         setupState = .installingDeps
         setupLog = ""
         isFirstRun = true
@@ -325,6 +368,13 @@ class AIServerManager: ObservableObject {
 
     /// Public entry point. Runs setup first if the venv is missing.
     func startServer() {
+        // Fail fast on Intel Macs
+        if let archError = checkArchitecture() {
+            setupState = .failed(archError)
+            aiService.serverStatus = .error("Requires Apple Silicon")
+            return
+        }
+
         if setupState == .unknown { checkSetupState() }
 
         switch setupState {
