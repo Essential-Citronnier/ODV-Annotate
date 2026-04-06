@@ -1,70 +1,103 @@
 <p align="center">
-  <img src="docs/icon.png" alt="OpenDicomViewer" width="128">
+  <img src="docs/icon.png" alt="OpenDicomViewer-Annotate" width="128">
 </p>
 
-<h1 align="center">OpenDicomViewer</h1>
+<h1 align="center">OpenDicomViewer-Annotate</h1>
 
 <p align="center">
-  <strong>A free, native macOS DICOM viewer — designed not just for use, but for adaptation.</strong><br>
-  In the era of AI, everyone can customize open-source software to meet their own needs.<br>
-  Fork it, modify it with an AI assistant, and make it yours.
+  <strong>AI-powered DICOM annotation on your Mac — fully local, fully private.</strong><br>
+  Built on <a href="https://github.com/jnheo-md/open-dicom-viewer">OpenDicomViewer</a>, enhanced with <strong>Gemma 4 E4B</strong> running on Apple Silicon via MLX.<br>
+  No cloud. No uploads. Your medical images never leave your machine.
 </p>
 
 <p align="center">
-  <a href="https://jnheo-md.github.io/open-dicom-viewer">Website</a> &middot;
-  <a href="https://github.com/jnheo-md/open-dicom-viewer/releases/latest/download/OpenDicomViewer.dmg">Download DMG</a> &middot;
-  <a href="https://github.com/jnheo-md/open-dicom-viewer/releases">Releases</a>
+  <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v1.2.1/OpenDicomViewer-Annotate.dmg">Download DMG</a> &middot;
+  <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v1.2.1">Releases</a>
 </p>
 
-![Screenshot](screenshot.png)
+![Screenshot](screenshot1.png)
 
-## Why OpenDicomViewer?
+![AI Annotation](screenshot2.png)
 
-- **Free and open source** — MIT licensed, no restrictions on use or modification
-- **Native macOS** — Built with SwiftUI and Metal, no Electron or web overhead
-- **Fast** — Instant first-image display with background loading; images appear before the study finishes scanning
-- **Multi-panel layouts** — Side-by-side, stacked, and quad views with synchronized scrolling and zoom
-- **Clinical measurement tools** — Ruler, angle, and ROI statistics with real-time dashed preview lines
-- **AI-powered annotation** — On-device DICOM analysis via Gemma 4 E4B running locally on Apple Silicon (MLX)
-- **Designed for customization** — Clean, readable architecture that's easy to fork and adapt, including with AI coding assistants
+## What is OpenDicomViewer-Annotate?
 
-## Features
+OpenDicomViewer-Annotate extends the open-source [OpenDicomViewer](https://github.com/jnheo-md/open-dicom-viewer) with **on-device AI annotation** powered by Google's **Gemma 4 E4B** vision-language model. The AI runs entirely on your Mac through [MLX](https://github.com/ml-explore/mlx) — Apple's machine learning framework optimized for Apple Silicon.
 
-- **Fast DICOM Parsing** — Pure-Swift parser with incremental scanning; first image displays instantly while the rest loads in the background
-- **Multi-Panel Layouts** — Single, side-by-side, stacked, and quad arrangements with drag-and-drop series assignment
-- **MPR & Volume Rendering** — One-click sagittal, coronal, and MIP views with adjustable slab thickness via Metal compute shaders
-- **Window/Level** — Right-click drag, W/L tool, auto W/L, and ROI-based W/L with a live histogram overlay
+This means you can analyze DICOM images, detect anatomical structures, identify potential abnormalities, and get natural language descriptions of regions of interest — all without sending a single byte to the cloud.
+
+## Key Features
+
+### AI Annotation with Gemma 4 E4B
+
+| Feature | Description |
+|---------|-------------|
+| **Analyze Image** | Full image analysis with anatomical structure detection and bounding boxes |
+| **Describe ROI** | Select any region and get a natural language description from the AI |
+| **Detect Abnormalities** | Highlight potential abnormalities with severity ratings and confidence scores |
+
+**Four analysis modes** to fit your workflow:
+
+- **Clinical** — Only clinically significant findings (max 3 boxes)
+- **Detailed Anatomy** — All visible anatomical structures (min 3 boxes)
+- **Abnormality Only** — Pathological findings only (max 2 boxes)
+- **Educational** — Labeled anatomy for learning (3-5 structures)
+
+AI annotations display as color-coded bounding boxes overlaid on DICOM images with confidence badges. Toggle visibility or clear them per panel at any time.
+
+### Full-Featured DICOM Viewer
+
+All the capabilities of OpenDicomViewer are included:
+
+- **Fast DICOM Parsing** — Pure-Swift parser with incremental scanning; first image displays instantly
+- **Multi-Panel Layouts** — Single, side-by-side, stacked, and quad arrangements with drag-and-drop
+- **MPR & Volume Rendering** — Sagittal, coronal, and MIP views via Metal compute shaders
+- **Window/Level** — Right-click drag, auto W/L, ROI-based W/L with live histogram
 - **Measurement Tools** — Ruler, angle, and ROI statistics with real-time preview lines
-- **Synchronized Scrolling & Zoom** — Link panels to scroll to the same anatomical position using z-location matching
-- **Cross-Reference Lines** — Overlay showing where other panels' slice planes intersect the current view
+- **Synchronized Scrolling & Zoom** — Link panels by anatomical z-location matching
+- **Cross-Reference Lines** — Slice intersection overlays across panels
 - **DICOM Tag Inspector** — Browse all metadata tags for the active image
-- **Cursor Readout** — Real-time HU value and coordinates under the cursor
-- **Scrollbar Thumbnails** — Hover the scrollbar to preview any slice
 - **JPEG 2000 Support** — Compressed transfer syntaxes via DCMTK + OpenJPEG
-- **AI Annotation (Gemma 4 E4B)** — Local on-device AI analysis powered by MLX. Analyze full images, describe ROI regions, and detect abnormalities — all running privately on your Mac with no cloud dependency
 
 ## Quick Start
 
-### For Users
+### Download & Run
 
-Download the latest `.dmg` from [Releases](../../releases), open it, and drag OpenDicomViewer to your Applications folder.
+Download the latest `.dmg` from [Releases](../../releases), open it, and drag **OpenDicomViewer-Annotate** to your Applications folder.
 
-> The app is signed and notarized — it will open without any Gatekeeper warnings.
+> The app is signed and notarized — no Gatekeeper warnings.
+
+### First-Run AI Setup
+
+On first launch, the app automatically:
+
+1. Extracts the bundled Python 3.11 runtime
+2. Creates an isolated virtual environment
+3. Installs MLX and dependencies
+4. Downloads the Gemma 4 E4B model (~4.5GB, one-time)
+
+After setup, the AI server starts on `http://127.0.0.1:8741`. You can also control it from the **AI** menu.
+
+### System Requirements
+
+- **Apple Silicon Mac** (M1 Pro or better recommended)
+- **macOS 14.0+** (Sonoma)
+- **16GB+ RAM** recommended (model uses ~4-5GB)
+- **5GB+ free disk space** for the AI model
+
+> No Python installation required — a standalone Python runtime is bundled with the app.
 
 ### For Developers
 
-**Prerequisites:** macOS 14.0+ (Sonoma), Xcode 15+ (or Swift 5.9+ toolchain), Apple Silicon Mac (arm64).
-
 ```bash
 # Clone and build
-git clone https://github.com/jnheo-md/open-dicom-viewer.git
-cd open-dicom-viewer
+git clone https://github.com/Essential-Citronnier/ODV-Annotate.git
+cd ODV-Annotate
 
 # Build release and package as .app bundle
 ./scripts/package_app.sh
 
 # Install (optional)
-cp -r OpenDicomViewer.app /Applications/
+cp -r OpenDicomViewer-Annotate.app /Applications/
 ```
 
 To run the test suite:
@@ -73,46 +106,34 @@ To run the test suite:
 swift test
 ```
 
-Pre-built static libraries for DCMTK and OpenJPEG are included in `libs/`. To rebuild them from source (e.g., for a different architecture):
+To rebuild native dependencies from source:
 
 ```bash
 ./scripts/setup_native_deps.sh
 ```
 
-## AI Annotation
+## How the AI Works
 
-OpenDicomViewer includes on-device AI annotation powered by **Gemma 4 E4B** (4-bit quantized) running locally on Apple Silicon via [MLX](https://github.com/ml-explore/mlx). No data leaves your machine.
+OpenDicomViewer-Annotate runs **Gemma 4 E4B (4-bit quantized)** locally through a FastAPI server backed by [mlx-vlm](https://github.com/Blaizzy/mlx-vlm). The architecture is straightforward:
 
-### Requirements
-
-- Apple Silicon Mac (M1 Pro or better recommended)
-- Python 3.10+
-- 16GB+ RAM recommended (model uses ~4–5GB)
-
-### Setup
-
-```bash
-cd mlx-server
-./launch.sh
+```
+┌──────────────────────┐       HTTP (localhost)       ┌──────────────────────┐
+│  SwiftUI Application │  ◄──────────────────────►    │   MLX Server (py)    │
+│                      │     JSON + Base64 images     │                      │
+│  • AIService.swift   │                              │  • Gemma 4 E4B       │
+│  • AIServerManager   │                              │  • 4-bit quantized   │
+│  • Annotation UI     │                              │  • Apple Silicon GPU  │
+└──────────────────────┘                              └──────────────────────┘
 ```
 
-First run automatically creates a virtual environment, installs dependencies, downloads the model (~4.5GB, one-time), and starts the server on `http://127.0.0.1:8741`.
-
-You can also start/stop the server from the **AI** menu inside the app.
-
-### AI Features
-
-| Feature | Description |
-|---------|-------------|
-| **Analyze Image** | Full image analysis with structure detection and bounding boxes |
-| **Describe ROI** | Natural language description of a user-selected region of interest |
-| **Detect Abnormalities** | Highlight potential abnormalities with severity and confidence |
+The Swift app manages the server lifecycle — starting, monitoring, and stopping it automatically. Images are encoded as base64 PNG and sent over localhost. The model returns structured JSON with bounding box coordinates and descriptions.
 
 ### API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Server status and model info |
+| `/health` | GET | Server status, model info, memory usage |
+| `/modes` | GET | Available analysis modes |
 | `/analyze` | POST | Full image analysis with structure detection |
 | `/describe-roi` | POST | Describe a selected region of interest |
 | `/detect-abnormalities` | POST | Detect potential abnormalities |
@@ -138,7 +159,6 @@ You can also start/stop the server from the **AI** menu inside the app.
 | Key | Action |
 |-----|--------|
 | `1` / `2` / `3` / `4` | Single / side-by-side / stacked / quad |
-| `Cmd+1` - `Cmd+4` | Layout switching (menu bar) |
 | `Cmd+Shift+M` | MPR layout |
 
 ### Tools
@@ -154,6 +174,8 @@ You can also start/stop the server from the **AI** menu inside the app.
 | `D` | Ruler (distance) |
 | `N` | Angle |
 | `E` | Eraser |
+| `G` | AI Analyze |
+| `Cmd+Shift+G` | Analyze Image (menu) |
 
 ### Display
 
@@ -164,8 +186,8 @@ You can also start/stop the server from the **AI** menu inside the app.
 | `F` | Fit to window |
 | `R` | Reset view (zoom, pan, W/L) |
 | `H` | Flip horizontal |
-| `]` or `.` | Rotate clockwise 90° |
-| `[` or `,` | Rotate counter-clockwise 90° |
+| `]` or `.` | Rotate clockwise 90 |
+| `[` or `,` | Rotate counter-clockwise 90 |
 
 ### Overlays & Multi-Panel
 
@@ -174,8 +196,6 @@ You can also start/stop the server from the **AI** menu inside the app.
 | `T` | Toggle DICOM tag inspector |
 | `X` | Toggle cross-reference lines |
 | `L` | Toggle synchronized scrolling & zoom |
-| `Shift` (hold) | Show group selection overlay |
-| `Escape` | Clear group selection |
 
 ### Mouse Actions
 
@@ -186,7 +206,6 @@ You can also start/stop the server from the **AI** menu inside the app.
 | Scroll wheel | Navigate slices |
 | Option/Ctrl + Left-drag | Pan (any tool) |
 | Option/Ctrl + Scroll | Zoom in/out |
-| Shift (hold) + Click | Toggle panel group selection |
 | Double-click | Toggle fullscreen panel |
 | Drag from sidebar | Assign series to panel |
 | Drag from Finder | Open DICOM file/folder |
@@ -195,70 +214,36 @@ You can also start/stop the server from the **AI** menu inside the app.
 
 ```
 Sources/
-├── OpenDicomViewer/          # Main application target
-│   ├── App.swift                 # App entry point, menu bar commands
-│   ├── ContentView.swift         # Root view: sidebar + detail split
-│   ├── DICOMModel.swift          # Core model: loading, caching, panel management
-│   ├── SimpleDICOM.swift         # Pure-Swift DICOM parser (no DCMTK dependency)
-│   ├── MultiPanelContainer.swift # Multi-panel grid, per-panel overlays & gestures
-│   ├── PanelState.swift          # Per-panel state: series, W/L, zoom, metadata
-│   ├── AIService.swift           # HTTP client for local MLX AI server
-│   ├── AIServerManager.swift     # MLX server process lifecycle management
-│   ├── LayoutToolbar.swift       # Floating layout/link/crossref toolbar
-│   ├── CrossReferenceOverlay.swift # Slice intersection lines between panels
-│   ├── MPREngine.swift           # CPU-based multi-planar reconstruction
-│   ├── MetalVolumeRenderer.swift # GPU MIP/MinIP/Average via Metal compute
-│   ├── VolumeData.swift          # 3D voxel buffer with affine transforms
-│   ├── VolumeToolbar.swift       # MPR/MIP mode controls per panel
-│   ├── HelpView.swift            # In-app help viewer
-│   ├── TagView.swift             # DICOM tag list view
-│   ├── Extensions.swift          # Collection safe-subscript helper
-│   └── WindowAccessor.swift      # NSWindow customization (hidden titlebar)
-├── DCMTKWrapper/             # Objective-C++ bridge to DCMTK
-│   ├── DCMTKHelper.mm            # DCMTK image decoding + JPEG2000 fallback
-│   └── include/
-│       └── DCMTKHelper.h         # Public C/ObjC interface
-└── mlx-server/               # Local AI inference server
-    ├── server.py                 # FastAPI server with Gemma 4 E4B via MLX
-    ├── launch.sh                 # Setup & launch script
-    └── requirements.txt          # Python dependencies
+├── OpenDicomViewer/              # Main application target
+│   ├── App.swift                     # App entry point, menu bar + AI commands
+│   ├── ContentView.swift             # Root view: sidebar + detail split
+│   ├── DICOMModel.swift              # Core model: loading, caching, AI triggers
+│   ├── SimpleDICOM.swift             # Pure-Swift DICOM parser
+│   ├── MultiPanelContainer.swift     # Multi-panel grid, overlays, AI annotation UI
+│   ├── PanelState.swift              # Per-panel state incl. AI annotations
+│   ├── AIService.swift               # HTTP client for Gemma 4 MLX server
+│   ├── AIServerManager.swift         # MLX server lifecycle & first-run setup
+│   ├── LayoutToolbar.swift           # Floating layout/link toolbar
+│   ├── CrossReferenceOverlay.swift   # Slice intersection lines
+│   ├── MPREngine.swift               # CPU-based multi-planar reconstruction
+│   ├── MetalVolumeRenderer.swift     # GPU MIP/MinIP/Average via Metal
+│   ├── VolumeData.swift              # 3D voxel buffer with affine transforms
+│   ├── VolumeToolbar.swift           # MPR/MIP mode controls
+│   ├── HelpView.swift                # In-app help viewer
+│   ├── TagView.swift                 # DICOM tag list view
+│   └── Extensions.swift              # Collection helpers
+├── DCMTKWrapper/                 # Objective-C++ bridge to DCMTK
+│   ├── DCMTKHelper.mm               # DCMTK + JPEG2000 decoding
+│   └── include/DCMTKHelper.h
+└── mlx-server/                   # Local Gemma 4 inference server
+    ├── server.py                     # FastAPI + mlx-vlm inference
+    ├── launch.sh                     # Setup & launch script
+    └── requirements.txt              # Python dependencies
 ```
 
-### Key Design Decisions
+## Acknowledgments
 
-- **Dual Parser Strategy**: A fast pure-Swift parser (`SimpleDICOM.swift`) handles tag reading and metadata extraction during directory scanning, while the DCMTK wrapper handles pixel data decoding for complex transfer syntaxes.
-- **Panel-Based Architecture**: Each panel (`PanelState`) owns its own image, W/L, zoom, and metadata state. The model (`DICOMModel`) manages shared resources (series data, caches, queues) and coordinates between panels.
-- **Spatial Synchronization**: Linked scrolling uses physical z-location matching rather than proportional index matching, so panels showing different series display the same anatomical position.
-- **NSView for Interaction**: Mouse gesture handling uses `NSViewRepresentable` wrapping a custom `NSView` subclass for reliable AppKit-level event handling (W/L drag, zoom, pan, annotations).
-
-## Customization Guide
-
-OpenDicomViewer is designed to be straightforward to customize — whether you're adding features manually or working with an AI coding assistant. Here's where to look for common changes:
-
-| What you want to do | Where to look |
-|---|---|
-| **Add a new tool** | Define it in the `ActiveTool` enum in `PanelState.swift`, add mouse handling in `MultiPanelContainer.swift`, and add a button to the tool palette (also in `MultiPanelContainer.swift`) |
-| **Add a keyboard shortcut** | Add an `.onKeyPress` handler in `ContentView.swift` |
-| **Modify overlays** | Edit `AnnotationOverlay` or `InfoOverlay` in `MultiPanelContainer.swift` |
-| **Change panel behavior** | Per-panel state lives in `PanelState.swift`; cross-panel coordination is in `DICOMModel.swift` |
-| **Add a menu bar command** | Add commands in `App.swift` |
-| **Modify cross-reference lines** | Edit `CrossReferenceOverlay.swift` |
-| **Add a new AI endpoint** | Add the endpoint in `mlx-server/server.py`, then add a client method in `AIService.swift` |
-| **Change AI model** | Update `MODEL_ID` in `mlx-server/server.py` and adjust prompt templates |
-
-The codebase uses clear naming conventions and minimal abstraction layers, making it well-suited for AI-assisted development. Fork the project, describe what you want to change, and point your AI assistant at the relevant files above.
-
-## Contributing
-
-Contributions are welcome! Whether it's a bug fix, new feature, or documentation improvement — all PRs are appreciated.
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Commit your changes (`git commit -am 'Add my feature'`)
-4. Push to the branch (`git push origin feature/my-feature`)
-5. Open a Pull Request
-
-If you find a bug or have a feature request, please [open an issue](../../issues).
+This project is built on top of [OpenDicomViewer](https://github.com/jnheo-md/open-dicom-viewer) by [jnheo-md](https://github.com/jnheo-md). The original viewer provides the foundation — fast DICOM parsing, multi-panel layouts, MPR, measurement tools, and more. OpenDicomViewer-Annotate adds the AI annotation layer on top of this excellent base.
 
 ## License
 
@@ -273,6 +258,7 @@ DCMTK is licensed under the BSD license. OpenJPEG is licensed under BSD-2-Clause
 | [DCMTK](https://dicom.offis.de/dcmtk.php.en) | 3.6.8 | DICOM image decoding, JPEG/JPEG-LS decompression | BSD |
 | [OpenJPEG](https://www.openjpeg.org/) | 2.5.0 | JPEG 2000 decompression | BSD-2-Clause |
 | [MLX](https://github.com/ml-explore/mlx) | latest | Apple Silicon ML framework for local inference | MIT |
+| [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) | latest | Vision-language model inference on MLX | MIT |
 | [Gemma 4 E4B](https://huggingface.co/mlx-community/gemma-4-E4B-it-4bit) | 4-bit | Vision-language model for DICOM annotation | Gemma |
 
-DCMTK and OpenJPEG are included as pre-built static libraries (`libs/`) and linked at compile time via Swift Package Manager. MLX and Gemma are installed automatically by `mlx-server/launch.sh` into a local Python virtual environment.
+DCMTK and OpenJPEG are included as pre-built static libraries (`libs/`). Python 3.11, MLX, and Gemma are bundled with or automatically downloaded by the app.

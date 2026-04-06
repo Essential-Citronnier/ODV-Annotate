@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OpenDicomViewer — Free Native macOS DICOM Viewer</title>
-  <meta name="description" content="A free, native macOS DICOM viewer built with SwiftUI and Metal. Fast, lightweight, and fully customizable. Open source under MIT license.">
+  <title>OpenDicomViewer-Annotate — AI-Powered DICOM Annotation on Mac</title>
+  <meta name="description" content="Free, open-source DICOM viewer with on-device AI annotation powered by Gemma 4. Runs locally on Apple Silicon via MLX. No cloud, no uploads.">
   <meta name="theme-color" content="#0a0a0f">
-  <meta property="og:title" content="OpenDicomViewer">
-  <meta property="og:description" content="A free, native macOS DICOM viewer — fast, lightweight, and fully customizable.">
+  <meta property="og:title" content="OpenDicomViewer-Annotate">
+  <meta property="og:description" content="AI-powered DICOM annotation on your Mac — fully local, fully private. Powered by Gemma 4 E4B on Apple Silicon.">
   <meta property="og:type" content="website">
   <link rel="icon" type="image/png" href="icon.png">
   <style>
@@ -226,7 +226,7 @@
       color: var(--text-secondary);
       max-width: 540px;
       margin: 0 auto 44px;
-      line-height: 1.6;
+      line-height: 1.75;
       font-weight: 400;
       letter-spacing: -0.01em;
       position: relative;
@@ -596,6 +596,26 @@
       background: var(--bg-card-hover);
     }
 
+    .shortcut.shortcut-ai {
+      background: rgba(6, 182, 212, 0.08);
+      border-color: rgba(6, 182, 212, 0.25);
+    }
+
+    .shortcut.shortcut-ai:hover {
+      background: rgba(6, 182, 212, 0.14);
+    }
+
+    .shortcut.shortcut-ai .shortcut-label {
+      color: #06b6d4;
+      font-weight: 600;
+    }
+
+    .shortcut.shortcut-ai kbd {
+      background: rgba(6, 182, 212, 0.15);
+      border-color: rgba(6, 182, 212, 0.3);
+      color: #06b6d4;
+    }
+
     .shortcut-label {
       font-size: 13px;
       color: var(--text-secondary);
@@ -701,6 +721,147 @@
     pre .comment { color: var(--text-tertiary); }
     pre .cmd { color: var(--accent-hover); }
 
+    /* ---- AI SECTION ---- */
+    #ai {
+      background: linear-gradient(180deg, rgba(6, 182, 212, 0.03) 0%, transparent 100%);
+      border-top: 1px solid rgba(6, 182, 212, 0.1);
+      border-bottom: 1px solid rgba(6, 182, 212, 0.1);
+    }
+
+    .gemma-banner {
+      display: block;
+      width: 100%;
+      max-width: 720px;
+      margin: 0 auto 48px;
+      border-radius: 16px;
+      border: 1px solid var(--border-subtle);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      transition: transform 0.3s ease;
+    }
+
+    .gemma-banner:hover {
+      transform: translateY(-2px);
+    }
+
+    .ai-features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border-subtle);
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid var(--border-subtle);
+      margin-bottom: 48px;
+    }
+
+    .ai-feature {
+      background: var(--bg-card);
+      padding: 36px 28px;
+      text-align: center;
+      transition: background 0.3s ease;
+    }
+
+    .ai-feature:hover {
+      background: var(--bg-card-hover);
+    }
+
+    .ai-feature-icon {
+      margin-bottom: 16px;
+    }
+
+    .ai-feature h3 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 8px;
+    }
+
+    .ai-feature p {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    .ai-modes-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+      margin-top: 32px;
+    }
+
+    .ai-mode {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 24px;
+      transition: all 0.25s;
+    }
+
+    .ai-mode:hover {
+      border-color: rgba(6, 182, 212, 0.3);
+      transform: translateY(-2px);
+    }
+
+    .ai-mode h4 {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .ai-mode p {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    .privacy-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 32px;
+      padding: 16px 24px;
+      background: rgba(34, 197, 94, 0.04);
+      border: 1px solid rgba(34, 197, 94, 0.12);
+      border-radius: 12px;
+      margin-top: 48px;
+      flex-wrap: wrap;
+    }
+
+    .privacy-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: #22c55e;
+      font-weight: 500;
+    }
+
+    .privacy-item svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
+    }
+
+    @media (max-width: 900px) {
+      .ai-features-grid {
+        grid-template-columns: 1fr;
+      }
+      .ai-modes-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .privacy-bar {
+        flex-direction: column;
+        gap: 10px;
+      }
+    }
+
     /* ---- ABOUT ---- */
     #about {
       background: var(--bg-secondary);
@@ -708,10 +869,27 @@
       border-bottom: 1px solid var(--border-subtle);
     }
 
-    .about-content {
-      display: flex;
-      align-items: flex-start;
-      gap: 48px;
+    .about-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 24px;
+    }
+
+    .about-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px;
+      padding: 28px 28px 24px;
+      text-align: center;
+      position: relative;
+      margin-top: 48px;
+    }
+
+    .about-card .about-photo {
+      position: absolute;
+      top: -48px;
+      left: 50%;
+      transform: translateX(-50%);
     }
 
     .about-photo {
@@ -732,8 +910,12 @@
       object-position: center 15%;
     }
 
+    .about-text {
+      padding-top: 48px;
+    }
+
     .about-text h3 {
-      font-size: 24px;
+      font-size: 20px;
       font-weight: 700;
       color: var(--text-primary);
       letter-spacing: -0.02em;
@@ -741,17 +923,18 @@
     }
 
     .about-text .about-title {
-      font-size: 14px;
+      font-size: 13px;
       color: var(--accent);
       font-weight: 500;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
     }
 
     .about-text p {
-      font-size: 15px;
+      font-size: 13px;
       color: var(--text-secondary);
-      line-height: 1.7;
+      line-height: 1.6;
       margin-bottom: 12px;
+      text-align: left;
     }
 
     .about-badges {
@@ -784,18 +967,19 @@
       stroke-linejoin: round;
     }
 
+    @media (max-width: 900px) {
+      .about-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .about-badges {
+      justify-content: center;
+    }
+
     @media (max-width: 640px) {
-      .about-content {
-        flex-direction: column;
-        align-items: center;
-        text-align: center;
-      }
-      .about-photo {
-        width: 80px;
-        height: 80px;
-      }
-      .about-badges {
-        justify-content: center;
+      .about-card {
+        margin-top: 40px;
       }
     }
 
@@ -908,16 +1092,16 @@
         <div class="nav-icon">
           <img src="icon.png" alt="OpenDicomViewer icon">
         </div>
-        OpenDicomViewer
+        ODV-Annotate
       </a>
       <ul class="nav-links">
+        <li class="nav-hide-mobile"><a href="#ai">AI</a></li>
         <li class="nav-hide-mobile"><a href="#demo">Demo</a></li>
-        <li class="nav-hide-mobile"><a href="#why">Why</a></li>
         <li class="nav-hide-mobile"><a href="#features">Features</a></li>
         <li class="nav-hide-mobile"><a href="#start">Get Started</a></li>
         <li class="nav-hide-mobile"><a href="#about">About</a></li>
         <li>
-          <a href="https://github.com/jnheo-md/open-dicom-viewer" class="nav-github" target="_blank" rel="noopener">
+          <a href="https://github.com/Essential-Citronnier/ODV-Annotate" class="nav-github" target="_blank" rel="noopener">
             <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
             GitHub
           </a>
@@ -937,24 +1121,28 @@
     <div class="reveal reveal-delay-1" style="margin-bottom: 24px;">
       <img src="icon.png" alt="OpenDicomViewer" style="width: 96px; height: 96px; border-radius: 22px; box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.06);">
     </div>
-    <h1 class="reveal reveal-delay-1"><span>OpenDicomViewer</span></h1>
-    <p class="hero-sub reveal reveal-delay-2">In the era of AI, everyone can build software tailored to their own needs. OpenDicomViewer is a free, native macOS DICOM viewer &mdash; designed to be forked, customized, and made your own.</p>
+    <h1 class="reveal reveal-delay-1"><span>OpenDicomViewer-Annotate</span></h1>
+    <p class="hero-sub reveal reveal-delay-2">AI-powered DICOM annotation on your Mac.<br>Fully local. Fully private.<br>Powered by <strong style="color:var(--accent-cyan)">Gemma 4 E4B</strong> running on Apple Silicon via MLX.</p>
     <div class="hero-actions reveal reveal-delay-3">
-      <a href="https://github.com/jnheo-md/open-dicom-viewer/releases/latest/download/OpenDicomViewer.dmg" class="btn btn-primary">
+      <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v1.2.1/OpenDicomViewer-Annotate.dmg" class="btn btn-primary">
         <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 2a1 1 0 0 1 1 1v10.586l2.293-2.293a1 1 0 1 1 1.414 1.414l-4 4a1 1 0 0 1-1.414 0l-4-4a1 1 0 1 1 1.414-1.414L11 13.586V3a1 1 0 0 1 1-1zM5 20a1 1 0 1 1 0 2H5a1 1 0 0 1 0-2h14z"/></svg>
         Download for macOS
       </a>
-      <a href="https://github.com/jnheo-md/open-dicom-viewer" class="btn btn-secondary" target="_blank" rel="noopener">
+      <a href="https://github.com/Essential-Citronnier/ODV-Annotate" class="btn btn-secondary" target="_blank" rel="noopener">
         <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style="width:16px;height:16px"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" fill="currentColor"/></svg>
         View on GitHub
       </a>
     </div>
-    <p class="hero-note reveal reveal-delay-4">Requires macOS 14.0+ (Sonoma) &middot; Apple Silicon</p>
+    <p class="hero-note reveal reveal-delay-4">Requires macOS 14.0+ (Sonoma) &middot; Apple Silicon &middot; 16GB+ RAM recommended</p>
 
-    <!-- Screenshot -->
+    <!-- Screenshots -->
     <div class="hero-screenshot reveal reveal-delay-5">
       <div class="screenshot-glow"></div>
-      <img src="screenshot.png" alt="OpenDicomViewer — multi-panel DICOM viewer with MPR reconstruction">
+      <img src="screenshot1.png" alt="OpenDicomViewer-Annotate — multi-panel DICOM viewer">
+    </div>
+    <div class="hero-screenshot reveal reveal-delay-5" style="margin-top:24px;">
+      <div class="screenshot-glow"></div>
+      <img src="screenshot2.png" alt="OpenDicomViewer-Annotate — AI annotation with Gemma 4">
     </div>
   </section>
 
@@ -962,9 +1150,9 @@
   <section id="why">
     <div class="section-inner">
       <div class="section-header reveal">
-        <p class="section-label">Why OpenDicomViewer</p>
-        <h2 class="section-title">Built different.</h2>
-        <p class="section-desc">Native performance, clinical tools, and an architecture designed for customization.</p>
+        <p class="section-label">Why ODV-Annotate</p>
+        <h2 class="section-title">DICOM viewer meets on-device AI.</h2>
+        <p class="section-desc">Everything you need in a medical image viewer, plus AI annotation that runs entirely on your machine.</p>
       </div>
       <div class="why-grid">
         <div class="why-card reveal">
@@ -1004,10 +1192,91 @@
         </div>
         <div class="why-card reveal reveal-delay-5">
           <div class="why-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f472b6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f472b6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22"/><path d="M8 6a4 4 0 0 1 .68-2.24"/><circle cx="12" cy="6" r="1"/></svg>
           </div>
-          <h3>AI-Friendly Architecture</h3>
-          <p>Clean, readable code with minimal abstraction. Designed to be extended with AI coding assistants like Claude or Copilot.</p>
+          <h3>Gemma 4 On-Device AI</h3>
+          <p>Google's vision-language model runs locally via MLX. Analyze images, detect structures, describe ROIs &mdash; no cloud, no uploads, 100% private.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- AI ANNOTATION -->
+  <section id="ai">
+    <div class="section-inner">
+      <div class="section-header reveal" style="text-align:center;">
+        <p class="section-label">AI Annotation</p>
+        <h2 class="section-title">Powered by Gemma 4.</h2>
+        <p class="section-desc" style="margin:0 auto;">Google's vision-language model, 4-bit quantized and optimized for Apple Silicon through <a href="https://github.com/ml-explore/mlx" target="_blank" rel="noopener" style="color:var(--accent-cyan)">MLX</a>.</p>
+      </div>
+
+      <a href="https://deepmind.google/models/gemma/gemma-4/" target="_blank" rel="noopener" class="reveal">
+        <img src="https://ai.google.dev/static/gemma/images/gemma4_banner.png?hl=ko" alt="Gemma 4" class="gemma-banner">
+      </a>
+
+      <div class="ai-features-grid reveal">
+        <div class="ai-feature">
+          <div class="ai-feature-icon">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+          </div>
+          <h3>Analyze Image</h3>
+          <p>Full image analysis with anatomical structure detection and bounding boxes</p>
+        </div>
+        <div class="ai-feature">
+          <div class="ai-feature-icon">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#a855f7" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>
+          </div>
+          <h3>Describe ROI</h3>
+          <p>Select any region and get a natural language description from the AI</p>
+        </div>
+        <div class="ai-feature">
+          <div class="ai-feature-icon">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          </div>
+          <h3>Detect Abnormalities</h3>
+          <p>Identify potential abnormalities with severity ratings and confidence scores</p>
+        </div>
+      </div>
+
+      <div class="reveal">
+        <p class="section-label">Analysis Modes</p>
+        <p style="font-size:15px;color:var(--text-secondary);margin-bottom:8px;">Four modes for different workflows.</p>
+      </div>
+      <div class="ai-modes-grid reveal">
+        <div class="ai-mode">
+          <h4><span style="color:#3b82f6;">&#9679;</span> Clinical</h4>
+          <p>Only clinically significant findings. Focused output with a maximum of 3 bounding boxes for quick assessment.</p>
+        </div>
+        <div class="ai-mode">
+          <h4><span style="color:#06b6d4;">&#9679;</span> Detailed Anatomy</h4>
+          <p>All visible anatomical structures labeled and boxed. Minimum 3 structures identified for comprehensive mapping.</p>
+        </div>
+        <div class="ai-mode">
+          <h4><span style="color:#f97316;">&#9679;</span> Abnormality Only</h4>
+          <p>Pathological findings only. Highlights up to 2 abnormalities with severity and confidence.</p>
+        </div>
+        <div class="ai-mode">
+          <h4><span style="color:#22c55e;">&#9679;</span> Educational</h4>
+          <p>Labeled anatomy for learning purposes. Identifies 3-5 structures with detailed descriptions.</p>
+        </div>
+      </div>
+
+      <div class="privacy-bar reveal">
+        <div class="privacy-item">
+          <svg viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+          No internet required
+        </div>
+        <div class="privacy-item">
+          <svg viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+          No cloud uploads
+        </div>
+        <div class="privacy-item">
+          <svg viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+          No data collection
+        </div>
+        <div class="privacy-item">
+          <svg viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+          All inference on Apple Silicon GPU
         </div>
       </div>
     </div>
@@ -1019,15 +1288,14 @@
       <div class="section-header reveal" style="text-align: center;">
         <p class="section-label">Demo</p>
         <h2 class="section-title">See it in action.</h2>
+        <p class="section-desc" style="margin:0 auto;">Watch Gemma 4 annotate DICOM images in real-time &mdash; entirely on your Mac.</p>
       </div>
       <div class="reveal">
-        <div class="video-container" id="video-facade" role="button" aria-label="Play demo video" tabindex="0">
-          <div class="video-thumb">
-            <img src="https://img.youtube.com/vi/GMLFApt92oE/maxresdefault.jpg" alt="OpenDicomViewer demo video">
-            <div class="video-play-btn">
-              <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><polygon points="6,3 21,12 6,21"/></svg>
-            </div>
-          </div>
+        <div class="video-container" style="aspect-ratio:16/9;">
+          <video controls preload="metadata" poster="screenshot2.png" style="width:100%;height:100%;display:block;">
+            <source src="demo.mp4" type="video/mp4">
+            Your browser does not support the video tag.
+          </video>
         </div>
       </div>
     </div>
@@ -1140,6 +1408,8 @@
         <div class="shortcut reveal"><span class="shortcut-label">Sync Scroll</span><span class="shortcut-keys"><kbd>L</kbd></span></div>
         <div class="shortcut reveal"><span class="shortcut-label">MPR Layout</span><span class="shortcut-keys"><kbd>&#8984;</kbd><kbd>&#8679;</kbd><kbd>M</kbd></span></div>
         <div class="shortcut reveal"><span class="shortcut-label">Quad Layout</span><span class="shortcut-keys"><kbd>4</kbd></span></div>
+        <div class="shortcut shortcut-ai reveal"><span class="shortcut-label">AI Analyze</span><span class="shortcut-keys"><kbd>G</kbd></span></div>
+        <div class="shortcut shortcut-ai reveal"><span class="shortcut-label">Reanalyze</span><span class="shortcut-keys"><kbd>&#8984;</kbd><kbd>G</kbd></span></div>
       </div>
     </div>
   </section>
@@ -1153,25 +1423,24 @@
       </div>
       <div class="start-grid">
         <div class="start-card reveal">
-          <div class="start-step">1</div>
           <h3>Download</h3>
-          <p>Grab the latest release, open the DMG, and drag OpenDicomViewer to your Applications folder. The app is signed and notarized &mdash; no Gatekeeper warnings.</p>
-          <a href="https://github.com/jnheo-md/open-dicom-viewer/releases/latest/download/OpenDicomViewer.dmg" class="btn btn-primary">
+          <p>Grab the latest release, open the DMG, and drag OpenDicomViewer-Annotate to your Applications folder. The app is signed and notarized &mdash; no Gatekeeper warnings. AI model downloads automatically on first use (~4.5GB).</p>
+          <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v1.2.1/OpenDicomViewer-Annotate.dmg" class="btn btn-primary">
             <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="width:16px;height:16px"><path d="M12 2a1 1 0 0 1 1 1v10.586l2.293-2.293a1 1 0 1 1 1.414 1.414l-4 4a1 1 0 0 1-1.414 0l-4-4a1 1 0 1 1 1.414-1.414L11 13.586V3a1 1 0 0 1 1-1zM5 20a1 1 0 1 1 0 2H5a1 1 0 0 1 0-2h14z" fill="currentColor"/></svg>
             Download DMG
           </a>
+          <p style="font-size:13px;color:var(--text-tertiary);margin-top:16px;">Requires macOS 14+ (Sonoma) &middot; Apple Silicon &middot; 16GB+ RAM recommended</p>
         </div>
         <div class="start-card reveal reveal-delay-1">
-          <div class="start-step">2</div>
-          <h3>Build from Source</h3>
-          <p>Clone the repo and run the build script. Pre-built native libraries are included &mdash; no extra setup needed.</p>
+          <h3>Build from Source <span style="font-size:13px;font-weight:400;color:var(--text-tertiary);">(optional)</span></h3>
+          <p>For developers who want to build from source or contribute.</p>
           <pre><code><span class="comment"># Clone and build</span>
-<span class="cmd">git clone</span> https://github.com/jnheo-md/open-dicom-viewer.git
-<span class="cmd">cd</span> OpenDicomViewer
+<span class="cmd">git clone</span> https://github.com/Essential-Citronnier/ODV-Annotate.git
+<span class="cmd">cd</span> ODV-Annotate
 <span class="cmd">./scripts/package_app.sh</span>
 
 <span class="comment"># Install (optional)</span>
-<span class="cmd">cp -r</span> OpenDicomViewer.app /Applications/</code></pre>
+<span class="cmd">cp -r</span> OpenDicomViewer-Annotate.app /Applications/</code></pre>
         </div>
       </div>
     </div>
@@ -1181,35 +1450,42 @@
   <section id="about">
     <div class="section-inner">
       <div class="section-header reveal">
-        <p class="section-label">About the Author</p>
-        <h2 class="section-title">Designed not just for use,<br>but for adaptation.</h2>
-        <p class="section-desc">Fork it, modify it with an AI assistant, and make it yours.</p>
+        <p class="section-label">About</p>
+        <h2 class="section-title">Built by researchers,<br>for researchers.</h2>
+        <p class="section-desc">OpenDicomViewer-Annotate combines a world-class DICOM viewer with on-device AI annotation.</p>
       </div>
-      <div class="about-content reveal">
-        <div class="about-photo">
-          <img src="author.png" alt="JoonNyung Heo, MD, PhD">
+      <div class="about-grid">
+        <!-- Original Author -->
+        <div class="about-card reveal">
+          <div class="about-photo">
+            <img src="author_heo.png" alt="JoonNyung Heo, MD, PhD">
+          </div>
+          <div class="about-text">
+            <h3>JoonNyung Heo, MD, PhD</h3>
+            <p class="about-title">Original OpenDicomViewer Author</p>
+            <p>Assistant Professor of Neurology, Yonsei University College of Medicine. Stroke neurologist &amp; neurointerventionist. MIT Technology Review <strong>Innovators Under 35</strong> (Korea, 2021).</p>
+            <div class="about-badges">
+              <span class="about-badge">Yonsei Stroke Team</span>
+              <span class="about-badge">MIT Innovators Under 35</span>
+              <span class="about-badge">Neurointervention</span>
+            </div>
+          </div>
         </div>
-        <div class="about-text">
-          <h3>JoonNyung Heo, MD, PhD</h3>
-          <p class="about-title">Assistant Professor, Department of Neurology &middot; Yonsei University College of Medicine</p>
-          <p>Stroke neurologist and neurointerventionist with 25 years of passion for software engineering. Named MIT Technology Review <strong>Innovators Under 35</strong> (Korea, 2021) for applying AI and machine learning to stroke medicine. OpenDicomViewer was born from the conviction that in the era of AI, everyone should be able to customize open-source tools to meet their own needs.</p>
-          <div class="about-badges">
-            <span class="about-badge">
-              <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-              Yonsei Stroke Team
-            </span>
-            <span class="about-badge">
-              <svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-              MIT Innovators Under 35
-            </span>
-            <span class="about-badge">
-              <svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-              Stroke &amp; Neurointervention
-            </span>
-            <span class="about-badge">
-              <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-              25+ Years in Software
-            </span>
+        <!-- Annotate Author -->
+        <div class="about-card reveal">
+          <div class="about-photo">
+            <img src="author_kim.JPG" alt="Daeseong Kim, MD">
+          </div>
+          <div class="about-text">
+            <h3>Daeseong Kim, MD</h3>
+            <p class="about-title">AI Annotation Developer</p>
+            <p>Research Scientist, Computational &amp; Translational Oncology. Yonsei University College of Medicine (MD, 2025, Summa Cum Laude). First-author in <em>Clin Mol Hepatol</em>. Built the Gemma 4 E4B on-device annotation layer.</p>
+            <div class="about-badges">
+              <span class="about-badge">Yonsei Medicine</span>
+              <span class="about-badge">Dean's Award</span>
+              <span class="about-badge">Translational Oncology</span>
+              <span class="about-badge">Founder of Essential Citronnier</span>
+            </div>
           </div>
         </div>
       </div>
@@ -1220,13 +1496,14 @@
   <footer>
     <div class="footer-inner">
       <div class="footer-left">
-        <p>OpenDicomViewer is open source under the <a href="https://github.com/jnheo-md/open-dicom-viewer/blob/master/LICENSE" target="_blank" rel="noopener">MIT License</a>.</p>
-        <p>Built with SwiftUI and Metal.</p>
+        <p>OpenDicomViewer-Annotate is open source under the <a href="https://github.com/Essential-Citronnier/ODV-Annotate/blob/master/LICENSE" target="_blank" rel="noopener">MIT License</a>.</p>
+        <p>Built with SwiftUI, Metal, and Gemma 4. Based on <a href="https://github.com/jnheo-md/open-dicom-viewer" target="_blank" rel="noopener">OpenDicomViewer</a>.</p>
       </div>
       <ul class="footer-links">
-        <li><a href="https://github.com/jnheo-md/open-dicom-viewer" target="_blank" rel="noopener">GitHub</a></li>
-        <li><a href="https://github.com/jnheo-md/open-dicom-viewer/releases" target="_blank" rel="noopener">Releases</a></li>
-        <li><a href="https://github.com/jnheo-md/open-dicom-viewer/issues" target="_blank" rel="noopener">Issues</a></li>
+        <li><a href="https://github.com/Essential-Citronnier/ODV-Annotate" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases" target="_blank" rel="noopener">Releases</a></li>
+        <li><a href="https://github.com/Essential-Citronnier/ODV-Annotate/issues" target="_blank" rel="noopener">Issues</a></li>
+        <li><a href="https://github.com/jnheo-md/open-dicom-viewer" target="_blank" rel="noopener">Original Project</a></li>
       </ul>
     </div>
   </footer>
@@ -1250,31 +1527,7 @@
       els.forEach(function(el) { observer.observe(el); });
     })();
 
-    // Click-to-play YouTube facade
-    (function() {
-      var facade = document.getElementById('video-facade');
-      if (!facade) return;
-      function loadVideo() {
-        var iframe = document.createElement('iframe');
-        iframe.src = 'https://www.youtube-nocookie.com/embed/GMLFApt92oE?autoplay=1&rel=0&modestbranding=1';
-        iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
-        iframe.allowFullscreen = true;
-        var thumb = facade.querySelector('.video-thumb');
-        if (thumb) thumb.style.display = 'none';
-        facade.appendChild(iframe);
-        facade.style.cursor = 'default';
-        facade.removeEventListener('click', loadVideo);
-        facade.removeEventListener('keydown', handleKey);
-      }
-      function handleKey(e) {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          loadVideo();
-        }
-      }
-      facade.addEventListener('click', loadVideo);
-      facade.addEventListener('keydown', handleKey);
-    })();
+    // (YouTube facade removed — using local video with native controls)
   </script>
 
 </body>
