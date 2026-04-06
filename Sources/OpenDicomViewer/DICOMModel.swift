@@ -165,7 +165,18 @@ class DICOMModel: ObservableObject {
     @Published var panels: [PanelState] = []
     @Published var activePanelID: UUID = UUID()
     @Published var showCrossReference: Bool = false
-    @Published var showTags: Bool = false
+    enum InspectorPanel { case tags, ai }
+    @Published var activeInspector: InspectorPanel? = nil
+
+    var showTags: Bool {
+        get { activeInspector == .tags }
+        set { activeInspector = newValue ? .tags : nil }
+    }
+
+    var showAIInspector: Bool {
+        get { activeInspector == .ai }
+        set { activeInspector = newValue ? .ai : nil }
+    }
     @Published var showHelp: Bool = false
     @Published var synchronizedScrolling: Bool = false {
         didSet {

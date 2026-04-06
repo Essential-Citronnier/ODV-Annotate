@@ -35,3 +35,6 @@ DerivedData/
 # IDE
 .vscode/
 .idea/
+
+# Sample data
+*.dcm

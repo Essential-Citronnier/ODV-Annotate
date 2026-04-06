@@ -57,23 +57,70 @@ SYSTEM_PROMPT = (
     "Always respond in valid JSON format as specified in the user prompt."
 )
 
-ANALYZE_PROMPT_TEMPLATE = """\
-Analyze this medical image ({modality}, {description}).
-Identify visible anatomical structures and any notable findings.
-
+ANALYZE_JSON_FORMAT = """
 Respond in this exact JSON format:
 {{
-  "findings": ["finding 1", "finding 2", ...],
+  "findings": ["finding 1", "finding 2"],
   "bounding_boxes": [
-    {{"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.2, "label": "structure name", "confidence": 0.85}},
-    ...
+    {{"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.2, "label": "label", "confidence": 0.85}}
   ],
   "description": "Brief overall description of the image"
 }}
+Coordinates are normalized (0.0 to 1.0) relative to image dimensions."""
 
-Coordinates are normalized (0.0 to 1.0) relative to image dimensions.
-Only include structures you can identify with reasonable confidence (>0.5).
-"""
+ANALYZE_MODES: dict[str, dict] = {
+    "clinical": {
+        "label": "Clinical Focus",
+        "description": "Only clinically significant findings (max 3 boxes)",
+        "prompt": """\
+Analyze this medical image ({modality}, {description}).
+Identify only the most clinically significant findings (abnormalities, lesions, or \
+notable observations). Do NOT label normal anatomical structures.
+Return at most 3 bounding boxes, focusing on areas that warrant clinical attention.
+{json_format}
+Only include findings with confidence > 0.6. If the image appears normal, return \
+an empty bounding_boxes list and state so in the description.""",
+    },
+    "detailed": {
+        "label": "Detailed Anatomy",
+        "description": "All visible anatomical structures and findings",
+        "prompt": """\
+Analyze this medical image ({modality}, {description}).
+Identify ALL visible anatomical structures and any notable findings.
+You MUST return at least 3 separate bounding boxes for distinct structures.
+Each structure should have its own bounding box with a specific anatomical label.
+{json_format}
+Only include structures you can identify with reasonable confidence (>0.5). \
+Return multiple bounding_boxes, one per structure.""",
+    },
+    "abnormality": {
+        "label": "Abnormality Only",
+        "description": "Only abnormalities and pathological findings (max 2 boxes)",
+        "prompt": """\
+Analyze this medical image ({modality}, {description}).
+Focus exclusively on abnormalities and pathological findings. Ignore all normal anatomy.
+Return at most 2 bounding boxes for the most important abnormalities.
+{json_format}
+Only include abnormalities with confidence > 0.7. If no abnormalities are found, \
+return an empty bounding_boxes list and state "No abnormalities detected" in the description.""",
+    },
+    "educational": {
+        "label": "Educational",
+        "description": "Labeled anatomy with detailed descriptions for learning",
+        "prompt": """\
+Analyze this medical image ({modality}, {description}) for educational purposes.
+You MUST label at least 3-5 distinct anatomical structures visible in the image.
+For each structure, provide a separate bounding box with a clear anatomical name.
+Examples of structures to look for: ventricles, gray matter, white matter, \
+cerebellum, brainstem, skull, sinuses, eyes, CSF spaces, cortex, etc.
+Provide a thorough description suitable for medical students.
+{json_format}
+Include all identifiable structures with confidence > 0.4. \
+Return multiple bounding_boxes, one per structure.""",
+    },
+}
+
+DEFAULT_ANALYZE_MODE = "clinical"
 
 DESCRIBE_ROI_PROMPT_TEMPLATE = """\
 Describe the highlighted region in this medical image.
@@ -127,6 +174,7 @@ class WindowInfo(BaseModel):
 class AnalyzeRequest(BaseModel):
     image: str  # base64-encoded PNG
     window_info: WindowInfo = Field(default_factory=WindowInfo)
+    mode: str = DEFAULT_ANALYZE_MODE
 
 
 class BoundingBox(BaseModel):
@@ -229,22 +277,27 @@ def _generate(image: Image.Image, prompt: str) -> str:
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": image},
+                    {"type": "image"},
                     {"type": "text", "text": prompt},
                 ],
             },
         ]
 
+        formatted_prompt = _processor.apply_chat_template(
+            messages, add_generation_prompt=True
+        )
+
         response = generate(
             _model,
             _processor,
-            messages,
+            formatted_prompt,
+            image=[image],
             max_tokens=MAX_TOKENS,
             temperature=1.0,
             top_p=0.95,
         )
 
-    return response
+    return response.text if hasattr(response, 'text') else str(response)
 
 
 def _extract_json(text: str) -> dict | None:
@@ -328,18 +381,34 @@ async def health():
     )
 
 
+@app.get("/modes")
+async def list_modes():
+    """Return available analysis modes."""
+    return {
+        "modes": {
+            key: {"label": val["label"], "description": val["description"]}
+            for key, val in ANALYZE_MODES.items()
+        },
+        "default": DEFAULT_ANALYZE_MODE,
+    }
+
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest):
     """Analyze a full DICOM image for anatomical structures and findings."""
     if _model is None:
         raise HTTPException(503, "Model not loaded yet")
 
+    mode_key = request.mode if request.mode in ANALYZE_MODES else DEFAULT_ANALYZE_MODE
+    mode = ANALYZE_MODES[mode_key]
+
     image = _decode_image(request.image)
     info = request.window_info
 
-    prompt = ANALYZE_PROMPT_TEMPLATE.format(
+    prompt = mode["prompt"].format(
         modality=info.modality,
         description=info.description or info.body_part or "medical image",
+        json_format=ANALYZE_JSON_FORMAT,
     )
 
     loop = asyncio.get_event_loop()

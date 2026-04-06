@@ -3,7 +3,7 @@
 
 # ML inference
 mlx>=0.22.0
-mlx-vlm>=0.5.0
+mlx-vlm>=0.4.0
 
 # Web server
 fastapi>=0.115.0

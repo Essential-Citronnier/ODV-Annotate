@@ -25,6 +25,7 @@
 - **Fast** — Instant first-image display with background loading; images appear before the study finishes scanning
 - **Multi-panel layouts** — Side-by-side, stacked, and quad views with synchronized scrolling and zoom
 - **Clinical measurement tools** — Ruler, angle, and ROI statistics with real-time dashed preview lines
+- **AI-powered annotation** — On-device DICOM analysis via Gemma 4 E4B running locally on Apple Silicon (MLX)
 - **Designed for customization** — Clean, readable architecture that's easy to fork and adapt, including with AI coding assistants
 
 ## Features
@@ -40,6 +41,7 @@
 - **Cursor Readout** — Real-time HU value and coordinates under the cursor
 - **Scrollbar Thumbnails** — Hover the scrollbar to preview any slice
 - **JPEG 2000 Support** — Compressed transfer syntaxes via DCMTK + OpenJPEG
+- **AI Annotation (Gemma 4 E4B)** — Local on-device AI analysis powered by MLX. Analyze full images, describe ROI regions, and detect abnormalities — all running privately on your Mac with no cloud dependency
 
 ## Quick Start
 
@@ -76,6 +78,46 @@ Pre-built static libraries for DCMTK and OpenJPEG are included in `libs/`. To re
 ```bash
 ./scripts/setup_native_deps.sh
 ```
+
+## AI Annotation
+
+OpenDicomViewer includes on-device AI annotation powered by **Gemma 4 E4B** (4-bit quantized) running locally on Apple Silicon via [MLX](https://github.com/ml-explore/mlx). No data leaves your machine.
+
+### Requirements
+
+- Apple Silicon Mac (M1 Pro or better recommended)
+- Python 3.10+
+- 16GB+ RAM recommended (model uses ~4–5GB)
+
+### Setup
+
+```bash
+cd mlx-server
+./launch.sh
+```
+
+First run automatically creates a virtual environment, installs dependencies, downloads the model (~4.5GB, one-time), and starts the server on `http://127.0.0.1:8741`.
+
+You can also start/stop the server from the **AI** menu inside the app.
+
+### AI Features
+
+| Feature | Description |
+|---------|-------------|
+| **Analyze Image** | Full image analysis with structure detection and bounding boxes |
+| **Describe ROI** | Natural language description of a user-selected region of interest |
+| **Detect Abnormalities** | Highlight potential abnormalities with severity and confidence |
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Server status and model info |
+| `/analyze` | POST | Full image analysis with structure detection |
+| `/describe-roi` | POST | Describe a selected region of interest |
+| `/detect-abnormalities` | POST | Detect potential abnormalities |
+
+> **Disclaimer:** AI analysis is for **research and educational purposes only**. It must NOT be used as a clinical diagnosis tool.
 
 ## Keyboard Shortcuts
 
@@ -160,6 +202,8 @@ Sources/
 │   ├── SimpleDICOM.swift         # Pure-Swift DICOM parser (no DCMTK dependency)
 │   ├── MultiPanelContainer.swift # Multi-panel grid, per-panel overlays & gestures
 │   ├── PanelState.swift          # Per-panel state: series, W/L, zoom, metadata
+│   ├── AIService.swift           # HTTP client for local MLX AI server
+│   ├── AIServerManager.swift     # MLX server process lifecycle management
 │   ├── LayoutToolbar.swift       # Floating layout/link/crossref toolbar
 │   ├── CrossReferenceOverlay.swift # Slice intersection lines between panels
 │   ├── MPREngine.swift           # CPU-based multi-planar reconstruction
@@ -170,10 +214,14 @@ Sources/
 │   ├── TagView.swift             # DICOM tag list view
 │   ├── Extensions.swift          # Collection safe-subscript helper
 │   └── WindowAccessor.swift      # NSWindow customization (hidden titlebar)
-└── DCMTKWrapper/             # Objective-C++ bridge to DCMTK
-    ├── DCMTKHelper.mm            # DCMTK image decoding + JPEG2000 fallback
-    └── include/
-        └── DCMTKHelper.h         # Public C/ObjC interface
+├── DCMTKWrapper/             # Objective-C++ bridge to DCMTK
+│   ├── DCMTKHelper.mm            # DCMTK image decoding + JPEG2000 fallback
+│   └── include/
+│       └── DCMTKHelper.h         # Public C/ObjC interface
+└── mlx-server/               # Local AI inference server
+    ├── server.py                 # FastAPI server with Gemma 4 E4B via MLX
+    ├── launch.sh                 # Setup & launch script
+    └── requirements.txt          # Python dependencies
 ```
 
 ### Key Design Decisions
@@ -195,6 +243,8 @@ OpenDicomViewer is designed to be straightforward to customize — whether you'r
 | **Change panel behavior** | Per-panel state lives in `PanelState.swift`; cross-panel coordination is in `DICOMModel.swift` |
 | **Add a menu bar command** | Add commands in `App.swift` |
 | **Modify cross-reference lines** | Edit `CrossReferenceOverlay.swift` |
+| **Add a new AI endpoint** | Add the endpoint in `mlx-server/server.py`, then add a client method in `AIService.swift` |
+| **Change AI model** | Update `MODEL_ID` in `mlx-server/server.py` and adjust prompt templates |
 
 The codebase uses clear naming conventions and minimal abstraction layers, making it well-suited for AI-assisted development. Fork the project, describe what you want to change, and point your AI assistant at the relevant files above.
 
@@ -222,5 +272,7 @@ DCMTK is licensed under the BSD license. OpenJPEG is licensed under BSD-2-Clause
 |---------|---------|---------|---------|
 | [DCMTK](https://dicom.offis.de/dcmtk.php.en) | 3.6.8 | DICOM image decoding, JPEG/JPEG-LS decompression | BSD |
 | [OpenJPEG](https://www.openjpeg.org/) | 2.5.0 | JPEG 2000 decompression | BSD-2-Clause |
+| [MLX](https://github.com/ml-explore/mlx) | latest | Apple Silicon ML framework for local inference | MIT |
+| [Gemma 4 E4B](https://huggingface.co/mlx-community/gemma-4-E4B-it-4bit) | 4-bit | Vision-language model for DICOM annotation | Gemma |
 
-Both are included as pre-built static libraries (`libs/`) and linked at compile time via Swift Package Manager.
+DCMTK and OpenJPEG are included as pre-built static libraries (`libs/`) and linked at compile time via Swift Package Manager. MLX and Gemma are installed automatically by `mlx-server/launch.sh` into a local Python virtual environment.

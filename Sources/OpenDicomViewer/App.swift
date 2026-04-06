@@ -102,7 +102,10 @@ struct OpenDicomViewerApp: App {
                 // ─ Overlays ─
                 Toggle("Cross-Reference Lines (X)", isOn: $model.showCrossReference)
 
-                Toggle("DICOM Tags Inspector (T)", isOn: $model.showTags)
+                Toggle("DICOM Tags Inspector (T)", isOn: Binding(
+                    get: { model.showTags },
+                    set: { model.showTags = $0 }
+                ))
             }
 
             CommandMenu("Layout") {
@@ -181,6 +184,16 @@ struct OpenDicomViewerApp: App {
                 .disabled(!aiService.serverStatus.isReady || model.activePanel?.image == nil)
 
                 Divider()
+
+                if !aiService.availableModes.isEmpty {
+                    Picker("Analysis Mode", selection: $aiService.selectedMode) {
+                        ForEach(aiService.availableModes) { mode in
+                            Text("\(mode.label)").tag(mode.key)
+                        }
+                    }
+
+                    Divider()
+                }
 
                 Button("Clear AI Annotations") {
                     model.activePanel?.clearAIAnnotations()

@@ -96,6 +96,23 @@ struct AIHealthResponse: Codable {
     let memory_usage_mb: Double?
 }
 
+struct AIAnalyzeMode: Codable, Identifiable, Hashable {
+    let key: String
+    let label: String
+    let description: String
+    var id: String { key }
+}
+
+struct AIModesResponse: Codable {
+    let modes: [String: AIModeMeta]
+    let `default`: String
+
+    struct AIModeMeta: Codable {
+        let label: String
+        let description: String
+    }
+}
+
 // MARK: - AI Service
 
 class AIService: ObservableObject {
@@ -104,6 +121,8 @@ class AIService: ObservableObject {
     @Published var serverStatus: AIServerStatus = .stopped
     @Published var isInferencing: Bool = false
     @Published var hasShownDisclaimer: Bool = false
+    @Published var availableModes: [AIAnalyzeMode] = []
+    @Published var selectedMode: String = "clinical"
 
     private let baseURL: URL
     private let session: URLSession
@@ -128,8 +147,12 @@ class AIService: ObservableObject {
                 return
             }
             let health = try JSONDecoder().decode(AIHealthResponse.self, from: data)
+            let isReady = health.status == "ready"
             await MainActor.run {
-                serverStatus = health.status == "ready" ? .ready : .starting
+                serverStatus = isReady ? .ready : .starting
+            }
+            if isReady && availableModes.isEmpty {
+                await fetchModes()
             }
         } catch {
             await MainActor.run {
@@ -149,6 +172,27 @@ class AIService: ObservableObject {
         return false
     }
 
+    // MARK: - Fetch Modes
+
+    func fetchModes() async {
+        do {
+            let url = baseURL.appendingPathComponent("modes")
+            let (data, response) = try await session.data(from: url)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else { return }
+            let decoded = try JSONDecoder().decode(AIModesResponse.self, from: data)
+            let modes = decoded.modes.map { key, meta in
+                AIAnalyzeMode(key: key, label: meta.label, description: meta.description)
+            }.sorted { $0.key < $1.key }
+            await MainActor.run {
+                self.availableModes = modes
+                self.selectedMode = decoded.default
+            }
+        } catch {
+            // Keep existing defaults
+        }
+    }
+
     // MARK: - Image Conversion
 
     private func imageToBase64PNG(_ image: NSImage) -> String? {
@@ -164,7 +208,8 @@ class AIService: ObservableObject {
 
     func analyzeImage(_ image: NSImage, modality: String = "Unknown",
                       seriesDescription: String = "", bodyPart: String = "",
-                      windowCenter: Double? = nil, windowWidth: Double? = nil) async throws -> AIAnalysisResult {
+                      windowCenter: Double? = nil, windowWidth: Double? = nil,
+                      mode: String? = nil) async throws -> AIAnalysisResult {
         guard serverStatus.isReady else {
             throw AIServiceError.serverNotReady
         }
@@ -183,9 +228,10 @@ class AIService: ObservableObject {
         struct RequestBody: Codable {
             let image: String
             let window_info: AIWindowInfo
+            let mode: String
         }
 
-        let body = RequestBody(image: base64, window_info: windowInfo)
+        let body = RequestBody(image: base64, window_info: windowInfo, mode: mode ?? selectedMode)
         return try await post(endpoint: "analyze", body: body)
     }
 

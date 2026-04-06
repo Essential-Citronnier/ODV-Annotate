@@ -202,82 +202,27 @@ struct PanelView: View {
                     .zIndex(13)
             }
 
-            // AI analysis loading overlay
+            // AI analysis in-progress indicator (compact, top-right)
             if panel.aiAnalysisInProgress {
                 VStack {
-                    Spacer()
                     HStack {
                         Spacer()
-                        HStack(spacing: 8) {
+                        HStack(spacing: 6) {
                             ProgressView()
-                                .scaleEffect(0.7)
-                                .tint(.white)
+                                .scaleEffect(0.6)
+                                .tint(.yellow)
                             Text("AI Analyzing...")
-                                .font(.system(.caption, design: .rounded))
-                                .foregroundStyle(.white)
+                                .font(.system(.caption2, design: .rounded))
+                                .foregroundStyle(.yellow)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
                         .background(Color.black.opacity(0.7))
-                        .cornerRadius(8)
-                        Spacer()
-                    }
-                    .padding(.bottom, 40)
-                }
-                .allowsHitTesting(false)
-                .zIndex(14)
-            }
-
-            // AI description overlay
-            if let desc = panel.aiDescription, !desc.isEmpty, panel.showAIAnnotations {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 4) {
-                                Text("AI")
-                                    .font(.system(.caption2, weight: .bold))
-                                    .foregroundStyle(.black)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(Color.yellow)
-                                    .cornerRadius(3)
-                                Text("Analysis")
-                                    .font(.system(.caption2, weight: .semibold))
-                                    .foregroundStyle(.yellow)
-                            }
-                            Text(desc)
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundStyle(.white)
-                                .lineLimit(4)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(6)
-                        .background(Color.black.opacity(0.8))
                         .cornerRadius(6)
-                        .frame(maxWidth: 280)
-                        .padding(8)
+                        .padding(.top, 8)
+                        .padding(.trailing, 52)
                     }
-                }
-                .allowsHitTesting(false)
-                .zIndex(14)
-            }
-
-            // AI error overlay
-            if let error = panel.aiError {
-                VStack {
                     Spacer()
-                    HStack {
-                        Spacer()
-                        Text(error)
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.red)
-                            .padding(6)
-                            .background(Color.black.opacity(0.8))
-                            .cornerRadius(6)
-                            .padding(8)
-                    }
                 }
                 .allowsHitTesting(false)
                 .zIndex(14)
@@ -1713,6 +1658,310 @@ struct OrientationLabelsOverlay: View {
     }
 }
 
+// MARK: - AI Inspector View
+
+struct AIInspectorView: View {
+    @ObservedObject var model: DICOMModel
+    @ObservedObject private var aiService = AIService.shared
+    @State private var dotCount: Int = 0
+
+    private let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
+
+    private var panel: PanelState? { model.activePanel }
+
+    private var aiAnnotations: [Annotation] {
+        panel?.annotations.filter { $0.isAI } ?? []
+    }
+
+    private var statusText: String {
+        if panel?.aiAnalysisInProgress == true {
+            return "Analyzing..."
+        }
+        return aiService.serverStatus.displayText
+    }
+
+    private var statusColor: Color {
+        if panel?.aiAnalysisInProgress == true {
+            return aiService.serverStatus.color  // keep green
+        }
+        return aiService.serverStatus.color
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                HStack(spacing: 4) {
+                    Image(systemName: "brain")
+                        .foregroundStyle(.yellow)
+                    Text("AI Analysis")
+                        .font(.headline)
+                }
+                Spacer()
+                // Server status
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 6, height: 6)
+                    Text(statusText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+
+            // Analysis mode picker
+            if !aiService.availableModes.isEmpty {
+                Picker("Mode", selection: $aiService.selectedMode) {
+                    ForEach(aiService.availableModes) { mode in
+                        Text(mode.label).tag(mode.key)
+                    }
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .padding(.horizontal)
+                .padding(.bottom, 6)
+            }
+
+            Divider()
+
+            if let panel = panel {
+                if panel.aiAnalysisInProgress {
+                    // Loading state
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .tint(.yellow)
+                        Text("Analyzing" + String(repeating: ".", count: dotCount))
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .onReceive(timer) { _ in
+                                dotCount = (dotCount % 3) + 1
+                            }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let error = panel.aiError {
+                    // Error state
+                    VStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.title2)
+                            .foregroundStyle(.red)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+
+                        Button("Retry") {
+                            panel.clearAIAnnotations()
+                            model.triggerAIAnalysis(for: panel)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if aiAnnotations.isEmpty && panel.aiDescription == nil {
+                    // Empty state
+                    ContentUnavailableView {
+                        Label("No Analysis", systemImage: "brain")
+                    } description: {
+                        Text("Press G or ⌘G to analyze the current image")
+                    }
+                } else {
+                    // Results
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            // General description
+                            if let desc = panel.aiDescription, !desc.isEmpty {
+                                Text(desc)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.white)
+                                    .padding(8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Color.white.opacity(0.05))
+                                    .cornerRadius(6)
+                            }
+
+                            // Per-annotation list
+                            if !aiAnnotations.isEmpty {
+                                Text("Findings")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.top, 4)
+
+                                ForEach(aiAnnotations) { annotation in
+                                    AIAnnotationRow(
+                                        annotation: annotation,
+                                        isSelected: panel.selectedAnnotationID == annotation.id,
+                                        onTap: {
+                                            if panel.selectedAnnotationID == annotation.id {
+                                                panel.selectedAnnotationID = nil
+                                            } else {
+                                                panel.selectedAnnotationID = annotation.id
+                                            }
+                                            model.objectWillChange.send()
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        .padding()
+                    }
+                }
+            } else {
+                ContentUnavailableView("No Panel", systemImage: "rectangle.slash")
+            }
+
+            Divider()
+
+            // Bottom actions
+            HStack {
+                Button(action: {
+                    if let panel = panel {
+                        panel.clearAIAnnotations()
+                        model.triggerAIAnalysis(for: panel)
+                    }
+                }) {
+                    Label("Reanalyze", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(panel?.image == nil || panel?.aiAnalysisInProgress == true || !aiService.serverStatus.isReady)
+                .help("⌘G")
+
+                Spacer()
+
+                Button(action: {
+                    panel?.clearAIAnnotations()
+                    model.objectWillChange.send()
+                }) {
+                    Label("Clear", systemImage: "trash")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(aiAnnotations.isEmpty && panel?.aiDescription == nil)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        }
+    }
+}
+
+// MARK: - AI Annotation Row
+
+struct AIAnnotationRow: View {
+    let annotation: Annotation
+    let isSelected: Bool
+    let onTap: () -> Void
+
+    private var bgColor: Color {
+        isSelected ? Color.yellow.opacity(0.15) : Color.white.opacity(0.05)
+    }
+
+    private var borderColor: Color {
+        isSelected ? Color.yellow.opacity(0.5) : Color.clear
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            rowContent
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var rowContent: some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(annotationColor)
+                .frame(width: 4, height: 32)
+
+            labelSection
+
+            Spacer()
+
+            confidenceBadge
+        }
+        .padding(6)
+        .background(bgColor)
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(borderColor, lineWidth: 1)
+        )
+    }
+
+    private var labelSection: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(annotationLabel)
+                .font(.system(.caption, weight: .semibold))
+                .foregroundStyle(.white)
+
+            if !annotationDetail.isEmpty {
+                Text(annotationDetail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var confidenceBadge: some View {
+        if !confidenceText.isEmpty {
+            Text(confidenceText)
+                .font(.caption2)
+                .foregroundStyle(annotationColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(annotationColor.opacity(0.15))
+                .cornerRadius(4)
+        }
+    }
+
+    private var annotationColor: Color {
+        switch annotation.type {
+        case .aiStructure: return .yellow
+        case .aiFinding(_, _, let severity):
+            switch severity.lowercased() {
+            case "severe": return .red
+            case "moderate": return .orange
+            case "mild": return .yellow
+            default: return .green
+            }
+        case .aiROILabel: return .blue
+        default: return .gray
+        }
+    }
+
+    private var annotationLabel: String {
+        switch annotation.type {
+        case .aiStructure(_, let label, _): return label
+        case .aiFinding(_, _, let severity): return severity.capitalized
+        case .aiROILabel(_, let label, _, _): return label
+        default: return ""
+        }
+    }
+
+    private var annotationDetail: String {
+        switch annotation.type {
+        case .aiStructure: return ""
+        case .aiFinding(_, let description, _): return description
+        case .aiROILabel(_, _, let description, _): return description
+        default: return ""
+        }
+    }
+
+    private var confidenceText: String {
+        switch annotation.type {
+        case .aiStructure(_, _, let confidence): return "\(Int(confidence * 100))%"
+        case .aiROILabel(_, _, _, let confidence): return "\(Int(confidence * 100))%"
+        default: return ""
+        }
+    }
+}
+
 // MARK: - Annotation Overlay
 
 struct AnnotationOverlay: View {
@@ -1859,9 +2108,16 @@ struct AnnotationOverlay: View {
         case .aiStructure(let rect, let label, let confidence):
             if panel.showAIAnnotations {
                 let sr = aiScreenRect(rect, viewSize: viewSize)
+                let isSelected = panel.selectedAnnotationID == annotation.id
                 ZStack {
+                    if isSelected {
+                        Rectangle()
+                            .fill(Color.yellow.opacity(0.15))
+                            .frame(width: sr.width, height: sr.height)
+                            .position(x: sr.midX, y: sr.midY)
+                    }
                     Rectangle()
-                        .stroke(Color.yellow, style: StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
+                        .stroke(Color.yellow, style: StrokeStyle(lineWidth: isSelected ? 2.5 : 1.5, dash: [6, 3]))
                         .frame(width: sr.width, height: sr.height)
                         .position(x: sr.midX, y: sr.midY)
 
@@ -1888,13 +2144,14 @@ struct AnnotationOverlay: View {
             if panel.showAIAnnotations {
                 let sr = aiScreenRect(rect, viewSize: viewSize)
                 let severityColor = aiFindingSeverityColor(severity)
+                let isSelected = panel.selectedAnnotationID == annotation.id
                 ZStack {
                     Rectangle()
-                        .fill(severityColor.opacity(0.15))
+                        .fill(severityColor.opacity(isSelected ? 0.3 : 0.15))
                         .frame(width: sr.width, height: sr.height)
                         .position(x: sr.midX, y: sr.midY)
                     Rectangle()
-                        .stroke(severityColor, lineWidth: 2)
+                        .stroke(severityColor, lineWidth: isSelected ? 3 : 2)
                         .frame(width: sr.width, height: sr.height)
                         .position(x: sr.midX, y: sr.midY)
 
@@ -1924,9 +2181,16 @@ struct AnnotationOverlay: View {
         case .aiROILabel(let rect, let label, let description, let confidence):
             if panel.showAIAnnotations {
                 let sr = aiScreenRect(rect, viewSize: viewSize)
+                let isSelected = panel.selectedAnnotationID == annotation.id
                 ZStack {
+                    if isSelected {
+                        Rectangle()
+                            .fill(Color.blue.opacity(0.15))
+                            .frame(width: sr.width, height: sr.height)
+                            .position(x: sr.midX, y: sr.midY)
+                    }
                     Rectangle()
-                        .stroke(Color.blue, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                        .stroke(Color.blue, style: StrokeStyle(lineWidth: isSelected ? 2.5 : 1.5, dash: [4, 3]))
                         .frame(width: sr.width, height: sr.height)
                         .position(x: sr.midX, y: sr.midY)
 
@@ -2039,36 +2303,19 @@ struct ToolPalette: View {
 
     var body: some View {
         VStack(spacing: 2) {
-            ForEach(ActiveTool.allCases) { tool in
-                if tool == .aiAnalyze {
-                    Divider()
-                        .padding(.vertical, 2)
-                        .padding(.horizontal, 4)
-                }
+            ForEach(ActiveTool.allCases.filter { $0 != .aiAnalyze }) { tool in
                 Button(action: { model.activeTool = tool }) {
-                    ZStack(alignment: .topTrailing) {
-                        Image(systemName: tool.icon)
-                            .font(.system(size: 14))
-                            .frame(width: 32, height: 28)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(model.activeTool == tool ? Color.accentColor.opacity(0.3) : Color.clear)
-                            )
-                            .foregroundStyle(model.activeTool == tool ? .white : .secondary)
-
-                        // AI server status dot
-                        if tool == .aiAnalyze {
-                            Circle()
-                                .fill(aiService.serverStatus.color)
-                                .frame(width: 6, height: 6)
-                                .offset(x: -2, y: 2)
-                        }
-                    }
+                    Image(systemName: tool.icon)
+                        .font(.system(size: 14))
+                        .frame(width: 32, height: 28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(model.activeTool == tool ? Color.accentColor.opacity(0.3) : Color.clear)
+                        )
+                        .foregroundStyle(model.activeTool == tool ? .white : .secondary)
                 }
                 .buttonStyle(.plain)
-                .help(tool == .aiAnalyze
-                    ? "\(tool.rawValue) (\(tool.shortcutHint)) - \(aiService.serverStatus.displayText)"
-                    : "\(tool.rawValue) (\(tool.shortcutHint))")
+                .help("\(tool.rawValue) (\(tool.shortcutHint))")
             }
         }
         .padding(4)

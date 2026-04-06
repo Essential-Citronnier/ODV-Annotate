@@ -257,7 +257,8 @@ class PanelState: ObservableObject, Identifiable {
     @Published var aiAnalysisInProgress: Bool = false
     @Published var aiError: String? = nil
     @Published var aiDescription: String? = nil
-    @Published var showAIAnnotations: Bool = true
+    @Published var showAIAnnotations: Bool = false
+    @Published var selectedAnnotationID: UUID? = nil
 
     /// Reset panel to empty state
     func reset() {
@@ -318,7 +319,8 @@ class PanelState: ObservableObject, Identifiable {
         aiAnalysisInProgress = false
         aiError = nil
         aiDescription = nil
-        showAIAnnotations = true
+        showAIAnnotations = false
+        selectedAnnotationID = nil
     }
 
     /// Remove only AI-generated annotations
