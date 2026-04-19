@@ -93,8 +93,11 @@ After setup, the AI server starts on `http://127.0.0.1:8741`. You can also contr
 git clone https://github.com/Essential-Citronnier/ODV-Annotate.git
 cd ODV-Annotate
 
-# Build release and package as .app bundle
+# Build release and package as .app bundle + DMG
 ./scripts/package_app.sh
+
+# Notarize for distribution (requires Apple Developer ID)
+./scripts/package_app.sh --notarize
 
 # Install (optional)
 cp -r OpenDicomViewer-Annotate.app /Applications/
@@ -111,6 +114,41 @@ To rebuild native dependencies from source:
 ```bash
 ./scripts/setup_native_deps.sh
 ```
+
+## Releases
+
+### [v1.2.1](https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v1.2.1) — 2025-04-07
+
+**Zero-dependency install.** Python 3.11 is now bundled inside the app — no Homebrew, Xcode CLT, or system Python required. Drag to Applications and launch.
+
+| What's included | Details |
+|-----------------|---------|
+| **Bundled Python 3.11** | Standalone runtime (python-build-standalone), no system dependency |
+| **Hardened Runtime** | Properly signed with entitlements for Python/MLX execution |
+| **Pre-flight checks** | Architecture (Apple Silicon only) and disk space (~5 GB) verified before setup |
+| **Auto first-run setup** | Venv creation, pip install, and server start happen automatically |
+| **UpdateChecker** | In-app update notifications via GitHub Releases API |
+
+**Binary contents (what's inside the DMG):**
+
+```
+OpenDicomViewer-Annotate.app/
+├── Contents/MacOS/OpenDicomViewer       # Swift executable (arm64)
+└── Contents/Resources/
+    ├── AppIcon.icns
+    ├── dicom.dic                         # DCMTK DICOM dictionary
+    ├── mlx-server/
+    │   ├── server.py                     # FastAPI + mlx-vlm inference server
+    │   └── requirements.txt
+    └── python/                           # Bundled Python 3.11 runtime (~51 MB)
+        └── bin/python3
+```
+
+> Python packages (MLX, mlx-vlm, FastAPI) and the Gemma 4 E4B model are downloaded on first launch into `~/Library/Application Support/OpenDicomViewer/`.
+
+### [v1.2.0](https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v1.2.0)
+
+Initial public release with AI annotation, MPR, and full DICOM viewer.
 
 ## How the AI Works
 

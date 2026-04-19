@@ -29,7 +29,7 @@ class UpdateChecker: ObservableObject {
         state = .checking
 
         do {
-            let url = URL(string: "https://api.github.com/repos/jnheo-md/open-dicom-viewer/releases/latest")!
+            let url = URL(string: "https://api.github.com/repos/Essential-Citronnier/ODV-Annotate/releases/latest")!
             var request = URLRequest(url: url)
             request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
 
@@ -56,7 +56,7 @@ class UpdateChecker: ObservableObject {
                 }
 
                 let downloadURL = findDMGURL(in: json)
-                    ?? URL(string: "https://github.com/jnheo-md/open-dicom-viewer/releases/latest")!
+                    ?? URL(string: "https://github.com/Essential-Citronnier/ODV-Annotate/releases/latest")!
 
                 state = .updateAvailable(version: remoteVersion, notes: body, downloadURL: downloadURL)
                 showUpdateAlert = true
