@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "protocol": 1,
+  "plugins": [
+    {
+      "id": "gemma-4-e4b",
+      "name": "Gemma 4 E4B (MLX)",
+      "vendor": "Google",
+      "summary": "Vision-language model for image description, ROI narration, and coarse localization. Runs on Apple Silicon via MLX.",
+      "execution": "resident-server",
+      "adapter_dir": "gemma",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 5.0,
+      "disk_gb": 4.8,
+      "requires_apple_silicon": true,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze Image",
+          "summary": "Describe the slice and localize notable findings.",
+          "inputs": ["slice2d", "text"],
+          "outputs": ["text", "bbox"],
+          "license": { "gate": "open", "identifier": "Apache-2.0" },
+          "weights": [
+            {
+              "id": "gemma-4-e4b-it-4bit",
+              "source": "huggingface",
+              "repo": "mlx-community/gemma-4-E4B-it-4bit",
+              "size_gb": 4.5
+            }
+          ],
+          "options": {
+            "mode": {
+              "type": "enum",
+              "values": ["clinical", "detailed", "abnormality", "educational"],
+              "default": "clinical",
+              "label": "Analysis mode"
+            }
+          }
+        },
+        {
+          "id": "describe-roi",
+          "label": "Describe ROI",
+          "summary": "Narrate a user-selected region.",
+          "inputs": ["slice2d", "roi", "text"],
+          "outputs": ["text"],
+          "license": { "gate": "open", "identifier": "Apache-2.0" },
+          "weights": [
+            {
+              "id": "gemma-4-e4b-it-4bit",
+              "source": "huggingface",
+              "repo": "mlx-community/gemma-4-E4B-it-4bit",
+              "size_gb": 4.5
+            }
+          ]
+        },
+        {
+          "id": "detect-abnormalities",
+          "label": "Detect Abnormalities",
+          "summary": "Localize potential abnormalities with severity labels.",
+          "inputs": ["slice2d", "text"],
+          "outputs": ["bbox", "text"],
+          "license": { "gate": "open", "identifier": "Apache-2.0" },
+          "weights": [
+            {
+              "id": "gemma-4-e4b-it-4bit",
+              "source": "huggingface",
+              "repo": "mlx-community/gemma-4-E4B-it-4bit",
+              "size_gb": 4.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sam2",
+      "name": "SAM 2 (Segment Anything 2)",
+      "vendor": "Meta",
+      "summary": "Promptable segmentation. Click or draw a box on a slice; the model returns a mask. The slice is encoded once and re-prompted interactively.",
+      "execution": "session",
+      "adapter_dir": "sam2",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 3.0,
+      "disk_gb": 0.9,
+      "max_sessions": 4,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "prompt-mask",
+          "label": "Prompt Segmentation",
+          "summary": "Segment the structure under a click or box prompt.",
+          "inputs": ["slice2d", "points", "box"],
+          "outputs": ["mask2d"],
+          "license": { "gate": "open", "identifier": "Apache-2.0" },
+          "weights": [
+            {
+              "id": "sam2.1-hiera-small",
+              "source": "huggingface",
+              "repo": "facebook/sam2.1-hiera-small",
+              "size_gb": 0.18
+            }
+          ],
+          "options": {
+            "multimask": {
+              "type": "bool",
+              "default": false,
+              "label": "Return best of three candidate masks"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "sam3",
+      "name": "SAM 3 (Segment Anything with Concepts)",
+      "vendor": "Meta",
+      "summary": "Promptable segmentation with concept prompts. Weights are distributed under Meta's SAM License and require accepting terms on Hugging Face before download.",
+      "execution": "session",
+      "adapter_dir": "sam3",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 6.0,
+      "disk_gb": 3.6,
+      "max_sessions": 2,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "prompt-mask",
+          "label": "Prompt Segmentation",
+          "summary": "Segment from click, box, or text-concept prompts.",
+          "inputs": ["slice2d", "points", "box", "text"],
+          "outputs": ["mask2d"],
+          "license": {
+            "gate": "gated-download",
+            "identifier": "SAM License (Meta)",
+            "terms_url": "https://huggingface.co/facebook/sam3",
+            "instructions": "Accept the model terms on Hugging Face, then download the checkpoint and place it at the path shown below. The store verifies the file is present; it never transmits your Hugging Face credentials."
+          },
+          "weights": [
+            {
+              "id": "sam3-checkpoint",
+              "source": "manual",
+              "repo": "facebook/sam3",
+              "filename": "sam3.pt",
+              "size_gb": 3.4
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "totalsegmentator",
+      "name": "TotalSegmentator",
+      "vendor": "University Hospital Basel",
+      "summary": "Automatic multi-organ CT segmentation. Runs once per study as a subprocess and writes a binary DICOM SEG; nothing stays resident afterwards.",
+      "execution": "one-shot",
+      "adapter_dir": "totalseg",
+      "entry": "run_segment.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 3.5,
+      "disk_gb": 3.0,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "total",
+          "label": "Total (117 structures)",
+          "summary": "Whole-body structure segmentation at 3 mm resolution.",
+          "inputs": ["series3d"],
+          "outputs": ["seg3d", "metrics"],
+          "license": {
+            "gate": "open",
+            "identifier": "Apache-2.0 (code) / CC BY 4.0 (weights)"
+          },
+          "weights": [
+            {
+              "id": "Dataset297_TotalSegmentator_total_3mm_1559subj",
+              "source": "totalseg-task",
+              "task": "total",
+              "size_gb": 0.25
+            }
+          ],
+          "options": {
+            "fast": {
+              "type": "bool",
+              "default": true,
+              "label": "Fast mode (3 mm)"
+            }
+          }
+        },
+        {
+          "id": "heartchambers_highres",
+          "label": "Heart Chambers (high-res)",
+          "summary": "Four cardiac chambers plus myocardium at full resolution.",
+          "inputs": ["series3d"],
+          "outputs": ["seg3d", "metrics"],
+          "license": {
+            "gate": "license-key",
+            "identifier": "TotalSegmentator academic license (non-commercial)",
+            "terms_url": "https://backend.totalsegmentator.com/license-academic/",
+            "key_format": "aca_",
+            "instructions": "This task requires a free academic license number. Request one at the URL above, then enter it here. The number is stored by TotalSegmentator in its own config directory; ODV does not copy it into the app's settings or logs."
+          },
+          "weights": [
+            {
+              "id": "Dataset301_heart_highres_1559subj",
+              "source": "totalseg-task",
+              "task": "heartchambers_highres",
+              "size_gb": 0.23
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -48,7 +48,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "OpenDicomViewer",
-            dependencies: ["DCMTKWrapper"]
+            dependencies: ["DCMTKWrapper"],
+            resources: [
+                .copy("Resources/plugins.json")
+            ]
         ),
         .testTarget(
             name: "OpenDicomViewerTests",
