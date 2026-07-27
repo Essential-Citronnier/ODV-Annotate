@@ -1,0 +1,302 @@
+// ResourceArbiter.swift
+// OpenDicomViewer
+//
+// Admission control for plugin memory. Decides whether a plugin may start, and
+// when it may not, which resident plugins to evict to make room.
+// PLUGIN_PROTOCOL.md invariant 4 is what gives this teeth: a plugin declares
+// its peak resident memory, and the host holds it to that declaration.
+// Licensed under the MIT License. See LICENSE for details.
+
+import Foundation
+import Darwin
+
+// MARK: - Memory observation
+
+/// A snapshot of machine memory, in gibibytes.
+///
+/// Gibibytes rather than gigabytes because `physicalMemory` reports powers of
+/// two: a "16 GB" Mac returns exactly 16 GiB, and the manifest's `ram_gb`
+/// figures are quoted on the same scale.
+struct MemoryStatus: Equatable, Sendable {
+    let physicalGB: Double
+    /// Memory the machine could hand out now without paging or compressing.
+    let availableGB: Double
+
+    static let bytesPerGB: Double = 1_073_741_824
+}
+
+/// Reads machine memory. Separated from the policy so that tests drive the
+/// policy with fixed numbers and never depend on the memory pressure of the
+/// machine running them.
+enum MemoryProbe {
+
+    /// Live reading from the Mach VM statistics.
+    ///
+    /// Available memory is derived as `physical - (internal - purgeable + wired
+    /// + compressed)`, which is the same decomposition Activity Monitor shows as
+    /// "Memory Used". Purgeable pages are subtracted back out because the kernel
+    /// will reclaim them under pressure rather than page us out, so counting
+    /// them as consumed would make the arbiter needlessly pessimistic.
+    ///
+    /// `host_statistics64` is the only interface that exposes the compressor
+    /// page count, and the compressor is precisely where a mis-admitted model
+    /// shows up first on Apple Silicon; `os_proc_available_memory` is iOS-only
+    /// and the `vm_stat` tool would mean parsing a subprocess.
+    static func system() -> MemoryStatus {
+        let physicalBytes = Double(ProcessInfo.processInfo.physicalMemory)
+        let physicalGB = physicalBytes / MemoryStatus.bytesPerGB
+
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let status = withUnsafeMutablePointer(to: &stats) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { raw in
+                host_statistics64(mach_host_self(), host_flavor_t(HOST_VM_INFO64), raw, &count)
+            }
+        }
+
+        guard status == KERN_SUCCESS else {
+            // The probe should never fail on a healthy system. If it does, assume
+            // half the machine is spoken for: pessimistic enough to keep the
+            // arbiter from over-admitting, generous enough to stay usable.
+            return MemoryStatus(physicalGB: physicalGB, availableGB: physicalGB / 2)
+        }
+
+        let pageSize = Double(vm_kernel_page_size)
+        let usedPages = Double(stats.internal_page_count)
+            - Double(stats.purgeable_count)
+            + Double(stats.wire_count)
+            + Double(stats.compressor_page_count)
+        let usedGB = max(0, usedPages * pageSize) / MemoryStatus.bytesPerGB
+        return MemoryStatus(physicalGB: physicalGB, availableGB: max(0, physicalGB - usedGB))
+    }
+
+    /// A fixed reading, for tests and for previews.
+    static func fixed(physicalGB: Double, availableGB: Double) -> @Sendable () -> MemoryStatus {
+        { MemoryStatus(physicalGB: physicalGB, availableGB: availableGB) }
+    }
+}
+
+// MARK: - Residency
+
+/// A plugin the arbiter is accounting for: either already resident, or the one
+/// asking to become resident.
+struct PluginResidency: Equatable, Sendable {
+    let pluginID: String
+    /// The manifest's `ram_gb`. The arbiter budgets against the declaration, not
+    /// against measured usage, so that a plugin which under-declares is starved
+    /// rather than silently allowed to thrash the machine (invariant 4).
+    let declaredRamGB: Double
+    /// Drives eviction order. Least recently used goes first.
+    let lastUsed: Date
+    /// False while a plugin is mid-invocation or holds open sessions. Such a
+    /// plugin blocks admission instead of being evicted out from under work the
+    /// user is waiting on.
+    let isEvictable: Bool
+
+    init(pluginID: String, declaredRamGB: Double, lastUsed: Date = Date(), isEvictable: Bool = true) {
+        self.pluginID = pluginID
+        self.declaredRamGB = declaredRamGB
+        self.lastUsed = lastUsed
+        self.isEvictable = isEvictable
+    }
+}
+
+// MARK: - Decision
+
+enum AdmissionDecision: Equatable, Sendable {
+    /// There is room now.
+    case admit
+    /// There is room once these plugins stop, in the order given.
+    case evictThenAdmit([String])
+    /// There is no arrangement of the resident set that fits.
+    case refuse(requiredGB: Double, availableGB: Double)
+
+    var isAdmitted: Bool {
+        if case .refuse = self { return false }
+        return true
+    }
+
+    /// Plugin identifiers the caller must stop before proceeding.
+    var evictions: [String] {
+        if case .evictThenAdmit(let ids) = self { return ids }
+        return []
+    }
+}
+
+/// Why a request was refused, in a form the store can show verbatim.
+extension AdmissionDecision {
+    var refusalError: PluginError? {
+        if case .refuse(let required, let available) = self {
+            return .insufficientMemory(required: required, available: available)
+        }
+        return nil
+    }
+}
+
+// MARK: - Arbiter
+
+/// Decides which plugins may hold memory at the same time.
+///
+/// The policy is two simultaneous constraints, both of which must hold after
+/// any evictions:
+///
+/// 1. **Declared budget.** The sum of declared RAM across everything resident
+///    must fit within `residentFraction` of physical memory. This term is
+///    deterministic — it does not move with whatever the machine happens to be
+///    doing — which is what makes concurrency behaviour reproducible and
+///    testable, and it is the term that decides the 16 GB case.
+/// 2. **Live headroom.** The incoming plugin's declared RAM must fit in memory
+///    the machine can actually hand out right now, less a safety margin.
+///    Evicting a resident plugin returns its declared RAM to this pool.
+///
+/// The first constraint keeps the host from co-locating models that nominally
+/// fit but leave nothing for the viewer itself; the second keeps it from
+/// admitting anything at all when the user has the machine loaded with other
+/// work. Neither alone is sufficient.
+///
+/// Everything here is a pure function of (demand, resident set, memory reading).
+/// `probe` is injectable, so the tests exercise the policy without allocating a
+/// byte.
+struct ResourceArbiter: Sendable {
+
+    /// Share of physical memory the plugin subsystem may claim in aggregate.
+    ///
+    /// Half. On a 16 GiB machine that is 8 GiB, which is what forces the case
+    /// this design exists for: Gemma resident at 5 GB plus TotalSegmentator's
+    /// 3.5 GB is 8.5 GB and does not fit, so Gemma is evicted for the duration
+    /// of the segmentation instead of the two of them fighting over the
+    /// compressor. The other half is not slack — it is macOS, the viewer, and a
+    /// decompressed CT volume, none of which declare themselves to the arbiter.
+    var residentFraction: Double
+
+    /// Held back from live availability so that admitting a plugin never takes
+    /// the machine to the edge. Sized to roughly one large series plus the
+    /// window server's working set.
+    var safetyMarginGB: Double
+
+    var probe: @Sendable () -> MemoryStatus
+
+    init(residentFraction: Double = 0.5,
+         safetyMarginGB: Double = 2.0,
+         probe: @escaping @Sendable () -> MemoryStatus = { MemoryProbe.system() }) {
+        self.residentFraction = residentFraction
+        self.safetyMarginGB = safetyMarginGB
+        self.probe = probe
+    }
+
+    // MARK: Budgets
+
+    /// Aggregate declared-RAM ceiling for all plugins together.
+    func declaredBudgetGB(_ status: MemoryStatus) -> Double {
+        max(0, status.physicalGB * residentFraction)
+    }
+
+    /// Memory the arbiter is willing to commit to a newcomer right now.
+    func liveHeadroomGB(_ status: MemoryStatus) -> Double {
+        status.availableGB - safetyMarginGB
+    }
+
+    // MARK: Policy
+
+    /// Decide whether `request` may become resident alongside `residents`.
+    ///
+    /// A plugin that is already resident is admitted without disturbing
+    /// anything: re-entering a running server must not be able to evict it.
+    func admit(_ request: PluginResidency, residents: [PluginResidency]) -> AdmissionDecision {
+        if residents.contains(where: { $0.pluginID == request.pluginID }) {
+            return .admit
+        }
+        return decide(request, residents: residents.filter { $0.pluginID != request.pluginID })
+    }
+
+    private func decide(_ request: PluginResidency, residents: [PluginResidency]) -> AdmissionDecision {
+        let status = probe()
+        let budget = declaredBudgetGB(status)
+        let headroom = liveHeadroomGB(status)
+
+        var remaining = residents
+        var evicted: [String] = []
+        var freed: Double = 0
+
+        while true {
+            let residentDemand = remaining.reduce(0) { $0 + $1.declaredRamGB }
+            let fitsBudget = residentDemand + request.declaredRamGB <= budget + Self.epsilon
+            let fitsHeadroom = request.declaredRamGB <= headroom + freed + Self.epsilon
+            if fitsBudget && fitsHeadroom { break }
+
+            // Least recently used first; ties broken by identifier so the plan is
+            // reproducible for a given input rather than dependent on dictionary
+            // ordering.
+            let candidates = remaining.filter(\.isEvictable)
+                .sorted { ($0.lastUsed, $0.pluginID) < ($1.lastUsed, $1.pluginID) }
+            guard let victim = candidates.first else {
+                let stillResident = remaining.reduce(0) { $0 + $1.declaredRamGB }
+                return .refuse(
+                    requiredGB: request.declaredRamGB,
+                    availableGB: max(0, min(budget - stillResident, headroom + freed)))
+            }
+
+            remaining.removeAll { $0.pluginID == victim.pluginID }
+            evicted.append(victim.pluginID)
+            freed += victim.declaredRamGB
+        }
+
+        return evicted.isEmpty ? .admit : .evictThenAdmit(evicted)
+    }
+
+    /// Admission for a one-shot invocation.
+    ///
+    /// Identical accounting to `admit`, with one difference that matters: a
+    /// one-shot process is transient and owns no resident slot, so a server
+    /// already running under the same identifier is not a reason to skip the
+    /// check. The subprocess needs its own peak on top of whatever is held, and
+    /// that sibling is as evictable as any other.
+    func admitOneShot(_ request: PluginResidency, residents: [PluginResidency]) -> AdmissionDecision {
+        decide(request, residents: residents)
+    }
+
+    /// Plugins to stop before `request` runs, without deciding admission — used
+    /// by callers that want to pre-empt proactively.
+    func evictionPlan(for request: PluginResidency, residents: [PluginResidency]) -> [String] {
+        admit(request, residents: residents).evictions
+    }
+
+    /// Tolerance for the comparisons above. Declared figures are one-decimal
+    /// gigabyte values from JSON; without a tolerance a sum such as 5.0 + 3.0
+    /// can fail a `<= 8.0` test on binary floating point.
+    private static let epsilon = 1e-9
+}
+
+// MARK: - Session admission
+
+/// LRU bookkeeping for `session` plugins, which bound their own cache but rely
+/// on the host to decide which entry to drop (PLUGIN_PROTOCOL.md section 1.2).
+struct SessionLedger: Sendable {
+    private(set) var order: [String] = []
+    let limit: Int
+
+    init(limit: Int) {
+        self.limit = max(1, limit)
+    }
+
+    /// Record use of a session, returning the sessions that must be closed to
+    /// stay within `limit`.
+    mutating func touch(_ sessionID: String) -> [String] {
+        order.removeAll { $0 == sessionID }
+        order.append(sessionID)
+        var evicted: [String] = []
+        while order.count > limit {
+            evicted.append(order.removeFirst())
+        }
+        return evicted
+    }
+
+    mutating func remove(_ sessionID: String) {
+        order.removeAll { $0 == sessionID }
+    }
+
+    mutating func removeAll() {
+        order.removeAll()
+    }
+}
