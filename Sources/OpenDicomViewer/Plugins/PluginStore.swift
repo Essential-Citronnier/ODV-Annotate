@@ -238,6 +238,15 @@ final class PluginStore: ObservableObject {
 
     let machine: PluginMachineProfile
 
+    /// The store the application's own surfaces share.
+    ///
+    /// The menu and the sidebar live in different view trees, and a separate
+    /// instance per tree would give each its own expansion, filter, and derived
+    /// row state over the same underlying runtime — so an install begun from one
+    /// would not be reflected in the other. Tests and previews construct their
+    /// own instances against a mock facade instead.
+    static let shared = PluginStore(facade: PluginRuntime.shared)
+
     private let facade: any PluginRuntimeFacade
     private var cancellables: Set<AnyCancellable> = []
 

@@ -14,7 +14,7 @@ struct OpenDicomViewerApp: App {
     @StateObject private var updateChecker = UpdateChecker()
     @StateObject private var aiServerManager = AIServerManager.shared
     @ObservedObject private var aiService = AIService.shared
-    @StateObject private var pluginStore = PluginStore(facade: PluginRuntime.shared)
+    @ObservedObject private var pluginStore = PluginStore.shared
 
     var body: some Scene {
         WindowGroup {

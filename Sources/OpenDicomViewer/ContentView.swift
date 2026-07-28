@@ -27,9 +27,10 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @FocusState private var isFocused: Bool
 
-    /// Owned here rather than by the sheet so that closing the store mid-install
-    /// does not discard the install's state.
-    @StateObject private var pluginStore = PluginStore(facade: PluginRuntime.shared)
+    /// The shared store, so an install begun from the AI menu and one begun from
+    /// the sidebar are the same install. Held here rather than by the sheet so
+    /// that closing the store mid-install does not discard its state.
+    @ObservedObject private var pluginStore = PluginStore.shared
     @State private var showPluginStore = false
 
     var body: some View {

@@ -18,19 +18,40 @@ final class PluginFacadeTests: XCTestCase {
     }
 
     /// The store calls `install(_:licenseKey:)` through the facade. If that
-    /// resolves to the runtime's own method rather than the wrapper, no task is
-    /// registered and Cancel becomes a silent no-op.
-    func testFacadeInstallIsTheCancellableWrapper() async {
+    /// resolves to the runtime's own method rather than the cancellable
+    /// wrapper, no task is registered and Cancel becomes a silent no-op.
+    ///
+    /// The distinguishing observable is the log line the wrapper writes on
+    /// cancel: the native path has no such notion, so a bypassed wrapper leaves
+    /// the log untouched. A test that merely called both methods would pass in
+    /// either state and guard nothing.
+    func testCancelInstallIsObservableThroughTheFacade() async throws {
+        let runtime = PluginRuntime.shared
+        runtime.load(manifestURL: try manifestURL())
+        let facade: PluginRuntimeFacade = runtime
+
+        let ref = PluginTaskRef(pluginID: "gemma-4-e4b", taskID: "analyze")
+        let before = facade.installLog(for: ref)
+
+        await facade.cancelInstall(ref)
+
+        let after = facade.installLog(for: ref)
+        XCTAssertNotEqual(after, before,
+                          "cancelInstall produced no observable effect, which is what a "
+                          + "bypassed wrapper looks like")
+        XCTAssertTrue(after.contains("cancel") || after.contains("Cancel"),
+                      "expected a cancellation note in the log, got: \(after.suffix(200))")
+    }
+
+    /// Cancelling a task that was never installed must be harmless rather than
+    /// trapping, since the store offers Cancel from several states.
+    func testCancelOnUnknownRefIsHarmless() async {
         let facade = runtimeAsFacade()
         let ref = PluginTaskRef(pluginID: "does-not-exist", taskID: "nope")
-
-        // An unresolvable ref returns immediately from the underlying install,
-        // so this exercises the wrapper's registration path without touching
-        // the filesystem or spawning anything.
         await facade.install(ref, licenseKey: nil)
-
-        // Cancelling an unknown ref must be harmless rather than trapping.
         await facade.cancelInstall(ref)
+        XCTAssertEqual(facade.installState(for: ref), .notInstalled,
+                       "an unresolvable ref must stay notInstalled")
     }
 
     func testFacadeExposesTheRuntimeManifest() {
