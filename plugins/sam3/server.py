@@ -37,8 +37,8 @@ from typing import Any, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from _shared.protocol import ErrorCode, PluginError  # noqa: E402
+from _shared.cli import parse_server_args  # noqa: E402
 from _shared.sam_session import SamSessionAdapter, select_device  # noqa: E402
-from _shared.serve import parse_server_args, run_adapter  # noqa: E402
 from _shared.weights import (  # noqa: E402
     install_arg_present,
     parse_install_args,
@@ -322,6 +322,14 @@ def main(argv: list[str] | None = None) -> int:
             parse_install_args("SAM 3 weight verifier.", argv), install_weights
         )
     args = parse_server_args("SAM 3 session adapter for OpenDicomViewer.", argv)
+
+    # Imported here rather than at module scope: `serve` pulls in fastapi and
+    # uvicorn. For this plugin the point is sharper than convenience -- the
+    # gated-weight check above needs nothing but the standard library, and
+    # requiring a web stack to be installed before the store can tell the user
+    # where to put a checkpoint would be backwards.
+    from _shared.serve import run_adapter
+
     run_adapter(build_adapter(), args)
     return 0
 

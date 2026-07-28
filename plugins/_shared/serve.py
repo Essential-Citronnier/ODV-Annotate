@@ -30,6 +30,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+# Re-exported so that `serve` remains the single place to look for the HTTP
+# execution models. Adapters import it from `_shared.cli` instead, because
+# importing this module costs the whole web stack and argument parsing must
+# work before that stack is installed.
+from .cli import parse_server_args
 from .protocol import (
     ErrorCode,
     PluginError,

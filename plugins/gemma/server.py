@@ -36,7 +36,7 @@ from _shared.protocol import (  # noqa: E402
     TaskRequest,
     TaskSpec,
 )
-from _shared.serve import parse_server_args, run_adapter  # noqa: E402
+from _shared.cli import parse_server_args  # noqa: E402
 from _shared.weights import (  # noqa: E402
     download_huggingface,
     install_arg_present,

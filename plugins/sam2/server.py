@@ -27,8 +27,8 @@ from typing import Any, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from _shared.protocol import ErrorCode, PluginError  # noqa: E402
+from _shared.cli import parse_server_args  # noqa: E402
 from _shared.sam_session import SamSessionAdapter, select_device  # noqa: E402
-from _shared.serve import parse_server_args, run_adapter  # noqa: E402
 from _shared.weights import (  # noqa: E402
     download_huggingface,
     install_arg_present,
@@ -274,6 +274,13 @@ def main(argv: list[str] | None = None) -> int:
             parse_install_args("SAM 2 weight installer.", argv), install_weights
         )
     args = parse_server_args("SAM 2 session adapter for OpenDicomViewer.", argv)
+
+    # Imported here rather than at module scope: `serve` pulls in fastapi and
+    # uvicorn, and the host must be able to run `--help` and, more importantly,
+    # `--install-weights` on an environment that does not have them yet. This
+    # hook is what populates that environment.
+    from _shared.serve import run_adapter
+
     run_adapter(build_adapter(), args)
     return 0
 
