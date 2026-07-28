@@ -37,6 +37,12 @@ from _shared.protocol import (  # noqa: E402
     TaskSpec,
 )
 from _shared.serve import parse_server_args, run_adapter  # noqa: E402
+from _shared.weights import (  # noqa: E402
+    download_huggingface,
+    install_arg_present,
+    parse_install_args,
+    run_install,
+)
 
 PLUGIN_ID = "gemma-4-e4b"
 MODEL_ID = "mlx-community/gemma-4-E4B-it-4bit"
@@ -517,7 +523,40 @@ def attach_legacy_routes(app, adapter: GemmaAdapter) -> None:
         return {"regions": outputs["bbox"]}
 
 
-def main(argv: list[str] | None = None) -> None:
+# ---------------------------------------------------------------------------
+# Weight acquisition (PLUGIN_PROTOCOL.md section 4b)
+# ---------------------------------------------------------------------------
+
+
+def install_weights(args, dest: Path, reporter) -> list[Path]:
+    """Fetch the MLX Gemma checkpoint into the host-owned directory."""
+    if args.source != "huggingface":
+        raise PluginError(
+            ErrorCode.BAD_INPUT,
+            f"{PLUGIN_ID} only knows the 'huggingface' weight source, "
+            f"got '{args.source}'",
+            recoverable=False,
+        )
+    files = download_huggingface(args.repo or MODEL_ID, dest, reporter)
+    # mlx-vlm loads a model directory rather than one named file, and the shard
+    # count varies by quantization, so the config plus at least one weight
+    # shard is what "present" means here.
+    config = dest / "config.json"
+    shards = [path for path in files if path.suffix == ".safetensors"]
+    if not shards:
+        raise PluginError(
+            ErrorCode.INTERNAL,
+            f"No weight shards were downloaded from {args.repo or MODEL_ID}.",
+        )
+    return [config, *shards]
+
+
+def main(argv: list[str] | None = None) -> int:
+    if install_arg_present(argv):
+        return run_install(
+            parse_install_args("Gemma 4 E4B weight installer.", argv), install_weights
+        )
+
     args = parse_server_args("Gemma 4 E4B adapter for OpenDicomViewer.", argv)
     adapter = GemmaAdapter()
 
@@ -531,7 +570,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("refusing to bind a non-loopback address")
     uvicorn.run(app, host=args.host, port=args.port,
                 log_level=args.log_level, workers=1)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

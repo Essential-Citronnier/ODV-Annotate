@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 # `_shared` lives one directory up; the host spawns this file directly, so only
 # this adapter's own directory is on sys.path. See plugins/README.md.
@@ -42,6 +44,12 @@ from _shared.oneshot import (  # noqa: E402
 )
 from _shared.progress import ProgressReporter  # noqa: E402
 from _shared.protocol import ErrorCode, PluginError  # noqa: E402
+from _shared.weights import (  # noqa: E402
+    install_arg_present,
+    license_key,
+    parse_install_args,
+    run_install,
+)
 
 PLUGIN_ID = "totalsegmentator"
 
@@ -59,6 +67,32 @@ TASKS: dict[str, str] = {
 OPTIONS = {"fast": "bool"}
 
 SEG_FILENAME = "segmentation.dcm"
+
+
+class Weight(NamedTuple):
+    """One manifest weight id, resolved to what TotalSegmentator calls it.
+
+    The two names differ and the difference matters. The manifest's
+    `Dataset297_..._total_3mm_1559subj` is the 3 mm model, which
+    `totalseg_download_weights` calls `total_fast`; asking it for `total`
+    instead would fetch the five full-resolution datasets -- gigabytes the
+    manifest does not declare and the store did not budget for.
+    """
+
+    downloader_task: str
+    dataset_dirs: tuple[str, ...]
+
+
+WEIGHTS: dict[str, Weight] = {
+    "Dataset297_TotalSegmentator_total_3mm_1559subj": Weight(
+        downloader_task="total_fast",
+        dataset_dirs=("Dataset297_TotalSegmentator_total_3mm_1559subj",),
+    ),
+    "Dataset301_heart_highres_1559subj": Weight(
+        downloader_task="heartchambers_highres",
+        dataset_dirs=("Dataset301_heart_highres_1559subj",),
+    ),
+}
 
 # Tasks whose weights sit behind the free TotalSegmentator academic licence.
 # Distinguishing these lets a missing licence surface as `license_required`,
@@ -99,37 +133,45 @@ def _totalsegmentator_version() -> str:
         return "unknown"
 
 
-def _weights_present(ts_task: str) -> bool:
+# Which weight id each manifest task needs at run time. Kept beside WEIGHTS so
+# the presence check and the installer cannot disagree about what "installed"
+# means for a given task.
+TASK_WEIGHTS: dict[str, str] = {
+    "total": "Dataset297_TotalSegmentator_total_3mm_1559subj",
+    "heartchambers_highres": "Dataset301_heart_highres_1559subj",
+}
+
+
+def _weights_present(task_id: str) -> bool:
     """Whether this task's nnU-Net weights are already on disk.
 
     Checked before the run so a missing download reports `not_ready` in a
-    second rather than after TotalSegmentator has loaded torch and started
-    fetching. The directory names are TotalSegmentator's own and are stable
-    within a major version; an unrecognized task is treated as present so a
-    new task is never blocked by a stale table here.
+    second, rather than after TotalSegmentator has loaded torch and started
+    fetching. A task with no entry is treated as present, so a task added to
+    the manifest is never blocked by a stale table here.
     """
-    dataset_dirs = {
-        "total": ("Dataset297_TotalSegmentator_total_3mm_1559subj",
-                  "Dataset291_TotalSegmentator_part1_organs_1559subj"),
-        "heartchambers_highres": ("Dataset301_heart_highres_1559subj",),
-    }
-    expected = dataset_dirs.get(ts_task)
-    if not expected:
+    weight = WEIGHTS.get(TASK_WEIGHTS.get(task_id, ""))
+    if weight is None:
         return True
-    root = Path(os.environ.get("TOTALSEG_HOME_DIR",
-                               Path.home() / ".totalsegmentator")) / "nnunet" / "results"
-    return any((root / name).is_dir() for name in expected)
+    root = _totalseg_home() / "nnunet" / "results"
+    return any((root / name).is_dir() for name in weight.dataset_dirs)
 
 
-def _license_registered() -> bool:
+def _totalseg_home(override: Path | None = None) -> Path:
+    return override or Path(
+        os.environ.get("TOTALSEG_HOME_DIR", Path.home() / ".totalsegmentator")
+    )
+
+
+def _license_registered(home: Path | None = None) -> bool:
     """Whether a TotalSegmentator academic licence number is on this machine.
 
     TotalSegmentator stores it in its own config file, written by
-    `totalseg_set_license`. ODV reads presence only; it never copies the number
-    into the app's settings or logs.
+    `totalseg_set_license`. Only presence is read here -- never the value, which
+    is not copied into the app's settings, its logs, or anything this adapter
+    writes.
     """
-    config = Path(os.environ.get("TOTALSEG_HOME_DIR",
-                                 Path.home() / ".totalsegmentator")) / "config.json"
+    config = _totalseg_home(home) / "config.json"
     if not config.is_file():
         return False
     try:
@@ -138,6 +180,14 @@ def _license_registered() -> bool:
         return bool(json.loads(config.read_text()).get("license_number"))
     except (OSError, ValueError):
         return False
+
+
+def _download_script() -> str | None:
+    """Locate `totalseg_download_weights`, preferring this venv's copy."""
+    candidate = Path(sys.executable).with_name("totalseg_download_weights")
+    if candidate.exists():
+        return str(candidate)
+    return shutil.which("totalseg_download_weights")
 
 
 # ---------------------------------------------------------------------------
@@ -346,10 +396,10 @@ def pipeline(args: argparse.Namespace, out_dir: Path,
             "This task needs a free TotalSegmentator academic licence number. "
             f"Request one at {LICENSE_URL}, then register it in the plugin store.",
         )
-    if not _weights_present(ts_task):
+    if not _weights_present(args.task):
         raise PluginError(
             ErrorCode.NOT_READY,
-            f"Weights for the '{ts_task}' task are not downloaded yet. "
+            f"Weights for the '{args.task}' task are not downloaded yet. "
             "Install the task from the plugin store.",
         )
 
@@ -381,7 +431,126 @@ def pipeline(args: argparse.Namespace, out_dir: Path,
     return OneShotResult(outputs={"seg3d": SEG_FILENAME, "metrics": metrics})
 
 
+# ---------------------------------------------------------------------------
+# Weight acquisition (PLUGIN_PROTOCOL.md section 4b)
+# ---------------------------------------------------------------------------
+
+
+def _register_license(key: str, home: Path, reporter: ProgressReporter) -> None:
+    """Register an academic licence number with TotalSegmentator.
+
+    The key arrives in `ODV_PLUGIN_LICENSE_KEY` rather than argv because
+    process arguments are world-readable through `ps` (section 4b). It is
+    handed to TotalSegmentator's own config writer, which owns the file it
+    lives in; it is never logged, never echoed to stdout, and never written
+    into anything this adapter creates.
+    """
+    os.environ["TOTALSEG_HOME_DIR"] = str(home)
+    from totalsegmentator.config import set_license_number
+
+    reporter.log("Registering the academic licence number")
+    try:
+        set_license_number(key, skip_validation=False)
+    except BaseException as exc:  # noqa: BLE001
+        # The exception text is deliberately not forwarded: TotalSegmentator's
+        # validation errors quote the rejected number back, which would put the
+        # key into the plugin log view.
+        raise PluginError(
+            ErrorCode.LICENSE_REQUIRED,
+            f"The academic licence number was rejected ({type(exc).__name__}). "
+            f"Check the number, or request one at {LICENSE_URL}.",
+        ) from None
+
+
+def install_weights(args, dest: Path, reporter: ProgressReporter) -> list[Path]:
+    """Fetch one TotalSegmentator task's weights into the host-owned directory.
+
+    TotalSegmentator resolves its weight directory from `TOTALSEG_HOME_DIR`
+    rather than accepting a destination argument, so `--dest` is honoured by
+    pointing that variable at it for the download. The weights then live where
+    the store can remove them when the user uninstalls the plugin, instead of
+    in a location the host does not know about.
+    """
+    if args.source != "totalseg-task":
+        raise PluginError(
+            ErrorCode.BAD_INPUT,
+            f"{PLUGIN_ID} only knows the 'totalseg-task' weight source, "
+            f"got '{args.source}'",
+            recoverable=False,
+        )
+    if not args.task:
+        raise PluginError(
+            ErrorCode.BAD_INPUT,
+            "--task is required for the totalseg-task source",
+            recoverable=False,
+        )
+
+    weight = WEIGHTS.get(args.weight_id)
+    if weight is None:
+        raise PluginError(
+            ErrorCode.BAD_INPUT,
+            f"Unknown weight id '{args.weight_id}'. This adapter provides "
+            f"{', '.join(sorted(WEIGHTS))}.",
+            recoverable=False,
+        )
+
+    reporter.stage(0.0, 0.05, "Checking the model environment")
+    _require_totalsegmentator()
+
+    key = license_key()
+    environment = dict(os.environ)
+    environment["TOTALSEG_HOME_DIR"] = str(dest)
+
+    if key:
+        _register_license(key, dest, reporter)
+    elif args.task in LICENSE_REQUIRED_TASKS and not _license_registered(dest):
+        raise PluginError(
+            ErrorCode.LICENSE_REQUIRED,
+            f"The '{args.task}' weights need a free TotalSegmentator academic "
+            f"licence number. Request one at {LICENSE_URL} and enter it in the "
+            f"plugin store.",
+        )
+
+    executable = _download_script()
+    if executable is None:
+        raise PluginError(
+            ErrorCode.NOT_READY,
+            "TotalSegmentator's 'totalseg_download_weights' script was not found "
+            "in this plugin's environment. Reinstall the plugin from the store.",
+        )
+
+    reporter.stage(0.05, 0.95, f"Downloading weights for '{args.task}'")
+    # The console script is invoked rather than the library's internals: the
+    # module paths behind it move between releases, while its interface has not.
+    # Its own progress output is not in the protocol's format, so it lands in
+    # the plugin log view as log lines and the bar moves on stage boundaries.
+    code = subprocess.call([executable, "-t", weight.downloader_task],
+                           env=environment)
+    if code != 0:
+        raise PluginError(
+            ErrorCode.LICENSE_REQUIRED if args.task in LICENSE_REQUIRED_TASKS
+            else ErrorCode.INTERNAL,
+            f"Downloading weights for '{args.task}' failed (exit {code}). "
+            + (f"This task needs an academic licence number: {LICENSE_URL}"
+               if args.task in LICENSE_REQUIRED_TASKS else ""),
+        )
+
+    # nnU-Net loads a task from its dataset directory, so that directory is what
+    # must exist for this weight id to count as installed. `run_install` checks
+    # every path returned here and fails the install if any is absent, which is
+    # what stops a downloader that exits 0 without writing anything from being
+    # reported as success. Naming the specific directory rather than globbing
+    # `Dataset*` keeps exit 0 meaning "this weight is installed" rather than
+    # "some weight is".
+    return [dest / "nnunet" / "results" / name for name in weight.dataset_dirs]
+
+
 def main(argv: list[str] | None = None) -> int:
+    if install_arg_present(argv):
+        return run_install(
+            parse_install_args("TotalSegmentator weight installer.", argv),
+            install_weights,
+        )
     args = parse_oneshot_args(
         "TotalSegmentator one-shot adapter for OpenDicomViewer.",
         tasks=list(TASKS),

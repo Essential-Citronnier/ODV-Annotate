@@ -17,3 +17,7 @@ uvicorn[standard]>=0.32.0
 
 Pillow>=10.0.0
 numpy>=1.24.0
+
+# Deliberately no huggingface_hub: this plugin's section 4b install mode only
+# verifies that a manually placed checkpoint exists. Not having the client
+# library is one more reason it cannot quietly acquire gated weights.

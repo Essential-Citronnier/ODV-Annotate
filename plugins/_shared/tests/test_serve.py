@@ -173,14 +173,22 @@ class FakeBackend:
         import numpy as np
 
         width, height = state["size"]
-        mask = np.zeros((height, width), dtype=np.uint8)
-        if points:
-            x, y, _ = points[0]
-            mask[max(0, y - 2):y + 3, max(0, x - 2):x + 3] = 1
-        elif box is not None:
-            x0, y0, x1, y1 = box
-            mask[y0:y1, x0:x1] = 1
-        return mask, 0.87
+
+        def stamp(radius: int):
+            mask = np.zeros((height, width), dtype=np.uint8)
+            if points:
+                x, y, _ = points[0]
+                mask[max(0, y - radius):y + radius + 1,
+                     max(0, x - radius):x + radius + 1] = 1
+            elif box is not None:
+                x0, y0, x1, y1 = box
+                mask[y0:y1, x0:x1] = 1
+            return mask
+
+        if multimask:
+            # Three candidates at different scales, best-first, as SAM does.
+            return [(stamp(2), 0.87), (stamp(3), 0.61), (stamp(1), 0.44)]
+        return [(stamp(2), 0.87)]
 
 
 def _png(width: int = 32, height: int = 24) -> str:
@@ -225,6 +233,42 @@ def test_prompt_mask_round_trip_produces_a_decodable_mask():
     # A 5x5 stamp around the click: the count pins that the encoder and the
     # host's decoder agree on which phase is foreground.
     assert sum(decode_rle(mask["rle"], 32, 24)) == 25
+
+
+def test_a_single_mask_is_emitted_as_a_bare_object():
+    """Section 3 allows either shape; one mask stays the simple one."""
+    client = _client(_session_adapter())
+    session_id = client.post("/session/open",
+                             json={"inputs": {"slice2d": _png()}}).json()["session_id"]
+    body = client.post("/task/prompt-mask", json={
+        "session_id": session_id,
+        "inputs": {"points": [{"x": 0.5, "y": 0.5, "label": 1}]},
+    }).json()
+    assert isinstance(body["outputs"]["mask2d"], dict)
+
+
+def test_multimask_returns_a_best_first_list():
+    """SAM's multimask output, in the list shape section 3 added for it."""
+    from _shared.rle import decode_rle
+
+    client = _client(_session_adapter())
+    session_id = client.post("/session/open",
+                             json={"inputs": {"slice2d": _png(32, 24)}}).json()["session_id"]
+    body = client.post("/task/prompt-mask", json={
+        "session_id": session_id,
+        "inputs": {"points": [{"x": 0.5, "y": 0.5, "label": 1}]},
+        "options": {"multimask": True},
+    }).json()
+
+    masks = body["outputs"]["mask2d"]
+    assert isinstance(masks, list) and len(masks) == 3
+    confidences = [m["confidence"] for m in masks]
+    assert confidences == sorted(confidences, reverse=True)
+    # Every candidate must be independently well-formed, not just the first.
+    for mask in masks:
+        assert (mask["width"], mask["height"]) == (32, 24)
+        assert sum(mask["rle"]) == 32 * 24
+        assert sum(decode_rle(mask["rle"], 32, 24)) > 0
 
 
 def test_a_box_prompt_alone_is_accepted():

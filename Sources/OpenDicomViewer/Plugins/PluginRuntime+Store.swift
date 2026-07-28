@@ -71,13 +71,11 @@ extension PluginRuntime: PluginRuntimeFacade {
     }
 
     /// Runs the install as a cancellable task so the store's Cancel action has
-    /// a handle on it. `PluginRuntime.install` itself takes a defaulted
-    /// `licenseKey`, which already satisfies the facade requirement; this
-    /// wrapper exists only to register the task.
-    func beginInstall(_ ref: PluginTaskRef, licenseKey: String?) async {
+    /// a handle on it. The work itself lives in `performInstall`.
+    func install(_ ref: PluginTaskRef, licenseKey: String?) async {
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.install(ref, licenseKey: licenseKey)
+            await self.performInstall(ref, licenseKey: licenseKey)
             installRegistry.finish(ref)
         }
         installRegistry.register(ref, task: task)

@@ -457,7 +457,13 @@ final class PluginRuntime: ObservableObject {
 
     /// Install a task. `licenseKey` is forwarded to the adapter for this call
     /// only and is never persisted or logged.
-    func install(_ ref: PluginTaskRef, licenseKey: String? = nil) async {
+    /// Perform the install synchronously with respect to the caller.
+    ///
+    /// Named distinctly from the store facade's `install(_:licenseKey:)`, which
+    /// wraps this in a cancellable task so the store's Cancel action has a
+    /// handle on it. Default arguments do not distinguish declarations, so the
+    /// two cannot share a name.
+    func performInstall(_ ref: PluginTaskRef, licenseKey: String? = nil) async {
         guard let (plugin, task) = try? resolve(ref) else { return }
         let buffer = log(for: plugin.id)
         buffer.line("Installing \(task.label)…")
