@@ -1,0 +1,20 @@
+# SAM 2 session adapter.
+#
+# Installed into this plugin's own virtualenv (PLUGIN_PROTOCOL.md section 7).
+# torch and mlx are not co-installable in practice, so this environment is
+# separate from the Gemma adapter's.
+#
+# torch runs on MPS where available and falls back to CPU; the manifest does
+# not mark this plugin as requiring Apple Silicon.
+
+torch>=2.2.0
+# transformers' SAM 2 image processor imports torchvision at construction time;
+# without it the model loads and then fails on the first session.
+torchvision>=0.17.0
+transformers>=4.57.0
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+Pillow>=10.0.0
+numpy>=1.24.0

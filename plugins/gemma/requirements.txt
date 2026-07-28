@@ -1,0 +1,14 @@
+# Gemma 4 E4B resident adapter (Apple Silicon, macOS 14+).
+#
+# Installed into this plugin's own virtualenv (PLUGIN_PROTOCOL.md section 7).
+# MLX and torch are not co-installable in practice, which is why the SAM and
+# TotalSegmentator adapters have separate environments.
+
+mlx>=0.22.0
+mlx-vlm>=0.4.0
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+Pillow>=10.0.0
+pydantic>=2.0.0

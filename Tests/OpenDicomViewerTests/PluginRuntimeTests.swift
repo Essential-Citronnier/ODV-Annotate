@@ -953,7 +953,10 @@ final class PluginRuntimeTests: XCTestCase {
         runtime.load(manifestURL: url)
 
         do {
-            try await runtime.start("gemma-4-e4b")
+            // `start(_:)` is the store facade's non-throwing wrapper, which
+            // routes failures into the log; the throwing spelling is the one
+            // that reports refusal to a caller.
+            try await runtime.startPlugin("gemma-4-e4b")
             XCTFail("starting an uninstalled plugin must throw")
         } catch let error as PluginError {
             guard case .notInstalled = error else {

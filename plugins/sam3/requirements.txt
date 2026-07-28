@@ -1,0 +1,19 @@
+# SAM 3 session adapter.
+#
+# Installed into this plugin's own virtualenv (PLUGIN_PROTOCOL.md section 7).
+# Weights are NOT installed by pip and are NOT downloaded by this adapter: they
+# are distributed under Meta's SAM License and the user places the checkpoint
+# manually after accepting the terms. See the gated-download gate in
+# plugins.json and section 6 of the protocol.
+
+torch>=2.2.0
+# The SAM image processors import torchvision at construction time; without it
+# the model loads and then fails on the first session.
+torchvision>=0.17.0
+transformers>=4.57.0
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+Pillow>=10.0.0
+numpy>=1.24.0

@@ -393,6 +393,14 @@ final class PluginRuntime: ObservableObject {
         }
     }
 
+    /// Re-derive install state from disk.
+    ///
+    /// Exposed for the store-facing conformance in PluginRuntime+Store.swift,
+    /// which must refresh after actions the store drives.
+    func reloadInstallStates() {
+        refreshInstallStates()
+    }
+
     private func refreshInstallStates() {
         var states: [PluginTaskRef: PluginInstallState] = [:]
         for plugin in manifest.plugins {
@@ -469,7 +477,10 @@ final class PluginRuntime: ObservableObject {
     }
 
     /// Remove a task's weights, and the venv when no sibling task needs it.
-    func remove(_ ref: PluginTaskRef) async throws {
+    ///
+    /// Named distinctly from the store facade's non-throwing `remove(_:)`,
+    /// which delegates here; Swift cannot host both spellings on one type.
+    func removeTask(_ ref: PluginTaskRef) async throws {
         let (plugin, task) = try resolve(ref)
         if runtimeState(plugin.id) != .stopped { await stop(plugin.id) }
         try installer.remove(plugin: plugin, task: task, onLog: { [weak self] pluginID, line in
@@ -508,7 +519,9 @@ final class PluginRuntime: ObservableObject {
     // MARK: Start and stop
 
     /// Start a resident plugin and wait until it reports ready.
-    func start(_ pluginID: String) async throws {
+    ///
+    /// See `removeTask` on the naming.
+    func startPlugin(_ pluginID: String) async throws {
         let plugin = try self.plugin(pluginID)
         guard plugin.execution.isResident else { return }
         if runtimeState(pluginID) == .ready { return }
@@ -698,7 +711,7 @@ final class PluginRuntime: ObservableObject {
         guard plugin.execution == .session else {
             throw PluginError.notReady("\(plugin.name) does not hold sessions.")
         }
-        try await start(pluginID)
+        try await startPlugin(pluginID)
         guard let port = assignedPorts[pluginID] else {
             throw PluginError.notReady("\(plugin.name) has no assigned port.")
         }
@@ -762,7 +775,7 @@ final class PluginRuntime: ObservableObject {
     private func invokeResident(
         plugin: PluginDescriptor, ref: PluginTaskRef, invocation: PluginInvocation
     ) async throws -> PluginResult {
-        try await start(plugin.id)
+        try await startPlugin(plugin.id)
         guard let port = assignedPorts[plugin.id] else {
             throw PluginError.notReady("\(plugin.name) has no assigned port.")
         }

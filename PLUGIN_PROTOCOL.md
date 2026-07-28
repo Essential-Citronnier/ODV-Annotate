@@ -179,6 +179,10 @@ Response, on success (HTTP 200):
 
 Only the keys the task declared need be present.
 
+`mask2d` may be either a single object or a list of them. A list expresses
+candidate masks for one prompt — SAM's `multimask` output — ordered
+best-first. The host accepts both forms.
+
 ### `POST /session/open` · `POST /session/close`
 
 ```json
@@ -241,6 +245,41 @@ File paths in `outputs` are relative to `<out>`. On failure, write
 non-zero.
 
 ---
+
+## 4b. Weight acquisition hook
+
+Installing an environment is the host's job (§7); fetching weights is the
+adapter's, because only the adapter knows its model hub, file layout, and
+checksum conventions. Every adapter — resident, session, or one-shot —
+therefore implements one additional CLI mode:
+
+```
+<venv python> <entry> --install-weights --weight-id <id> --source <source> \
+    --dest <dir> [--repo <repo>] [--task <task>]
+```
+
+`--weight-id`, `--source`, `--repo`, and `--task` carry the corresponding
+manifest fields verbatim. `--dest` is the host-owned directory the weights must
+land in.
+
+- Progress is reported with the same stdout line format as §4.
+- Exit 0 means every file needed for that weight id is present under `--dest`.
+- For `source: "manual"` the adapter must not attempt a download. It verifies
+  the expected file exists and, if it does not, exits non-zero with a
+  `license_required` error naming the terms URL and the exact expected path.
+
+**License keys are passed in the environment, never in argv**, as
+`ODV_PLUGIN_LICENSE_KEY`. Process arguments are world-readable via `ps`; the
+environment of another user's process is not. An adapter that needs the key
+reads it from there and must not echo it to stdout or write it into any file it
+creates.
+
+## 4c. Result on failure
+
+§4 says a one-shot adapter *should* write `result.json` on failure. The host
+reads it whenever it exists, including after a non-zero exit, because the
+adapter's own error message is more actionable than an exit code. Adapters
+should treat writing it as the expected behavior rather than a courtesy.
 
 ## 5. Mask RLE encoding
 

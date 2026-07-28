@@ -1,0 +1,18 @@
+# TotalSegmentator one-shot adapter.
+#
+# Installed into this plugin's own virtualenv (PLUGIN_PROTOCOL.md section 7).
+# torch and mlx are not co-installable in practice, which is why the Gemma
+# adapter's environment is separate from this one.
+#
+# Roughly 3 GB installed; weights are fetched per task by download_weights.py.
+
+TotalSegmentator>=2.4.0
+torch>=2.2.0
+
+# NIfTI in, DICOM SEG out.
+nibabel>=5.0.0
+SimpleITK>=2.3.0
+pydicom>=2.4.0
+highdicom>=0.22.0
+
+numpy>=1.24.0
