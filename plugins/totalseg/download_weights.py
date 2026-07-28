@@ -21,6 +21,11 @@ import argparse
 import sys
 from pathlib import Path
 
+# This adapter's own directory for `run_segment`, and its parent for `_shared`.
+# Both are needed: the host puts only the adapter directory on sys.path when it
+# spawns an entry point, and nothing puts either there when this file is run
+# directly from the repository root.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import run_segment  # noqa: E402

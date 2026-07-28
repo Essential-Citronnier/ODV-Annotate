@@ -49,3 +49,6 @@ mlx-server/.server.pid
 
 # Cached Python standalone build (downloaded by package_app.sh)
 .cache/
+# Plugin adapter virtualenvs (created per plugin at install time)
+plugins/*/.venv/
+plugins/.venv/

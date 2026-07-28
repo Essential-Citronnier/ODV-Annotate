@@ -97,11 +97,52 @@ Paths in `outputs` are **relative to `--out`**. `run_oneshot` verifies that
 declared output files exist before reporting success, because exit code 0 means
 the host can open them.
 
-### 5. Keep heavy imports lazy
+### 5. Implement the weight install hook
 
-`--help` must work in an environment with no torch, and `/capabilities` and the
-license-gate error path must work with no weights. Import the model stack
-inside the loading function, not at module scope.
+Every adapter — resident, session, and one-shot alike — implements the section
+4b CLI mode the host drives weight acquisition through:
+
+```
+<venv python> <entry> --install-weights --weight-id <id> --source <source> \
+    --dest <dir> [--repo <repo>] [--task <task>]
+```
+
+Check for it before your normal argument parsing, since it shares no required
+flags with either the server or the one-shot CLI:
+
+```python
+from _shared.weights import install_arg_present, parse_install_args, run_install
+
+def main(argv=None):
+    if install_arg_present(argv):
+        return run_install(parse_install_args("My installer.", argv), install_weights)
+    ...
+```
+
+`install_weights(args, dest, reporter)` returns the paths that must exist for
+the weight id to count as installed. `run_install` verifies them, so **exit 0
+means the weights are genuinely present** — the host marks a task ready on that
+alone, and an installer whose download silently no-ops must not pass.
+
+`_shared.weights` provides `download_huggingface()` and, for gated weights,
+`verify_manual_checkpoint()`. For `source: "manual"`, **do not download**:
+verify the file and, when it is absent, raise `license_required` naming the
+terms URL and the exact expected path.
+
+### 6. Read license keys from the environment, never argv
+
+The host passes a key as `ODV_PLUGIN_LICENSE_KEY`, because process arguments
+are world-readable through `ps`. Read it with `_shared.weights.license_key()`
+and treat it as a secret: never echo it to stdout — the plugin log view is not
+private either — and never write it into a file you create. If a library you
+call quotes a rejected key back in its exception text, do not forward that text
+into your error message.
+
+### 7. Keep heavy imports lazy
+
+`--help` must work in an environment with no torch, and `/capabilities`, the
+install hook, and the license-gate error path must all work with no weights.
+Import the model stack inside the loading function, not at module scope.
 
 ---
 
@@ -161,6 +202,28 @@ Progress arrives on stdout as one JSON object per line; anything that is not
 JSON is a log line. Nothing on stdout is parsed as a result -- the result is
 `result.json`.
 
+### The weight install mode
+
+Any adapter, without the host:
+
+```bash
+python plugins/sam2/server.py --install-weights \
+  --weight-id sam2.1-hiera-small --source huggingface \
+  --repo facebook/sam2.1-hiera-small --dest /tmp/w/sam2
+echo $?   # 0 only if the weights are actually there
+
+# A gated plugin verifies rather than downloads, and says what to do:
+python plugins/sam3/server.py --install-weights \
+  --weight-id sam3-checkpoint --source manual --dest /tmp/w/sam3
+# {"ok": false, "error": {"code": "license_required", "message": "... place the
+#  checkpoint at /tmp/w/sam3/sam3.pt"}}
+
+# A licence key goes in the environment, never on the command line:
+ODV_PLUGIN_LICENSE_KEY=aca_... python plugins/totalseg/run_segment.py \
+  --install-weights --weight-id Dataset301_heart_highres_1559subj \
+  --source totalseg-task --task heartchambers_highres --dest /tmp/w/totalseg
+```
+
 ### The shared test suite
 
 ```bash
@@ -207,6 +270,13 @@ The one other geometry rule: a mask must be the same size as the image the
 session encoded, not the slice the host happens to be displaying. Those differ
 whenever the panel is zoomed, and `SamSessionAdapter` rejects a mismatch rather
 than letting the host misregister it.
+
+`mask2d` may be a single object **or a list**, ordered best-first — that is how
+SAM's `multimask` output is expressed. A `SamBackend` returns
+`[(mask, score), ...]` from `decode()` and `SamSessionAdapter` picks the shape:
+a bare object for one mask, a list for several. Every candidate in a list must
+be independently well-formed; a malformed one behind a good first entry is
+still a bug the host will hit.
 
 ---
 

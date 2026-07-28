@@ -268,6 +268,21 @@ land in.
   the expected file exists and, if it does not, exits non-zero with a
   `license_required` error naming the terms URL and the exact expected path.
 
+**Where a failing hook reports its error.** It writes the §3 error envelope as a
+single JSON line on **stdout**, alongside the progress lines:
+
+```json
+{"ok": false, "error": {"code": "license_required", "message": "…", "recoverable": true}}
+```
+
+Stdout is the machine channel and already carries structured lines, so the host
+reads the code from there and routes `license_required` to the store's license
+gate instead of reporting a bare exit status. A human-readable copy on stderr is
+welcome — the host shows stderr in the plugin log — but the stdout envelope is
+what the host acts on. Disambiguation on stdout: an object carrying `ok` is an
+envelope, one carrying `progress` is a progress line, and anything else is a log
+line.
+
 **License keys are passed in the environment, never in argv**, as
 `ODV_PLUGIN_LICENSE_KEY`. Process arguments are world-readable via `ps`; the
 environment of another user's process is not. An adapter that needs the key

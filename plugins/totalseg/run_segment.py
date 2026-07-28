@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -70,27 +68,26 @@ SEG_FILENAME = "segmentation.dcm"
 
 
 class Weight(NamedTuple):
-    """One manifest weight id, resolved to what TotalSegmentator calls it.
+    """One manifest weight id, resolved to the nnU-Net dataset it names.
 
-    The two names differ and the difference matters. The manifest's
-    `Dataset297_..._total_3mm_1559subj` is the 3 mm model, which
-    `totalseg_download_weights` calls `total_fast`; asking it for `total`
-    instead would fetch the five full-resolution datasets -- gigabytes the
-    manifest does not declare and the store did not budget for.
+    The download goes through dataset ids rather than TotalSegmentator's
+    task-name CLI because the two are not one-to-one: the manifest's
+    `Dataset297_..._total_3mm_1559subj` is the 3 mm model, but the closest CLI
+    task, `total_fast`, fetches datasets 297 *and* 298. The manifest declares
+    0.25 GB and the store budgets against that number, so the adapter downloads
+    exactly the dataset the manifest names and nothing else.
     """
 
-    downloader_task: str
-    dataset_dirs: tuple[str, ...]
+    dataset_id: int
+    directory: str
 
 
 WEIGHTS: dict[str, Weight] = {
     "Dataset297_TotalSegmentator_total_3mm_1559subj": Weight(
-        downloader_task="total_fast",
-        dataset_dirs=("Dataset297_TotalSegmentator_total_3mm_1559subj",),
+        dataset_id=297, directory="Dataset297_TotalSegmentator_total_3mm_1559subj",
     ),
     "Dataset301_heart_highres_1559subj": Weight(
-        downloader_task="heartchambers_highres",
-        dataset_dirs=("Dataset301_heart_highres_1559subj",),
+        dataset_id=301, directory="Dataset301_heart_highres_1559subj",
     ),
 }
 
@@ -153,8 +150,7 @@ def _weights_present(task_id: str) -> bool:
     weight = WEIGHTS.get(TASK_WEIGHTS.get(task_id, ""))
     if weight is None:
         return True
-    root = _totalseg_home() / "nnunet" / "results"
-    return any((root / name).is_dir() for name in weight.dataset_dirs)
+    return (_totalseg_home() / "nnunet" / "results" / weight.directory).is_dir()
 
 
 def _totalseg_home(override: Path | None = None) -> Path:
@@ -180,14 +176,6 @@ def _license_registered(home: Path | None = None) -> bool:
         return bool(json.loads(config.read_text()).get("license_number"))
     except (OSError, ValueError):
         return False
-
-
-def _download_script() -> str | None:
-    """Locate `totalseg_download_weights`, preferring this venv's copy."""
-    candidate = Path(sys.executable).with_name("totalseg_download_weights")
-    if candidate.exists():
-        return str(candidate)
-    return shutil.which("totalseg_download_weights")
 
 
 # ---------------------------------------------------------------------------
@@ -497,10 +485,11 @@ def install_weights(args, dest: Path, reporter: ProgressReporter) -> list[Path]:
     reporter.stage(0.0, 0.05, "Checking the model environment")
     _require_totalsegmentator()
 
-    key = license_key()
-    environment = dict(os.environ)
-    environment["TOTALSEG_HOME_DIR"] = str(dest)
+    # TotalSegmentator resolves its weight directory from this variable at call
+    # time, so setting it here is what makes --dest effective.
+    os.environ["TOTALSEG_HOME_DIR"] = str(dest)
 
+    key = license_key()
     if key:
         _register_license(key, dest, reporter)
     elif args.task in LICENSE_REQUIRED_TASKS and not _license_registered(dest):
@@ -511,29 +500,33 @@ def install_weights(args, dest: Path, reporter: ProgressReporter) -> list[Path]:
             f"plugin store.",
         )
 
-    executable = _download_script()
-    if executable is None:
-        raise PluginError(
-            ErrorCode.NOT_READY,
-            "TotalSegmentator's 'totalseg_download_weights' script was not found "
-            "in this plugin's environment. Reinstall the plugin from the store.",
-        )
-
     reporter.stage(0.05, 0.95, f"Downloading weights for '{args.task}'")
-    # The console script is invoked rather than the library's internals: the
-    # module paths behind it move between releases, while its interface has not.
-    # Its own progress output is not in the protocol's format, so it lands in
-    # the plugin log view as log lines and the bar moves on stage boundaries.
-    code = subprocess.call([executable, "-t", weight.downloader_task],
-                           env=environment)
-    if code != 0:
+    from totalsegmentator.libs import download_pretrained_weights
+
+    try:
+        download_pretrained_weights(weight.dataset_id)
+    except SystemExit as exc:
+        # A licence rejection exits the process rather than raising, which
+        # would otherwise escape the protocol error envelope entirely.
         raise PluginError(
             ErrorCode.LICENSE_REQUIRED if args.task in LICENSE_REQUIRED_TASKS
             else ErrorCode.INTERNAL,
-            f"Downloading weights for '{args.task}' failed (exit {code}). "
+            f"The weight download for '{args.task}' exited (code {exc.code}). "
             + (f"This task needs an academic licence number: {LICENSE_URL}"
                if args.task in LICENSE_REQUIRED_TASKS else ""),
-        )
+        ) from None
+    except BaseException as exc:  # noqa: BLE001
+        text = f"{type(exc).__name__}: {exc}"
+        if any(token in text for token in ("401", "403", "license", "licence")):
+            raise PluginError(
+                ErrorCode.LICENSE_REQUIRED,
+                f"The weight server refused the request for '{args.task}'. "
+                f"This task needs an academic licence number: {LICENSE_URL}",
+            ) from None
+        raise PluginError(
+            ErrorCode.INTERNAL,
+            f"Could not download weights for '{args.task}': {text}",
+        ) from None
 
     # nnU-Net loads a task from its dataset directory, so that directory is what
     # must exist for this weight id to count as installed. `run_install` checks
@@ -542,7 +535,7 @@ def install_weights(args, dest: Path, reporter: ProgressReporter) -> list[Path]:
     # reported as success. Naming the specific directory rather than globbing
     # `Dataset*` keeps exit 0 meaning "this weight is installed" rather than
     # "some weight is".
-    return [dest / "nnunet" / "results" / name for name in weight.dataset_dirs]
+    return [dest / "nnunet" / "results" / weight.directory]
 
 
 def main(argv: list[str] | None = None) -> int:

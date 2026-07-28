@@ -306,6 +306,50 @@ struct PluginProgressLine: Decodable, Equatable, Sendable {
     }
 }
 
+/// A failure envelope printed by an install hook on stdout.
+///
+/// Distinct from a progress line by carrying `ok` rather than `progress`
+/// (section 4b). Without this the host would see only a non-zero exit, and a
+/// license-gated download — the case the store most needs to react to — would
+/// surface as an unactionable "exit 1".
+struct PluginErrorEnvelope: Equatable, Sendable {
+    let code: PluginErrorCode
+    let message: String
+
+    private struct Wire: Decodable {
+        struct Payload: Decodable {
+            let code: String?
+            let message: String?
+        }
+        let ok: Bool
+        let error: Payload?
+    }
+
+    static func parse(_ line: String) -> PluginErrorEnvelope? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8),
+              let wire = try? JSONDecoder().decode(Wire.self, from: data),
+              wire.ok == false else { return nil }
+
+        let code = wire.error?.code.flatMap(PluginErrorCode.init(rawValue:))
+            ?? .internalError
+        let message = wire.error?.message ?? "The plugin reported a failure."
+        return PluginErrorEnvelope(code: code, message: message)
+    }
+}
+
+/// Carries an envelope out of the process runner's stdout callback, which runs
+/// on a reader queue rather than the caller's context.
+final class ErrorEnvelopeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: PluginErrorEnvelope?
+
+    var value: PluginErrorEnvelope? {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
+}
+
 /// Creates and removes plugin environments.
 ///
 /// Deliberately not an `ObservableObject`: the installer reports through the
@@ -531,6 +575,10 @@ struct PluginInstaller: Sendable {
                 environment["ODV_PLUGIN_LICENSE_KEY"] = key
             }
 
+            // Captured from the adapter's stdout so a structured failure can be
+            // acted on rather than reduced to an exit status.
+            let reported = ErrorEnvelopeBox()
+
             do {
                 let outcome = try await PluginProcessRunner.run(
                     executable: paths.venvPython(plugin.id),
@@ -542,12 +590,24 @@ struct PluginInstaller: Sendable {
                         if let progress = PluginProgressLine.parse(line) {
                             publish(.downloading(progress: base + span * (progress.progress ?? 0)))
                             if let message = progress.message { log(message) }
+                        } else if let envelope = PluginErrorEnvelope.parse(line) {
+                            reported.value = envelope
+                            log(envelope.message)
                         } else {
                             log(line)
                         }
                     },
                     onStderrLine: { log($0) })
                 guard outcome.succeeded else {
+                    if let envelope = reported.value {
+                        // A gated weight is not a broken install: the task waits
+                        // at its licence gate for the user to satisfy it.
+                        if envelope.code == .licenseRequired {
+                            publish(.resolvingLicense)
+                            return .resolvingLicense
+                        }
+                        return fail(envelope.message)
+                    }
                     return fail("Downloading \(weight.id) failed (exit \(outcome.exitCode)).")
                 }
             } catch {
