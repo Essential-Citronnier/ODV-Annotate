@@ -152,29 +152,54 @@ Initial public release with AI annotation, MPR, and full DICOM viewer.
 
 ## How the AI Works
 
-OpenDicomViewer-Annotate runs **Gemma 4 E4B (4-bit quantized)** locally through a FastAPI server backed by [mlx-vlm](https://github.com/Blaizzy/mlx-vlm). The architecture is straightforward:
+AI models are **plugins**. Each declares what it needs and what it produces in a
+manifest, and the application supervises it accordingly — so adding a model does
+not mean adding a code path to the viewer.
 
 ```
-┌──────────────────────┐       HTTP (localhost)       ┌──────────────────────┐
-│  SwiftUI Application │  ◄──────────────────────►    │   MLX Server (py)    │
-│                      │     JSON + Base64 images     │                      │
-│  • AIService.swift   │                              │  • Gemma 4 E4B       │
-│  • AIServerManager   │                              │  • 4-bit quantized   │
-│  • Annotation UI     │                              │  • Apple Silicon GPU  │
-└──────────────────────┘                              └──────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  SwiftUI application                                         │
+│  viewer panels · plugin store · result router · arbiter      │
+└──────────────────────────────┬───────────────────────────────┘
+                               │  manifest + protocol v1
+        ┌──────────────────────┼──────────────────────┐
+        ▼                      ▼                      ▼
+  resident-server           session                one-shot
+  load once,             encode once,            run, write,
+  query many             prompt many             exit
+        │                      │                      │
+   Gemma 4 E4B           SAM 2 · SAM 3         TotalSegmentator
+   text + boxes            2D masks         DICOM SEG + volumes
 ```
 
-The Swift app manages the server lifecycle — starting, monitoring, and stopping it automatically. Images are encoded as base64 PNG and sent over localhost. The model returns structured JSON with bounding box coordinates and descriptions.
+Every plugin runs on this machine. The only data that crosses the network is
+model weights, downloaded from the sources the manifest names; images, DICOM
+metadata, and results never leave the computer. The manifest ships inside the
+application, so the set of installable plugins is fixed at build time rather
+than fetched at runtime, and each plugin gets its own virtualenv.
 
-### API Endpoints
+### Available plugins
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Server status, model info, memory usage |
-| `/modes` | GET | Available analysis modes |
-| `/analyze` | POST | Full image analysis with structure detection |
-| `/describe-roi` | POST | Describe a selected region of interest |
-| `/detect-abnormalities` | POST | Detect potential abnormalities |
+| Plugin | Execution | Produces | Weights | Licence |
+|---|---|---|---|---|
+| Gemma 4 E4B (MLX) | resident-server | text, boxes | 4.5 GB | Apache-2.0 |
+| SAM 2 | session | 2D masks | 0.2 GB | Apache-2.0 |
+| SAM 3 | session | 2D masks | 3.4 GB | SAM Licence — accept terms, place checkpoint |
+| TotalSegmentator (total) | one-shot | DICOM SEG, volumes | 0.2 GB | Apache-2.0 / CC BY 4.0 |
+| TotalSegmentator (heart, high-res) | one-shot | DICOM SEG, volumes | 0.2 GB | free academic licence number |
+
+Open the store from **AI ▸ Plugin Store**, or from the sidebar. Tasks whose
+weights require a licence show what is needed and where to obtain it; the
+application never transmits your credentials to the licensing site.
+
+Memory is arbitrated from the declared figures: on a 16 GB machine, starting a
+segmentation stops a resident language model for the duration and restarts it
+afterwards, rather than letting both compete.
+
+Writing a new adapter: [`PLUGIN_PROTOCOL.md`](PLUGIN_PROTOCOL.md) is the
+contract, [`plugins/README.md`](plugins/README.md) is the how-to, and
+[`docs/PLUGIN_ARCHITECTURE.md`](docs/PLUGIN_ARCHITECTURE.md) explains why the
+design is shaped this way.
 
 > **Disclaimer:** AI analysis is for **research and educational purposes only**. It must NOT be used as a clinical diagnosis tool.
 
