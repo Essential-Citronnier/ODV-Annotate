@@ -27,9 +27,17 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @FocusState private var isFocused: Bool
 
+    /// Owned here rather than by the sheet so that closing the store mid-install
+    /// does not discard the install's state.
+    @StateObject private var pluginStore = PluginStore(facade: PluginRuntime.shared)
+    @State private var showPluginStore = false
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(model: model, columnVisibility: $columnVisibility)
+            SidebarView(model: model,
+                        columnVisibility: $columnVisibility,
+                        pluginStore: pluginStore,
+                        openPluginStore: { showPluginStore = true })
             .navigationSplitViewColumnWidth(min: 250, ideal: 300)
             .toolbar(removing: .sidebarToggle)
         } detail: {
@@ -248,6 +256,12 @@ struct ContentView: View {
         .sheet(isPresented: $model.showHelp) {
             HelpView()
         }
+        .sheet(isPresented: $showPluginStore) {
+            PluginStoreView(store: pluginStore)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .odvOpenPluginStore)) { _ in
+            showPluginStore = true
+        }
         .preferredColorScheme(.dark)
         .background(WindowAccessor(model: model))
     }
@@ -280,7 +294,9 @@ struct ContentView: View {
 struct SidebarView: View {
     @ObservedObject var model: DICOMModel
     @Binding var columnVisibility: NavigationSplitViewVisibility
-    
+    @ObservedObject var pluginStore: PluginStore
+    let openPluginStore: () -> Void
+
     var body: some View {
         VStack(spacing: 0) {
             // Custom Toolbar / Header
@@ -308,6 +324,10 @@ struct SidebarView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
+
+            PluginStoreSidebarButton(store: pluginStore, action: openPluginStore)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
             // Remove background or make it very subtle
             // .background(Color.black.opacity(0.4))
             

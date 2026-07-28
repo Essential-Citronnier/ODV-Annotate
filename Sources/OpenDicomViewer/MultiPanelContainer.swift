@@ -924,6 +924,14 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                     y: max(rect.minY, min(point.y, rect.maxY))
                 )
                 return hypot(point.x - closest.x, point.y - closest.y)
+            case .aiMask(_, _, _, let bounds, _, _):
+                // Mask bounds are already in pixel space, unlike the normalized
+                // rects the bbox-producing tasks emit.
+                let closest = CGPoint(
+                    x: max(bounds.minX, min(point.x, bounds.maxX)),
+                    y: max(bounds.minY, min(point.y, bounds.maxY))
+                )
+                return hypot(point.x - closest.x, point.y - closest.y)
             case .aiStructure(let rect, _, _), .aiFinding(let rect, _, _), .aiROILabel(let rect, _, _, _):
                 let imgW = max(1, panel?.displayImageWidth ?? 1)
                 let imgH = max(1, panel?.displayImageHeight ?? 1)
@@ -2726,6 +2734,61 @@ struct AnnotationOverlay: View {
             }
 
         // MARK: AI Annotation Types
+
+        case .aiMask(let mask, let maskWidth, let maskHeight, let bounds,
+                     let label, let confidence):
+            if panel.showAIAnnotations,
+               let image = AnnotationMaskImage.cgImage(mask: mask,
+                                                       width: maskWidth,
+                                                       height: maskHeight) {
+                // Bounds are in pixel space; map the corners through the same
+                // transform the image itself uses so the mask stays registered
+                // under zoom, pan, and rotation.
+                let topLeft = pixelToScreen(CGPoint(x: bounds.minX, y: bounds.minY),
+                                            viewSize: viewSize)
+                let bottomRight = pixelToScreen(CGPoint(x: bounds.maxX, y: bounds.maxY),
+                                                viewSize: viewSize)
+                let screenRect = CGRect(x: min(topLeft.x, bottomRight.x),
+                                        y: min(topLeft.y, bottomRight.y),
+                                        width: abs(bottomRight.x - topLeft.x),
+                                        height: abs(bottomRight.y - topLeft.y))
+                let isSelected = panel.selectedAnnotationID == annotation.id
+
+                ZStack {
+                    Image(decorative: image, scale: 1.0)
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: screenRect.width, height: screenRect.height)
+                        .position(x: screenRect.midX, y: screenRect.midY)
+                        .opacity(isSelected ? 0.65 : 0.45)
+
+                    Rectangle()
+                        .stroke(Color.mint,
+                                style: StrokeStyle(lineWidth: isSelected ? 2.0 : 1.0,
+                                                   dash: [4, 3]))
+                        .frame(width: screenRect.width, height: screenRect.height)
+                        .position(x: screenRect.midX, y: screenRect.midY)
+
+                    HStack(spacing: 3) {
+                        Text("AI")
+                            .font(.system(.caption2, weight: .bold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Color.mint)
+                            .cornerRadius(2)
+                        Text(confidence > 0
+                             ? "\(label) (\(Int(confidence * 100))%)"
+                             : label)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.mint)
+                    }
+                    .padding(2)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(3)
+                    .position(x: screenRect.midX, y: screenRect.minY - 12)
+                }
+            }
 
         case .aiStructure(let rect, let label, let confidence):
             if panel.showAIAnnotations {

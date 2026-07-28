@@ -126,6 +126,13 @@ enum AnnotationType {
     case aiStructure(rect: CGRect, label: String, confidence: Double)
     case aiFinding(rect: CGRect, description: String, severity: String)
     case aiROILabel(rect: CGRect, label: String, description: String, confidence: Double)
+
+    /// A 2D mask returned by a promptable segmentation plugin (SAM-family).
+    /// `mask` is a row-major bitmap over a `width` x `height` grid in image
+    /// pixel space; `bounds` is its tight bounding rect, precomputed so hit
+    /// testing and label placement do not have to rescan the bitmap.
+    case aiMask(mask: [Bool], width: Int, height: Int, bounds: CGRect,
+                label: String, confidence: Double)
 }
 
 struct Annotation: Identifiable {
@@ -274,6 +281,8 @@ class PanelState: ObservableObject, Identifiable {
     @Published var aiError: String? = nil
     @Published var aiDescription: String? = nil
     @Published var showAIAnnotations: Bool = false
+    /// Scalar measurements returned by a plugin task declaring `metrics`.
+    @Published var pluginMetrics: [String: Double] = [:]
     @Published var selectedAnnotationID: UUID? = nil
 
     /// Reset panel to empty state

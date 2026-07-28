@@ -14,6 +14,7 @@ struct OpenDicomViewerApp: App {
     @StateObject private var updateChecker = UpdateChecker()
     @StateObject private var aiServerManager = AIServerManager.shared
     @ObservedObject private var aiService = AIService.shared
+    @StateObject private var pluginStore = PluginStore(facade: PluginRuntime.shared)
 
     var body: some Scene {
         WindowGroup {
@@ -203,6 +204,20 @@ struct OpenDicomViewerApp: App {
                     get: { model.activePanel?.showAIAnnotations ?? true },
                     set: { model.activePanel?.showAIAnnotations = $0 }
                 ))
+
+                Divider()
+
+                // The menu is a separate view tree from ContentView, so it asks
+                // for the store by notification rather than through shared state.
+                PluginStoreMenuSection(
+                    store: pluginStore,
+                    run: { ref in
+                        guard let panel = model.activePanel else { return }
+                        model.runPluginTask(ref, for: panel)
+                    },
+                    openStore: {
+                        NotificationCenter.default.post(name: .odvOpenPluginStore, object: nil)
+                    })
 
                 Divider()
 
