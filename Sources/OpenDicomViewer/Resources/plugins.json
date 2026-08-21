@@ -19,9 +19,18 @@
           "id": "analyze",
           "label": "Analyze Image",
           "summary": "Describe the slice and localize notable findings.",
-          "inputs": ["slice2d", "text"],
-          "outputs": ["text", "bbox"],
-          "license": { "gate": "open", "identifier": "Apache-2.0" },
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "Apache-2.0"
+          },
           "weights": [
             {
               "id": "gemma-4-e4b-it-4bit",
@@ -33,7 +42,12 @@
           "options": {
             "mode": {
               "type": "enum",
-              "values": ["clinical", "detailed", "abnormality", "educational"],
+              "values": [
+                "clinical",
+                "detailed",
+                "abnormality",
+                "educational"
+              ],
               "default": "clinical",
               "label": "Analysis mode"
             }
@@ -43,9 +57,18 @@
           "id": "describe-roi",
           "label": "Describe ROI",
           "summary": "Narrate a user-selected region.",
-          "inputs": ["slice2d", "roi", "text"],
-          "outputs": ["text"],
-          "license": { "gate": "open", "identifier": "Apache-2.0" },
+          "inputs": [
+            "slice2d",
+            "roi",
+            "text"
+          ],
+          "outputs": [
+            "text"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "Apache-2.0"
+          },
           "weights": [
             {
               "id": "gemma-4-e4b-it-4bit",
@@ -59,9 +82,18 @@
           "id": "detect-abnormalities",
           "label": "Detect Abnormalities",
           "summary": "Localize potential abnormalities with severity labels.",
-          "inputs": ["slice2d", "text"],
-          "outputs": ["bbox", "text"],
-          "license": { "gate": "open", "identifier": "Apache-2.0" },
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "bbox",
+            "text"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "Apache-2.0"
+          },
           "weights": [
             {
               "id": "gemma-4-e4b-it-4bit",
@@ -91,9 +123,18 @@
           "id": "prompt-mask",
           "label": "Prompt Segmentation",
           "summary": "Segment the structure under a click or box prompt.",
-          "inputs": ["slice2d", "points", "box"],
-          "outputs": ["mask2d"],
-          "license": { "gate": "open", "identifier": "Apache-2.0" },
+          "inputs": [
+            "slice2d",
+            "points",
+            "box"
+          ],
+          "outputs": [
+            "mask2d"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "Apache-2.0"
+          },
           "weights": [
             {
               "id": "sam2.1-hiera-small",
@@ -130,8 +171,15 @@
           "id": "prompt-mask",
           "label": "Prompt Segmentation",
           "summary": "Segment from click, box, or text-concept prompts.",
-          "inputs": ["slice2d", "points", "box", "text"],
-          "outputs": ["mask2d"],
+          "inputs": [
+            "slice2d",
+            "points",
+            "box",
+            "text"
+          ],
+          "outputs": [
+            "mask2d"
+          ],
           "license": {
             "gate": "gated-download",
             "identifier": "SAM License (Meta)",
@@ -159,7 +207,7 @@
       "adapter_dir": "totalseg",
       "entry": "run_segment.py",
       "requirements": "requirements.txt",
-      "ram_gb": 3.5,
+      "ram_gb": 23.5,
       "disk_gb": 3.0,
       "requires_apple_silicon": false,
       "tasks": [
@@ -167,8 +215,13 @@
           "id": "total",
           "label": "Total (117 structures)",
           "summary": "Whole-body structure segmentation at 3 mm resolution.",
-          "inputs": ["series3d"],
-          "outputs": ["seg3d", "metrics"],
+          "inputs": [
+            "series3d"
+          ],
+          "outputs": [
+            "seg3d",
+            "metrics"
+          ],
           "license": {
             "gate": "open",
             "identifier": "Apache-2.0 (code) / CC BY 4.0 (weights)"
@@ -187,14 +240,20 @@
               "default": true,
               "label": "Fast mode (3 mm)"
             }
-          }
+          },
+          "ram_gb": 23.5
         },
         {
           "id": "heartchambers_highres",
           "label": "Heart Chambers (high-res)",
           "summary": "Four cardiac chambers plus myocardium at full resolution.",
-          "inputs": ["series3d"],
-          "outputs": ["seg3d", "metrics"],
+          "inputs": [
+            "series3d"
+          ],
+          "outputs": [
+            "seg3d",
+            "metrics"
+          ],
           "license": {
             "gate": "license-key",
             "identifier": "TotalSegmentator academic license (non-commercial)",

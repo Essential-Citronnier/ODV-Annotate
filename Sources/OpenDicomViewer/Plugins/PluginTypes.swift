@@ -172,6 +172,20 @@ struct PluginTask: Codable, Sendable, Identifiable, Equatable {
     let license: PluginLicense
     let weights: [PluginWeight]
     let options: [String: PluginOption]?
+    /// Peak memory for this task, when it differs from the plugin's figure.
+    ///
+    /// Tasks within one plugin can have footprints that differ by an order of
+    /// magnitude — a full-resolution whole-body segmentation against a 3 mm one —
+    /// and the arbiter admits work against a declaration, so a single
+    /// plugin-wide number is either wrong for the heavy task or needlessly
+    /// pessimistic for the light one. Optional: when absent the plugin's
+    /// `ram_gb` applies.
+    let ramGB: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, summary, inputs, outputs, license, weights, options
+        case ramGB = "ram_gb"
+    }
 
     /// Total download size for this task's weights, in GB.
     var weightsSizeGB: Double { weights.reduce(0) { $0 + $1.sizeGB } }
@@ -207,6 +221,14 @@ struct PluginDescriptor: Codable, Sendable, Identifiable, Equatable {
 
     func task(id taskID: String) -> PluginTask? {
         tasks.first { $0.id == taskID }
+    }
+
+    /// Declared peak memory for a task: the task's own figure when it carries
+    /// one, otherwise the plugin's. Callers should always budget through this
+    /// rather than reading `ramGB` directly, so a per-task declaration is never
+    /// silently ignored.
+    func declaredRAMGB(forTask taskID: String) -> Double {
+        task(id: taskID)?.ramGB ?? ramGB
     }
 }
 

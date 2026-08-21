@@ -2,7 +2,20 @@
 
 Machine: Apple M5 Max, 18 cores, 128 GB. Every number below was produced by
 `eval/exp3_resources.py` and is recorded in `eval/results/exp3_resources.jsonl`,
-including the runs that failed.
+including the runs that failed. Each row carries the input it was measured on
+(`metrics.input_series`), so repeated runs of the same plugin on different data
+are distinguishable rather than being indistinguishable rows under one
+`case_id`.
+
+Reproduce the whole thing with:
+
+```
+PYTHONPATH=eval python eval/exp3_resources.py \
+  --series .eval/data/tcia/tcia_1556218467652708 \
+  --crosscheck-series .eval/data/tcia/tcia_1556218467652708 \
+                      .eval/data/tcia/tcia_2121018880599426 \
+  --totalseg-threads
+```
 
 ## Which numbers are defensible
 
@@ -40,10 +53,30 @@ prompt: **12.0 s cold, 8.8 s warm**. That is what an eviction costs the user.
 ## Finding 1 — TotalSegmentator's declared memory is wrong by ~6×
 
 `ram_gb: 3.5` against a measured peak of **20.85 GB** on a 411-slice abdominal
-CT. Reproduced on a second series (`tcia_2121018880599426`): **23.44 GB, 6.70×**.
-Cross-checked by three independent mechanisms that agree: the harness's
-per-child accounting (20.85 GB), an in-process `RUSAGE_SELF` read (23.10 GB),
-and a 0.3 s sampler inside the same process (23.10 GB).
+CT (`bench/totalsegmentator`, `input_series=tcia_1556218467652708`).
+
+The `crosscheck` phase re-measures the same pipeline with three instruments
+that share no code path — the parent's per-child accounting, the child's own
+`RUSAGE_SELF` high-water mark, and a 0.3 s self-sampler inside the child — on
+two different series. All rows are in the JSONL under
+`crosscheck/totalsegmentator/<series>`:
+
+| Series | Slices | Parent accounting | Child `RUSAGE_SELF` | Child sampler | Spread | Ratio |
+|---|---|---|---|---|---|---|
+| `tcia_1556218467652708` | 411 | 23.10 GB | 23.10 GB | 23.10 GB | 0.00 GB | **6.60×** |
+| `tcia_2121018880599426` | 493 | 21.40 GB | 21.40 GB | 21.40 GB | 0.00 GB | **6.11×** |
+
+Three instruments agreeing to the byte on two independent volumes, with the
+overrun reproducing on both, is the evidence for this finding. The bench figure
+of 20.85 GB and the cross-check figure of 23.10 GB are the same pipeline on the
+same series, measured with and without the adapter's DICOM SEG export stage
+attached. Across the three independent pipeline runs recorded — one bench and
+two cross-checks — the peak spans **20.9–23.1 GB, i.e. 5.96× to 6.60× the
+declaration whichever run you take**.
+
+External sampling with `psutil` is deliberately not among the instruments:
+this sandbox denies the `sysctl` it needs, so it reports zero and would look
+like a disagreement rather than an unavailable instrument.
 
 This is not an artifact of the thread substitution. For a single series nnU-Net
 computes `num_processes = min(len(cases), 3) = 1`, so the substitution replaces
@@ -64,10 +97,30 @@ divergence is entirely a consequence of which figure the manifest carries. On a
 16 GB machine the declaration admits a job that will need more than the whole
 machine.
 
-**Proposed correction.** `ram_gb` should be at least `22.0` for the `total`
-task at full resolution, or the adapter should declare per-task figures, since
-`fast` mode and `--roi-subset` have materially different footprints. I did not
-edit the manifest: it is another track's file.
+**Every figure above is the `fast` (3 mm) variant.** Both the bench and the
+cross-check pass `fast=true`, which is the manifest's default for the `total`
+task. So the 6× overrun is not the expensive configuration overrunning its
+budget — it is the *cheap* one.
+
+Full resolution could not be measured here. It requires five further weight
+datasets (`Dataset291`–`Dataset295`) fetched from a GitHub releases URL that
+this network refuses; recorded as
+`crosscheck/totalsegmentator/fullres/tcia_1556218467652708` with the
+`ProxyError`, not silently omitted. Full resolution processes the same volume
+at roughly 3.4× the voxel count of the 3 mm variant along the through-plane
+axis, so its peak should be expected to exceed 23 GB rather than fall below it,
+but that is an inference and not a measurement, and it should be measured
+before it is quoted.
+
+**Proposed correction.** Declare `ram_gb` per task and per option combination
+rather than once per plugin. The measured `fast` figure alone justifies at
+least `24.0` for `total`; the full-resolution figure is likely higher and
+should be measured on a machine that can reach the weight host before a number
+is chosen. A single scalar `ram_gb` cannot describe a plugin whose footprint
+depends on options the caller selects, which is the structural version of this
+finding: the protocol gives a plugin one number to describe every
+configuration it can be invoked in. I did not edit the manifest or the
+protocol: both are other tracks' files.
 
 ## Finding 2 — a running one-shot is invisible to the arbiter
 

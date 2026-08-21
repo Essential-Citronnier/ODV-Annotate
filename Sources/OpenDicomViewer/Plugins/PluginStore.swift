@@ -328,7 +328,7 @@ final class PluginStore: ObservableObject {
             taskLabel: task.label,
             taskSummary: task.summary,
             sizeGB: task.weightsSizeGB,
-            ramGB: descriptor.ramGB,
+            ramGB: descriptor.declaredRAMGB(forTask: task.id),
             license: task.license,
             requiresAppleSilicon: descriptor.requiresAppleSilicon,
             installState: state,
@@ -352,10 +352,18 @@ final class PluginStore: ObservableObject {
             return "\(descriptor.name) requires Apple Silicon. "
                 + "This Mac reports \(machine.architectureName)."
         }
-        if descriptor.ramGB > machine.physicalMemoryGB {
+        // Compared against the LIGHTEST task, so a plugin is called unsupported
+        // only when nothing it offers can run. A per-task declaration can exceed
+        // this Mac while a sibling task still fits, and that case belongs on the
+        // row rather than on the whole plugin.
+        let lightest = descriptor.tasks
+            .map { descriptor.declaredRAMGB(forTask: $0.id) }
+            .min() ?? descriptor.ramGB
+        if lightest > machine.physicalMemoryGB {
             return String(
-                format: "%@ declares %.1f GB peak memory; this Mac has %.1f GB.",
-                descriptor.name, descriptor.ramGB, machine.physicalMemoryGB)
+                format: "%@ declares %.1f GB peak memory for its smallest task; "
+                    + "this Mac has %.1f GB.",
+                descriptor.name, lightest, machine.physicalMemoryGB)
         }
         return nil
     }

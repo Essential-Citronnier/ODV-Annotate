@@ -680,7 +680,11 @@ stop[0] = True
 watcher.join(timeout=2.0)
 
 scale = 1 if sys.platform == "darwin" else 1024
+# Carries `ok` so the shared envelope reader recognises it: the protocol's
+# section 4b disambiguation is what distinguishes a result line from a log line,
+# and a driver that skipped it would be silently unparseable.
 print(json.dumps({
+    "ok": error is None,
     "getrusage_self_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale,
     "sampled_self_bytes": sampled[0] * scale,
     "getrusage_children_bytes":
@@ -693,7 +697,7 @@ print(json.dumps({
 
 def phase_crosscheck(recorder: Recorder, repo: Path, paths: EvalPaths,
                      manifest: dict, series_dirs: list[Path], timeout: float,
-                     totalseg_threads: bool) -> None:
+                     totalseg_threads: bool, fast: bool = True) -> None:
     """Measure TotalSegmentator's peak three independent ways, per series.
 
     Recorded as ordinary cases so the cross-check is part of the results file
@@ -705,12 +709,15 @@ def phase_crosscheck(recorder: Recorder, repo: Path, paths: EvalPaths,
     python = paths.venv_python(plugin_id)
 
     for series_dir in series_dirs:
-        case_id = f"crosscheck/{plugin_id}/{series_dir.name}"
+        variant = "fast3mm" if fast else "fullres"
+        case_id = f"crosscheck/{plugin_id}/{variant}/{series_dir.name}"
         if case_id in recorder.done_case_ids():
             print(f"  [skip] {case_id} (already recorded)", flush=True)
             continue
 
         notes = [f"input_series={series_dir.name}",
+                 f"task=total, fast={'true' if fast else 'false'} "
+                 f"({'3mm low-resolution' if fast else 'full-resolution'} variant)",
                  "three independent peak-RSS instruments on one run; they "
                  "share no code path, so agreement is evidence and "
                  "disagreement localises the faulty one",
@@ -729,7 +736,7 @@ def phase_crosscheck(recorder: Recorder, repo: Path, paths: EvalPaths,
                 "total allocation is unchanged; it is the wall time that is "
                 "affected, not the peak")
 
-        run_dir = paths.runs_root(plugin_id) / f"crosscheck-{series_dir.name}"
+        run_dir = paths.runs_root(plugin_id) / f"crosscheck-{variant}-{series_dir.name}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
         driver = paths.plugin_root(plugin_id) / "crosscheck_driver.py"
@@ -737,8 +744,9 @@ def phase_crosscheck(recorder: Recorder, repo: Path, paths: EvalPaths,
         driver.write_text(CROSSCHECK_DRIVER)
 
         started = time.perf_counter()
+        fast_arg = "true" if fast else "false"
         argv = [str(python), str(driver), str(series_dir), str(run_dir),
-                "total", "true"]
+                "total", fast_arg]
         try:
             if totalseg_threads:
                 argv = [str(python), "-c",
@@ -746,7 +754,7 @@ def phase_crosscheck(recorder: Recorder, repo: Path, paths: EvalPaths,
                         "sys.argv = sys.argv[1:]; "
                         "runpy.run_path(sys.argv[0], run_name='__main__')",
                         str(driver), str(series_dir), str(run_dir),
-                        "total", "true"]
+                        "total", fast_arg]
             code, output, peak = run_subprocess_isolated(
                 argv, cwd=driver.parent, env=environment, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -759,6 +767,9 @@ def phase_crosscheck(recorder: Recorder, repo: Path, paths: EvalPaths,
         envelope = last_envelope(output)
         metrics: dict[str, Any] = {"declared_ram_gb": declared,
                                    "input_series": series_dir.name,
+                                   "task": "total",
+                                   "fast": fast,
+                                   "variant": variant,
                                    "exit_code": code}
         if envelope:
             for key in ("getrusage_self_bytes", "sampled_self_bytes",
@@ -1442,6 +1453,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--series", type=Path, default=None,
                         help="A DICOM series directory, for slice rendering and "
                              "the one-shot benchmark")
+    parser.add_argument("--crosscheck-fullres", action="store_true",
+                        help="Run the cross-check at full resolution instead of "
+                             "the fast 3mm variant. Materially slower on CPU")
     parser.add_argument("--crosscheck-series", type=Path, nargs="*", default=None,
                         help="Series directories for the memory cross-check "
                              "phase; defaults to --series")
@@ -1518,7 +1532,8 @@ def main(argv: list[str] | None = None) -> int:
             crosscheck_series = [args.series] if args.series else []
         phase_crosscheck(recorder, repo, paths, manifest,
                          [Path(s).resolve() for s in crosscheck_series],
-                         args.timeout, args.totalseg_threads)
+                         args.timeout, args.totalseg_threads,
+                         fast=not args.crosscheck_fullres)
     if "arbitration" in phases:
         print("phase: arbitration", flush=True)
         phase_arbitration(recorder, repo, manifest, env_root / "arbiter-driver")

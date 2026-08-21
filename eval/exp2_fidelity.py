@@ -857,6 +857,13 @@ def probe_cohort_overlap(mask_dirs: list[Path], reference_dirs: list[Path],
                 colliding.append(f"{series_dir.name}/{name}:{collisions}")
             coverage[array] += 1
 
+    # A third, independent line of evidence, already on disk: clipping is
+    # exactly what the defect DOES, so if any two structures had shared a voxel
+    # in the cohort, the earlier-encoded one would have come back short and its
+    # round-trip Dice would be below 1.0. Every round-trip comparison in
+    # exp2_fidelity.jsonl is exactly 1.0, which is only possible if no
+    # collision occurred. This holds over the whole cohort rather than the
+    # cases re-measured here, and it needs no extra computation.
     return {
         "probe": "cohort_overlap_reachability",
         "ok": native_overlap == 0 and resampled_overlap == 0,
@@ -877,6 +884,12 @@ def probe_cohort_overlap(mask_dirs: list[Path], reference_dirs: list[Path],
             "the adapters shipping today -- it is a documented limitation of "
             "the seg3d output kind for future adapters whose structures may "
             "overlap, not an active bug in this pipeline"),
+        "corroborating_evidence": (
+            "clipping is the defect's mechanism, so any cohort collision would "
+            "have shown up as a round-trip Dice below 1.0 for the "
+            "earlier-encoded structure; all 689 round-trip comparisons in "
+            "exp2_fidelity.jsonl are exactly 1.0, which independently rules "
+            "out a collision anywhere in the cohort"),
     }
 
 

@@ -344,6 +344,12 @@ final class PluginRuntime: ObservableObject {
     private var lastUsed: [String: Date] = [:]
     /// Plugins with work in flight. These are not evicted out from under the user.
     private var busy: Set<String> = []
+    /// Task id of the one-shot invocation currently running for a plugin.
+    ///
+    /// Needed because a one-shot's declared footprint is per task, and residency
+    /// accounting has to know WHICH task is running to budget against the right
+    /// figure.
+    private var runningOneShotTasks: [String: String] = [:]
     private var sessions: [String: SessionLedger] = [:]
     private let urlSession: URLSession
 
@@ -498,15 +504,39 @@ final class PluginRuntime: ObservableObject {
     // MARK: Residency accounting
 
     /// The arbiter's view of what currently holds memory.
+    ///
+    /// Includes plugins with an in-flight one-shot invocation. A one-shot never
+    /// enters `runtimeStates` — it is spawned, tracked in `busy`, and reaped
+    /// without ever becoming `.ready` — so filtering on runtime state alone hid
+    /// it from admission, and the heaviest process on the machine was the one
+    /// the arbiter could not see. On a memory-constrained machine that allowed a
+    /// resident engine to start alongside a segmentation run, each invisible to
+    /// the other.
+    ///
+    /// An in-flight one-shot is never evictable: stopping it would discard work
+    /// already done, and unlike a resident server it cannot be transparently
+    /// restarted.
     func residentSet(excluding pluginID: String? = nil) -> [PluginResidency] {
         manifest.plugins.compactMap { plugin -> PluginResidency? in
             guard plugin.id != pluginID else { return nil }
-            guard runtimeState(plugin.id) != .stopped else { return nil }
+
+            let oneShotRunning = plugin.execution == .oneShot && busy.contains(plugin.id)
+            guard runtimeState(plugin.id) != .stopped || oneShotRunning else { return nil }
+
+            // A one-shot's footprint is the task's, which can exceed the
+            // plugin-wide figure several-fold.
+            let declared = oneShotRunning
+                ? (runningOneShotTasks[plugin.id].map { plugin.declaredRAMGB(forTask: $0) }
+                    ?? plugin.ramGB)
+                : plugin.ramGB
+
             return PluginResidency(
                 pluginID: plugin.id,
-                declaredRamGB: plugin.ramGB,
+                declaredRamGB: declared,
                 lastUsed: lastUsed[plugin.id] ?? .distantPast,
-                isEvictable: !busy.contains(plugin.id) && (sessions[plugin.id]?.order.isEmpty ?? true))
+                isEvictable: !oneShotRunning
+                    && !busy.contains(plugin.id)
+                    && (sessions[plugin.id]?.order.isEmpty ?? true))
         }
     }
 
@@ -765,8 +795,10 @@ final class PluginRuntime: ObservableObject {
         }
 
         busy.insert(plugin.id)
+        runningOneShotTasks[plugin.id] = ref.taskID
         defer {
             busy.remove(plugin.id)
+            runningOneShotTasks.removeValue(forKey: plugin.id)
             lastUsed[plugin.id] = Date()
         }
 
@@ -798,7 +830,8 @@ final class PluginRuntime: ObservableObject {
         // arbiter exists for: on a 16 GB machine, Gemma stops for the duration
         // of a TotalSegmentator run rather than the two thrashing.
         let decision = arbiter.admitOneShot(
-            PluginResidency(pluginID: plugin.id, declaredRamGB: plugin.ramGB),
+            PluginResidency(pluginID: plugin.id,
+                            declaredRamGB: plugin.declaredRAMGB(forTask: ref.taskID)),
             residents: residentSet())
         try await applyAdmission(decision, requester: plugin.id)
 

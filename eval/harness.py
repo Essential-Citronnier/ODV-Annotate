@@ -175,17 +175,53 @@ def run_subprocess(argv: list[str], cwd: Path | None = None,
                    timeout: float | None = None) -> tuple[int, str, float]:
     """Run a child process, returning (exit code, combined output, peak RSS bytes).
 
-    Peak RSS is read from the kernel's accounting for children reaped during the
-    call. It is attributed to this child on the assumption that no other child
-    ran concurrently in this process, which the experiments honour by running
-    cases serially.
+    The peak is measured in a forked intermediate whose own children accounting
+    starts empty, so the figure belongs to THIS child.
+
+    An earlier version read `getrusage(RUSAGE_CHILDREN).ru_maxrss` in the calling
+    process. That field is a high-water mark over every child the process has
+    ever reaped and never resets, so in a run measuring several subprocesses
+    serially, every child after the heaviest inherited the heaviest one's peak —
+    a 10 MB child following an 800 MB child was reported at 810 MB. The symptom
+    was plausible-looking rows where several plugins showed byte-identical peaks
+    without having loaded a model.
     """
-    before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    proc = subprocess.run(argv, cwd=str(cwd) if cwd else None, env=env,
-                          capture_output=True, text=True, timeout=timeout)
-    after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    peak = _maxrss_to_bytes(max(after, before))
-    return proc.returncode, (proc.stdout or "") + (proc.stderr or ""), peak
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+
+    if pid == 0:  # intermediate: its RUSAGE_CHILDREN starts clean
+        os.close(read_fd)
+        code = 0
+        out = ""
+        try:
+            proc = subprocess.run(argv, cwd=str(cwd) if cwd else None, env=env,
+                                  capture_output=True, text=True, timeout=timeout)
+            code = proc.returncode
+            out = (proc.stdout or "") + (proc.stderr or "")
+        except subprocess.TimeoutExpired:
+            code, out = 124, f"timed out after {timeout}s"
+        except FileNotFoundError as exc:
+            code, out = 127, f"could not execute {argv[0]}: {exc}"
+        except Exception as exc:  # noqa: BLE001 — report, never hang the parent
+            code, out = 125, f"{type(exc).__name__}: {exc}"
+
+        peak = _maxrss_to_bytes(
+            resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+        payload = json.dumps({"code": code, "out": out, "peak": peak}).encode()
+        with os.fdopen(write_fd, "wb") as sink:
+            sink.write(payload)
+        os._exit(0)
+
+    os.close(write_fd)
+    with os.fdopen(read_fd, "rb") as source:
+        raw = source.read()
+    os.waitpid(pid, 0)
+
+    try:
+        result = json.loads(raw.decode())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return 125, "measurement subprocess produced no result", 0.0
+    return result["code"], result["out"], result["peak"]
 
 
 def dice(a, b) -> float:

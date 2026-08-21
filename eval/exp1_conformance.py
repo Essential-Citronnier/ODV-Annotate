@@ -340,7 +340,8 @@ if shim_dir:
     sys.path.insert(0, shim_dir)
     import totalsegmentator.python_api  # noqa: F401
     import odv_sandbox_shim
-    shim_applied = odv_sandbox_shim.apply()
+    shim_threads = int(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else None
+    shim_applied = odv_sandbox_shim.apply(threads=shim_threads)
     odv_sandbox_shim.verify()
 
 reporter = ProgressReporter(stream=sys.stderr)
@@ -379,7 +380,8 @@ print(json.dumps({
 
 def stage_segment(series_dirs: list[Path], work_root: Path, python: Path,
                   task: str, fast: bool, use_shim: bool,
-                  recorder: Recorder, done: set[str]) -> None:
+                  recorder: Recorder, done: set[str],
+                  threads: int | None = None) -> None:
     worker = work_root / "_segment_worker.py"
     worker.parent.mkdir(parents=True, exist_ok=True)
     worker.write_text(_SEGMENT_WORKER)
@@ -401,7 +403,7 @@ def stage_segment(series_dirs: list[Path], work_root: Path, python: Path,
         started = time.perf_counter()
         proc = subprocess.run(
             [str(python), str(worker), str(REPO), str(series_dir), str(work),
-             task, "true" if fast else "false", shim_dir],
+             task, "true" if fast else "false", shim_dir, str(threads or "")],
             capture_output=True, text=True, env=env)
         wall = time.perf_counter() - started
 
@@ -1006,6 +1008,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stages", default="prepare,segment,roundtrip,audit",
                         help="Comma-separated subset of prepare,segment,roundtrip,"
                              "audit,sample")
+    parser.add_argument("--threads", type=int, default=None,
+                        help="Torch thread floor for the shim. Defaults to the "
+                             "core count; lower it when the machine is shared.")
     parser.add_argument("--sample-dir", type=Path,
                         default=REPO / "eval" / "results" / "external_viewer_sample",
                         help="Where the sample SEG for the external viewer "
@@ -1046,7 +1051,8 @@ def main(argv: list[str] | None = None) -> int:
     if "segment" in stages:
         print(f"segment: {len(series)} series", flush=True)
         stage_segment(series, args.work, args.python, args.task,
-                      args.fast == "true", args.sandbox_shim, recorder, done)
+                      args.fast == "true", args.sandbox_shim, recorder, done,
+                      threads=args.threads)
 
     _, rows = load_results(args.results)
     segmented = [r for r in rows if r["case_id"].startswith("segment/") and r["ok"]]

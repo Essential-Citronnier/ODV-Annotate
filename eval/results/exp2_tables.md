@@ -5,8 +5,12 @@
 | tcia_1028210905866391 | 485 | 78 | 1.0 | 1.0 | 1.0 | 0 | 739.77 |
 | tcia_1556218467652708 | 411 | 80 | 1.0 | 1.0 | 1.0 | 0 | 987.59 |
 | tcia_1615802411543660 | 481 | 107 | 1.0 | 1.0 | 1.0 | 0 | 877.01 |
+| tcia_2083024417478217 | 485 | 104 | 1.0 | 1.0 | 1.0 | 0 | 956.17 |
+| tcia_2121018880599426 | 493 | 107 | 1.0 | 1.0 | 1.0 | 0 | 561.25 |
+| tcia_3182831987332065 | 489 | 107 | 1.0 | 1.0 | 1.0 | 0 | 465.76 |
+| tcia_7962814028413347 | 429 | 106 | 1.0 | 1.0 | 1.0 | 0 | 851.18 |
 
-3 of 3 cases succeeded; the lowest per-structure Dice anywhere in the end-to-end comparison is 1.0.
+7 of 7 cases succeeded; the lowest per-structure Dice anywhere in the end-to-end comparison is 1.0.
 
 
 ### Table 2 — Hygiene check against expert reference masks

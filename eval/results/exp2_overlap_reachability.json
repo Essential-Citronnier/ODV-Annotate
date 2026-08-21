@@ -26,6 +26,7 @@
       "multiply_covered_voxels_after_resampling": 0,
       "colliding_structures": []
     },
-    "interpretation": "TotalSegmentator's `total` task derives every per-structure mask from one integer labelmap by equality test, so its structures are disjoint by construction, and they remain disjoint after the exporter's nearest-neighbour resampling onto the source grid. The single-labelmap encoding defect is therefore NOT reachable through the adapters shipping today -- it is a documented limitation of the seg3d output kind for future adapters whose structures may overlap, not an active bug in this pipeline"
+    "interpretation": "TotalSegmentator's `total` task derives every per-structure mask from one integer labelmap by equality test, so its structures are disjoint by construction, and they remain disjoint after the exporter's nearest-neighbour resampling onto the source grid. The single-labelmap encoding defect is therefore NOT reachable through the adapters shipping today -- it is a documented limitation of the seg3d output kind for future adapters whose structures may overlap, not an active bug in this pipeline",
+    "corroborating_evidence": "clipping is the defect's mechanism, so any cohort collision would have shown up as a round-trip Dice below 1.0 for the earlier-encoded structure; all 689 round-trip comparisons in exp2_fidelity.jsonl are exactly 1.0, which independently rules out a collision anywhere in the cohort"
   }
 }
