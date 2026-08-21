@@ -52,3 +52,6 @@ mlx-server/.server.pid
 # Plugin adapter virtualenvs (created per plugin at install time)
 plugins/*/.venv/
 plugins/.venv/
+
+# Evaluation data and weights (public, re-fetchable via eval/fetch_data.py)
+.eval/
