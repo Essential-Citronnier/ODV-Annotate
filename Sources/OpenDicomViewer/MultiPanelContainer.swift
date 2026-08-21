@@ -704,7 +704,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 desiredCursor = .crosshair
             case .eraser:
                 desiredCursor = .disappearingItem
-            case .aiAnalyze:
+            case .aiAnalyze, .aiPoint, .aiBox:
                 desiredCursor = .crosshair
             }
 
@@ -824,7 +824,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             case .zoom:
                 lastDragLocation = event.locationInWindow
 
-            case .roiWL, .roiStats:
+            case .roiWL, .roiStats, .aiBox:
                 if let px = screenToPixel(event) {
                     roiStartPixel = px
                     panel.roiRect = CGRect(x: px.x, y: px.y, width: 0, height: 0)
@@ -905,6 +905,20 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             case .aiAnalyze:
                 // AI analyze triggered by clicking on image
                 model.triggerAIAnalysis(for: panel)
+
+            case .aiPoint:
+                // Option-click subtracts: SAM-family prompting refines a mask by
+                // adding background points, so the modifier carries the polarity
+                // rather than requiring a separate tool.
+                if let px = screenToPixel(event) {
+                    let isForeground = !event.modifierFlags.contains(.option)
+                    model.addPromptPoint(px, isForeground: isForeground, for: panel)
+                }
+
+            case .aiBox:
+                // The rect accumulates on drag with the ROI tools; the prompt is
+                // submitted on mouseUp, where the completed rect is known.
+                break
             }
         }
 
@@ -1176,7 +1190,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 restoreState()
                 lastDragLocation = current
 
-            case .roiWL, .roiStats:
+            case .roiWL, .roiStats, .aiBox:
                 // Update ROI rectangle
                 if let start = roiStartPixel, let current = screenToPixel(event) {
                     let x = min(start.x, current.x)
@@ -1203,7 +1217,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             case .eraser:
                 break
 
-            case .aiAnalyze:
+            case .aiAnalyze, .aiPoint:
                 break
             }
         }
@@ -1218,6 +1232,13 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             case .roiWL:
                 if let rect = panel.roiRect, rect.width > 1 && rect.height > 1 {
                     model.autoWindowLevelForPanelROI(panel, rect: rect)
+                }
+                roiStartPixel = nil
+                panel.roiRect = nil
+
+            case .aiBox:
+                if let rect = panel.roiRect, rect.width > 1 && rect.height > 1 {
+                    model.addPromptBox(rect, for: panel)
                 }
                 roiStartPixel = nil
                 panel.roiRect = nil

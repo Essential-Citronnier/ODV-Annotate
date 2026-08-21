@@ -82,8 +82,17 @@ enum ActiveTool: String, CaseIterable, Identifiable {
     case angle = "Angle"
     case eraser = "Eraser"
     case aiAnalyze = "AI Analyze"
+    /// Click prompting for promptable segmentation (SAM family). A plain click
+    /// adds a foreground point; option-click subtracts a background point.
+    case aiPoint = "AI Point"
+    /// Box prompting for promptable segmentation.
+    case aiBox = "AI Box"
 
     var id: String { rawValue }
+
+    /// Whether this tool drives a promptable-segmentation session, which the
+    /// host opens lazily on first prompt and closes when the slice changes.
+    var isPromptTool: Bool { self == .aiPoint || self == .aiBox }
 
     var icon: String {
         switch self {
@@ -97,6 +106,8 @@ enum ActiveTool: String, CaseIterable, Identifiable {
         case .angle: return "angle"
         case .eraser: return "eraser"
         case .aiAnalyze: return "brain"
+        case .aiPoint: return "hand.tap"
+        case .aiBox: return "rectangle.and.hand.point.up.left"
         }
     }
 
@@ -112,6 +123,8 @@ enum ActiveTool: String, CaseIterable, Identifiable {
         case .angle: return "N"
         case .eraser: return "E"
         case .aiAnalyze: return "G"
+        case .aiPoint: return "K"
+        case .aiBox: return "B"
         }
     }
 }

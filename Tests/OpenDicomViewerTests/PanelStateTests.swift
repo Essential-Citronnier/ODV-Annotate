@@ -82,8 +82,15 @@ final class PanelStateTests: XCTestCase {
     // MARK: - ActiveTool
 
     func testActiveToolAllCases() {
-        let cases = ActiveTool.allCases
-        XCTAssertEqual(cases.count, 10)
+        // Asserts the tools that must exist rather than a bare count: a count
+        // breaks whenever a tool is added, which says nothing about whether the
+        // existing ones survived — and that is the regression worth catching.
+        let cases = Set(ActiveTool.allCases)
+        for tool in [ActiveTool.select, .pan, .windowLevel, .zoom, .roiWL,
+                     .roiStats, .ruler, .angle, .eraser, .aiAnalyze] {
+            XCTAssertTrue(cases.contains(tool), "\(tool.rawValue) went missing")
+        }
+        XCTAssertGreaterThanOrEqual(cases.count, 10)
     }
 
     func testActiveToolRawValues() {

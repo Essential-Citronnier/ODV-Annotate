@@ -180,6 +180,13 @@ class DICOMModel: ObservableObject {
     // MARK: - Multi-Panel State
     @Published var layout: ViewerLayout = .single
     @Published var panels: [PanelState] = []
+
+    /// Promptable-segmentation sessions, one per panel.
+    ///
+    /// Keyed by panel identity rather than held on PanelState so that the panel
+    /// stays free of a dependency on the plugin runtime, and so a session's
+    /// cached embedding is released when the panel is discarded.
+    var promptSessions: [UUID: PromptSession] = [:]
     @Published var activePanelID: UUID = UUID()
     @Published var showCrossReference: Bool = false
     enum InspectorPanel { case tags, ai }
