@@ -215,8 +215,10 @@ as measured.
   degrades the policy.
 - The protocol has one major version and no negotiation beyond refusing a
   mismatch.
-- Prompt-driven segmentation currently returns 2D masks per slice; propagating a
-  prompt through a volume is future work.
+- Prompt-driven segmentation returns 2D masks per slice. The interaction is
+  implemented — click and box prompts, accumulating refinement, per-slice session
+  caching — but propagating one prompt through a volume is future work, and a
+  per-slice mask is not a substitute for 3D segmentation.
 
 ## References
 

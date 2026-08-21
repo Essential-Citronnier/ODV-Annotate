@@ -55,3 +55,7 @@ plugins/.venv/
 
 # Evaluation data and weights (public, re-fetchable via eval/fetch_data.py)
 .eval/
+
+# Packaged app bundle and disk image
+*.app/
+*.dmg

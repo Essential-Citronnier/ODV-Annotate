@@ -36,6 +36,7 @@ from _shared.protocol import (  # noqa: E402
     TaskRequest,
     TaskSpec,
 )
+from _shared.bench import bench_arg_present, run_resident_bench  # noqa: E402
 from _shared.cli import parse_server_args  # noqa: E402
 from _shared.weights import (  # noqa: E402
     download_huggingface,
@@ -556,6 +557,13 @@ def main(argv: list[str] | None = None) -> int:
         return run_install(
             parse_install_args("Gemma 4 E4B weight installer.", argv), install_weights
         )
+
+    if bench_arg_present(argv):
+        # Dispatched before the server parser, like --install-weights. The
+        # model is loaded through the same entry point the server's startup
+        # hook uses, so the measured load cost is the one a user pays.
+        return run_resident_bench(
+            PLUGIN_ID, GemmaAdapter, lambda adapter: adapter.model.load(), argv)
 
     args = parse_server_args("Gemma 4 E4B adapter for OpenDicomViewer.", argv)
     adapter = GemmaAdapter()

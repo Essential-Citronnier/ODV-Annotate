@@ -1,0 +1,7 @@
+case_id,ok,reference_structures,native_dice_mean,plugin_dice_mean,native_dice_large_mean,plugin_dice_large_mean,path_agreement_min_dice,error
+s0049,True,108,0.8545,0.8545,0.9496,0.9496,1.0,
+s0111,True,89,0.8304,0.8304,0.9495,0.9495,1.0,
+s0189,False,,,,,,,ITK ERROR: ITK only supports orthonormal direction cosines.  No orthonormal definition found!
+s0193,False,,,,,,,ITK ERROR: ITK only supports orthonormal direction cosines.  No orthonormal definition found!
+s0241,True,76,0.816,0.816,0.9432,0.9432,1.0,
+s0245,True,54,0.8046,0.8046,0.8623,0.8623,1.0,

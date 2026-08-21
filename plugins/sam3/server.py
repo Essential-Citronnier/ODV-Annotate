@@ -37,6 +37,7 @@ from typing import Any, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from _shared.protocol import ErrorCode, PluginError  # noqa: E402
+from _shared.bench import bench_arg_present, run_sam_bench  # noqa: E402
 from _shared.cli import parse_server_args  # noqa: E402
 from _shared.sam_session import SamSessionAdapter, select_device  # noqa: E402
 from _shared.weights import (  # noqa: E402
@@ -321,6 +322,12 @@ def main(argv: list[str] | None = None) -> int:
         return run_install(
             parse_install_args("SAM 3 weight verifier.", argv), install_weights
         )
+    if bench_arg_present(argv):
+        # Dispatched before the server parser, like --install-weights. On a
+        # machine without the gated checkpoint this reports the
+        # `license_required` envelope rather than a timing, which is the
+        # correct measurement of a gated plugin.
+        return run_sam_bench(PLUGIN_ID, build_adapter, argv)
     args = parse_server_args("SAM 3 session adapter for OpenDicomViewer.", argv)
 
     # Imported here rather than at module scope: `serve` pulls in fastapi and

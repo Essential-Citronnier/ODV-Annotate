@@ -914,12 +914,10 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                     let isForeground = !event.modifierFlags.contains(.option)
                     model.addPromptPoint(px, isForeground: isForeground, for: panel)
                 }
-
-            case .aiBox:
-                // The rect accumulates on drag with the ROI tools; the prompt is
-                // submitted on mouseUp, where the completed rect is known.
-                break
             }
+            // `.aiBox` needs nothing here: it is grouped with the ROI tools
+            // above, which start the rect on mouseDown; the prompt is submitted
+            // on mouseUp once the rect is complete.
         }
 
         /// Compute minimum distance from a point to an annotation

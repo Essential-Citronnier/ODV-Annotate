@@ -1,0 +1,986 @@
+{
+  "schema_version": 1,
+  "protocol": 1,
+  "_comment": "Fixture manifest for the ODV plugin conformance kit. These adapters are deliberately broken, one violation class each, and exist only so the kit's own tests can assert that each check catches its violation. They are NOT shipped and are absent from the app's plugins.json.",
+  "plugins": [
+    {
+      "id": "stub-conformant",
+      "name": "Stub: conformant",
+      "vendor": "ODV conformance kit",
+      "summary": "Correct in every respect. The control: any FAIL here is the kit's bug, not an adapter's.",
+      "execution": "session",
+      "adapter_dir": "conformant",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "prompt-mask",
+          "label": "Prompt Segmentation",
+          "inputs": [
+            "slice2d",
+            "points",
+            "box"
+          ],
+          "outputs": [
+            "mask2d"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ],
+      "max_sessions": 2
+    },
+    {
+      "id": "stub-wrong-protocol",
+      "name": "Stub: wrong_protocol",
+      "vendor": "ODV conformance kit",
+      "summary": "/health reports protocol 2. The host refuses to route to any major but 1.",
+      "execution": "resident-server",
+      "adapter_dir": "wrong_protocol",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-id-mismatch",
+      "name": "Stub: plugin_id_mismatch",
+      "vendor": "ODV conformance kit",
+      "summary": "/health and /capabilities report an id the manifest does not declare.",
+      "execution": "resident-server",
+      "adapter_dir": "plugin_id_mismatch",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-binds-all",
+      "name": "Stub: binds_all_interfaces",
+      "vendor": "ODV conformance kit",
+      "summary": "Binds 0.0.0.0, making the adapter reachable from the network (invariant 1).",
+      "execution": "resident-server",
+      "adapter_dir": "binds_all_interfaces",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-missing-port",
+      "name": "Stub: missing_port",
+      "vendor": "ODV conformance kit",
+      "summary": "Ignores --port and listens on a fixed port of its own.",
+      "execution": "resident-server",
+      "adapter_dir": "missing_port",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-heavy-import",
+      "name": "Stub: heavy_import",
+      "vendor": "ODV conformance kit",
+      "summary": "Imports torch at module scope, so --help and --install-weights need the environment the hook is meant to populate.",
+      "execution": "resident-server",
+      "adapter_dir": "heavy_import",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-stderr-envelope",
+      "name": "Stub: envelope_on_stderr",
+      "vendor": "ODV conformance kit",
+      "summary": "Writes the error envelope to stderr only, so license_required never reaches the store's gate.",
+      "execution": "resident-server",
+      "adapter_dir": "envelope_on_stderr",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-rle-phase",
+      "name": "Stub: rle_starts_foreground",
+      "vendor": "ODV conformance kit",
+      "summary": "Emits mask RLE whose first run is foreground, with no leading zero. Renders inverted, silently.",
+      "execution": "session",
+      "adapter_dir": "rle_starts_foreground",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "prompt-mask",
+          "label": "Prompt Segmentation",
+          "inputs": [
+            "slice2d",
+            "points",
+            "box"
+          ],
+          "outputs": [
+            "mask2d"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ],
+      "max_sessions": 2
+    },
+    {
+      "id": "stub-abs-paths",
+      "name": "Stub: absolute_output_paths",
+      "vendor": "ODV conformance kit",
+      "summary": "Writes absolute output paths into result.json instead of paths relative to --out.",
+      "execution": "one-shot",
+      "adapter_dir": "absolute_output_paths",
+      "entry": "run_segment.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "segment",
+          "label": "Segment",
+          "inputs": [
+            "series3d"
+          ],
+          "outputs": [
+            "seg3d",
+            "metrics"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "options": {
+            "fast": {
+              "type": "bool",
+              "default": true,
+              "label": "Fast"
+            }
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-session-unbounded",
+      "name": "Stub: session_no_max",
+      "vendor": "ODV conformance kit",
+      "summary": "A session adapter that declares no max_sessions, so its cache is unbounded.",
+      "execution": "session",
+      "adapter_dir": "session_no_max",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "prompt-mask",
+          "label": "Prompt Segmentation",
+          "inputs": [
+            "slice2d",
+            "points",
+            "box"
+          ],
+          "outputs": [
+            "mask2d"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-bad-code",
+      "name": "Stub: bad_error_code",
+      "vendor": "ODV conformance kit",
+      "summary": "Uses an error code outside the section 3 enum.",
+      "execution": "one-shot",
+      "adapter_dir": "bad_error_code",
+      "entry": "run_segment.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "segment",
+          "label": "Segment",
+          "inputs": [
+            "series3d"
+          ],
+          "outputs": [
+            "seg3d",
+            "metrics"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "options": {
+            "fast": {
+              "type": "bool",
+              "default": true,
+              "label": "Fast"
+            }
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-ambiguous",
+      "name": "Stub: ambiguous_stdout",
+      "vendor": "ODV conformance kit",
+      "summary": "Emits a stdout line carrying both `ok` and `progress`, so envelope and progress are indistinguishable.",
+      "execution": "one-shot",
+      "adapter_dir": "ambiguous_stdout",
+      "entry": "run_segment.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "segment",
+          "label": "Segment",
+          "inputs": [
+            "series3d"
+          ],
+          "outputs": [
+            "seg3d",
+            "metrics"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "options": {
+            "fast": {
+              "type": "bool",
+              "default": true,
+              "label": "Fast"
+            }
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-bad-progress",
+      "name": "Stub: malformed_progress",
+      "vendor": "ODV conformance kit",
+      "summary": "Emits progress lines whose `progress` is a percentage string, not a 0-1 number.",
+      "execution": "one-shot",
+      "adapter_dir": "malformed_progress",
+      "entry": "run_segment.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "segment",
+          "label": "Segment",
+          "inputs": [
+            "series3d"
+          ],
+          "outputs": [
+            "seg3d",
+            "metrics"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "options": {
+            "fast": {
+              "type": "bool",
+              "default": true,
+              "label": "Fast"
+            }
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-no-result",
+      "name": "Stub: no_result_json",
+      "vendor": "ODV conformance kit",
+      "summary": "A failing one-shot run writes no result.json, leaving the host an exit code and nothing to show.",
+      "execution": "one-shot",
+      "adapter_dir": "no_result_json",
+      "entry": "run_segment.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "segment",
+          "label": "Segment",
+          "inputs": [
+            "series3d"
+          ],
+          "outputs": [
+            "seg3d",
+            "metrics"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "options": {
+            "fast": {
+              "type": "bool",
+              "default": true,
+              "label": "Fast"
+            }
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-session-refuses",
+      "name": "Stub: session_refuses_open",
+      "vendor": "ODV conformance kit",
+      "summary": "Reports /health ready, then refuses every /session/open.",
+      "execution": "session",
+      "adapter_dir": "session_refuses_open",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "prompt-mask",
+          "label": "Prompt Segmentation",
+          "inputs": [
+            "slice2d",
+            "points",
+            "box"
+          ],
+          "outputs": [
+            "mask2d"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ],
+      "max_sessions": 2
+    },
+    {
+      "id": "stub-permissive",
+      "name": "Stub: oneshot_accepts_anything",
+      "vendor": "ODV conformance kit",
+      "summary": "Accepts any --task and a series path that does not exist, reporting success for work it never did.",
+      "execution": "one-shot",
+      "adapter_dir": "oneshot_accepts_anything",
+      "entry": "run_segment.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "segment",
+          "label": "Segment",
+          "inputs": [
+            "series3d"
+          ],
+          "outputs": [
+            "seg3d",
+            "metrics"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "options": {
+            "fast": {
+              "type": "bool",
+              "default": true,
+              "label": "Fast"
+            }
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-rle-length",
+      "name": "Stub: rle_bad_length",
+      "vendor": "ODV conformance kit",
+      "summary": "Emits mask RLE whose runs do not sum to width*height.",
+      "execution": "session",
+      "adapter_dir": "rle_bad_length",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "prompt-mask",
+          "label": "Prompt Segmentation",
+          "inputs": [
+            "slice2d",
+            "points",
+            "box"
+          ],
+          "outputs": [
+            "mask2d"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ],
+      "max_sessions": 2
+    },
+    {
+      "id": "stub-hook-flags",
+      "name": "Stub: weight_hook_rejects_flags",
+      "vendor": "ODV conformance kit",
+      "summary": "The weight hook rejects --repo and --task as unrecognized arguments.",
+      "execution": "resident-server",
+      "adapter_dir": "weight_hook_rejects_flags",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-manual-fetch",
+      "name": "Stub: manual_downloads",
+      "vendor": "ODV conformance kit",
+      "summary": "A `manual` weight source attempts a download instead of verifying a locally placed checkpoint.",
+      "execution": "session",
+      "adapter_dir": "manual_downloads",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "prompt-mask",
+          "label": "Prompt Segmentation",
+          "inputs": [
+            "slice2d",
+            "points",
+            "box"
+          ],
+          "outputs": [
+            "mask2d"
+          ],
+          "license": {
+            "gate": "gated-download",
+            "identifier": "Stub License",
+            "terms_url": "https://example.invalid/terms"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "manual",
+              "repo": "odv/stub",
+              "filename": "stub-checkpoint.pt",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ],
+      "max_sessions": 2
+    },
+    {
+      "id": "stub-no-entry",
+      "name": "Stub: manifest_entry_missing",
+      "vendor": "ODV conformance kit",
+      "summary": "The manifest names an entry script that does not exist.",
+      "execution": "resident-server",
+      "adapter_dir": "manifest_entry_missing",
+      "entry": "not_here.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-bad-exec",
+      "name": "Stub: manifest_bad_execution",
+      "vendor": "ODV conformance kit",
+      "summary": "The manifest declares an execution model that is not one of the three.",
+      "execution": "daemon",
+      "adapter_dir": "manifest_bad_execution",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-bad-kinds",
+      "name": "Stub: manifest_bad_kinds",
+      "vendor": "ODV conformance kit",
+      "summary": "The manifest declares input and output kinds the protocol does not define.",
+      "execution": "resident-server",
+      "adapter_dir": "manifest_bad_kinds",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "hologram"
+          ],
+          "outputs": [
+            "text",
+            "pointcloud"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-no-resources",
+      "name": "Stub: manifest_no_resources",
+      "vendor": "ODV conformance kit",
+      "summary": "The manifest declares no peak memory or disk footprint, so the arbiter cannot schedule it.",
+      "execution": "resident-server",
+      "adapter_dir": "manifest_no_resources",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "analyze",
+          "label": "Analyze",
+          "inputs": [
+            "slice2d",
+            "text"
+          ],
+          "outputs": [
+            "text",
+            "bbox"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stub-close-rejects",
+      "name": "Stub: session_close_rejects",
+      "vendor": "ODV conformance kit",
+      "summary": "Issues a session_id, then refuses /session/close for it, so cached state is never released.",
+      "execution": "session",
+      "adapter_dir": "session_close_rejects",
+      "entry": "server.py",
+      "requirements": "requirements.txt",
+      "ram_gb": 0.1,
+      "disk_gb": 0.1,
+      "requires_apple_silicon": false,
+      "tasks": [
+        {
+          "id": "prompt-mask",
+          "label": "Prompt Segmentation",
+          "inputs": [
+            "slice2d",
+            "points",
+            "box"
+          ],
+          "outputs": [
+            "mask2d"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "MIT"
+          },
+          "weights": [
+            {
+              "id": "stub-weight",
+              "source": "huggingface",
+              "repo": "odv/stub",
+              "size_gb": 0.001
+            }
+          ]
+        }
+      ],
+      "max_sessions": 2
+    }
+  ]
+}

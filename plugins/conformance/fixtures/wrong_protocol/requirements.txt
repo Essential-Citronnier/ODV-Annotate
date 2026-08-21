@@ -1,0 +1,1 @@
+# Fixture adapter for the ODV plugin conformance kit: standard library only.

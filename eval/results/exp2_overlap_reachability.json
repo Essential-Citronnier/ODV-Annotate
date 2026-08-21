@@ -1,0 +1,31 @@
+{
+  "machine": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "python": "3.14.3",
+    "logical_cores": 18,
+    "memory_bytes": 137438953472,
+    "model": "MacBook Pro",
+    "chip": "Apple M5 Max",
+    "cores": "18 (6 Super and 12 Performance)",
+    "memory_reported": "128 GB",
+    "gpu_visible": {
+      "torch_mps": false,
+      "torch_cuda": false
+    }
+  },
+  "probe": {
+    "probe": "cohort_overlap_reachability",
+    "ok": true,
+    "detail": {
+      "cases": 1,
+      "structures_native": 80,
+      "multiply_covered_voxels_native": 0,
+      "structures_after_resampling": 80,
+      "multiply_covered_voxels_after_resampling": 0,
+      "colliding_structures": []
+    },
+    "interpretation": "TotalSegmentator's `total` task derives every per-structure mask from one integer labelmap by equality test, so its structures are disjoint by construction, and they remain disjoint after the exporter's nearest-neighbour resampling onto the source grid. The single-labelmap encoding defect is therefore NOT reachable through the adapters shipping today -- it is a documented limitation of the seg3d output kind for future adapters whose structures may overlap, not an active bug in this pipeline"
+  }
+}

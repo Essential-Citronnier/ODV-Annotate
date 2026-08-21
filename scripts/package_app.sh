@@ -21,7 +21,11 @@ fi
 cd "$(dirname "$0")/.."
 
 echo "Building ${DISPLAY_NAME} (Release)..."
-swift build -c release --arch arm64
+# SWIFT_BUILD_FLAGS lets a constrained environment add flags without editing this
+# script: some sandboxes deny SwiftPM its own nested sandbox and its user-level
+# cache directories, which needs --disable-sandbox plus redirected cache paths.
+# Empty by default, so an ordinary developer machine is unaffected.
+swift build -c release --arch arm64 ${SWIFT_BUILD_FLAGS:-}
 
 BUILD_DIR=".build/release"
 APP_BUNDLE="${DISPLAY_NAME}.app"
@@ -48,6 +52,46 @@ mkdir -p "${RESOURCES_DIR}/mlx-server"
 cp "mlx-server/server.py" "${RESOURCES_DIR}/mlx-server/"
 cp "mlx-server/requirements.txt" "${RESOURCES_DIR}/mlx-server/"
 [ -f "mlx-server/README.md" ] && cp "mlx-server/README.md" "${RESOURCES_DIR}/mlx-server/" || true
+
+# --- Bundle the plugin adapters ---
+# PluginEnvironmentLocator looks for `plugins/` beside the executable during
+# development and in Resources/ once packaged. Without this the packaged app
+# finds no adapters and the store lists nothing installable, while the
+# development build works — a discrepancy that only surfaces after shipping.
+echo "Copying plugin adapters..."
+rm -rf "${RESOURCES_DIR}/plugins"
+mkdir -p "${RESOURCES_DIR}/plugins"
+for adapter_dir in plugins/*/; do
+    adapter="$(basename "${adapter_dir}")"
+    # Skip development-only trees: virtualenvs are per-machine and recreated at
+    # install time, and the conformance kit is a developer tool, not a runtime
+    # dependency of the app.
+    case "${adapter}" in
+        conformance|__pycache__) continue ;;
+    esac
+    ditto "${adapter_dir}" "${RESOURCES_DIR}/plugins/${adapter}"
+done
+# Drop anything machine-specific that a developer tree accumulates.
+rm -rf "${RESOURCES_DIR}/plugins"/*/.venv
+find "${RESOURCES_DIR}/plugins" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+find "${RESOURCES_DIR}/plugins" -name "*.pyc" -delete 2>/dev/null || true
+
+# The manifest is the store's catalogue. SwiftPM stages it into a resource
+# bundle, but the app also reads it from Resources/ so a packaged build does not
+# depend on the bundle's internal layout.
+echo "Copying plugin manifest..."
+cp "Sources/OpenDicomViewer/Resources/plugins.json" "${RESOURCES_DIR}/"
+
+# Fail loudly rather than shipping a store with nothing in it.
+for required in "${RESOURCES_DIR}/plugins.json" \
+                "${RESOURCES_DIR}/plugins/gemma/server.py" \
+                "${RESOURCES_DIR}/plugins/totalseg/run_segment.py" \
+                "${RESOURCES_DIR}/plugins/_shared/serve.py"; do
+    if [ ! -f "${required}" ]; then
+        echo "ERROR: ${required} missing from the bundle — the plugin store would be empty." >&2
+        exit 1
+    fi
+done
 
 # --- Bundle standalone Python runtime (no system Python dependency) ---
 # Update these variables when a newer build is available from:
@@ -81,6 +125,19 @@ rm -rf "${PYLIB}/idlelib" "${PYLIB}/tkinter" "${PYLIB}/turtledemo"
 # Note: keep ensurepip intact — python3 -m venv needs it to bootstrap pip
 find "${RESOURCES_DIR}/python" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 find "${RESOURCES_DIR}/python" -name "*.pyc" -delete 2>/dev/null || true
+
+# Precompile the standard library BEFORE signing.
+#
+# The bundle is signed as a sealed resource set, so any file that appears
+# afterwards invalidates the signature — `codesign --verify` then reports "a
+# sealed resource is missing or invalid", which is a Gatekeeper rejection on a
+# user's machine. The interpreter writes __pycache__ for its own stdlib the
+# first time it imports a module, so the choice is to compile the bytecode now
+# and seal it, or to let the app break its own signature on first launch.
+# Compiling now also removes that cost from startup.
+echo "  Precompiling standard library (must precede signing)..."
+"${RESOURCES_DIR}/python/bin/python3" -m compileall -q -f \
+    "${RESOURCES_DIR}/python/lib/python${PYTHON_FULL_VERSION%.*}" >/dev/null 2>&1 || true
 
 echo "Creating Info.plist..."
 cat > "${CONTENTS_DIR}/Info.plist" <<EOF

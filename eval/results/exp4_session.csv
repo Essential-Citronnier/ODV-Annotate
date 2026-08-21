@@ -1,0 +1,53 @@
+quantity,value
+n_encode,30
+n_decode,216
+gpu_visible,"{""torch_mps"": false, ""torch_cuda"": false}"
+chip,Apple M5 Max
+encode_ms_model_median,1579.5
+decode_ms_model_median,90.5
+encode_ms_model_iqr,"[1530.25, 1681.0]"
+decode_ms_model_iqr,"[82.0, 103.0]"
+ratio_model_median,17.45303867403315
+encode_ms_client_median,1590.2164165017894
+decode_ms_client_median,92.85845850172336
+encode_ms_client_iqr,"[1541.0519997549272, 1688.779666499613]"
+decode_ms_client_iqr,"[83.71244774934894, 104.60552100084897]"
+ratio_client_median,17.125164924768555
+ratio_client_per_slice,"[13.721439919028048, 16.26096612676436, 19.614542629457524, 20.846561550484125, 16.676848830677034, 17.421444735088425]"
+ratio_client_per_slice_median,17.04914678288273
+ratio_client_per_slice_min,13.721439919028048
+ratio_client_per_slice_max,20.846561550484125
+breakeven_prompts,2
+implicit_overhead_ms_median,1.807959000871051
+implicit_png_decode_ms_median,2.8585409963852726
+implicit_overhead_vs_decode,0.019470051840646235
+implicit_overhead_plus_pngdecode_vs_decode,0.05025390333363888
+thread_scaling,"[{""threads"": 1, ""encode_ms"": 2641.0091660000035, ""decode_ms"": 101.6924170035054, ""ratio"": 25.9705614619128}, {""threads"": 2, ""encode_ms"": 1806.0496670004795, ""decode_ms"": 70.5028329975903, ""ratio"": 25.61669638243059}, {""threads"": 4, ""encode_ms"": 1499.4656250055414, ""decode_ms"": 67.7726670037373, ""ratio"": 22.124931647191246}, {""threads"": 8, ""encode_ms"": 1287.5718330033123, ""decode_ms"": 57.00395799794933, ""ratio"": 22.587411089062126}]"
+embedding_bytes,16777232
+encode_flops,269139197952
+decode_flops,3557363200
+flop_ratio,75.65693543802331
+params_total,38538577
+params_vision_encoder,34316992
+params_mask_decoder,4215109
+params_prompt_encoder,6220
+decode_prompt_prep_ms,0.08999999990919605
+decode_model_ms,68.6765666003339
+decode_postprocess_ms,0.44930820004083216
+decode_rle_ms,10.334724999847822
+peak_rss_gb,1.877753856
+declared_ram_gb,3.0
+session_cache_bytes_max,67108928
+eviction,"{""op"": ""eviction"", ""max_sessions"": 4, ""opened"": 5, ""rss_after_open_bytes"": 3910713344.0, ""evicted_ok"": false, ""evicted_error_code"": ""not_ready"", ""evicted_recoverable"": true, ""survivors_ok"": [true, true, true, true], ""touched_survives"": true, ""untouched_evicted"": true}"
+eviction_ok,True
+roundtrip_total,12
+roundtrip_ok,12
+roundtrip_swift_verified,12
+roundtrip_prompt_inside,6
+roundtrip_negative_cases,3
+roundtrip_label_respected,3
+roundtrip_negative_pixels_delta,"[1958, -86465, -4722]"
+n_failed,0
+failed_case_ids,[]
+n_failed_then_retried,1
+retried_case_ids,"[""work/flops""]"

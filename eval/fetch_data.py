@@ -77,10 +77,34 @@ def _log(message: str) -> None:
     print(message, flush=True)
 
 
+def _get_with_retry(url: str, *, params: dict, timeout: float,
+                    attempts: int = 4, stream: bool = False):
+    """GET with exponential backoff.
+
+    The TCIA endpoint intermittently exceeds a 60 s read timeout under load; a
+    single-attempt fetch dropped 5 of 12 series on the first run, which would
+    have quietly unbalanced the cohort. Transient timeouts are retried; an HTTP
+    error is raised immediately since retrying will not fix it.
+    """
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            r = requests.get(url, params=params, timeout=timeout, stream=stream)
+            r.raise_for_status()
+            return r
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last = exc
+            if attempt < attempts - 1:
+                delay = 5 * (2 ** attempt)
+                _log(f"    timeout, retrying in {delay}s "
+                     f"({attempt + 1}/{attempts - 1})")
+                time.sleep(delay)
+    raise last if last else RuntimeError("unreachable")
+
+
 def tcia_series_metadata(series_uid: str) -> dict:
-    r = requests.get(f"{NBIA}/getSeriesMetaData",
-                     params={"SeriesInstanceUID": series_uid}, timeout=60)
-    r.raise_for_status()
+    r = _get_with_retry(f"{NBIA}/getSeriesMetaData",
+                        params={"SeriesInstanceUID": series_uid}, timeout=120)
     rows = r.json()
     return rows[0] if rows else {}
 
@@ -90,9 +114,20 @@ def fetch_tcia_series(collection: str, series_uid: str, note: str,
     """Download one series as DICOM files into dest/tcia_<short uid>/."""
     short = series_uid.rsplit(".", 1)[-1][:16]
     out = dest / f"tcia_{short}"
-    meta = tcia_series_metadata(series_uid)
 
+    # Existence is checked BEFORE any network call: the metadata endpoint times
+    # out intermittently, and fetching it first meant a series already complete
+    # on disk was discarded because its description could not be re-read.
     existing = list(out.glob("*.dcm")) if out.exists() else []
+
+    # Metadata is descriptive only, so a failure degrades the data card rather
+    # than losing the series.
+    try:
+        meta = tcia_series_metadata(series_uid)
+    except Exception as exc:  # noqa: BLE001
+        _log(f"  {short}: metadata unavailable ({type(exc).__name__})")
+        meta = {}
+
     if existing:
         _log(f"  {short}: already present ({len(existing)} files)")
     else:
@@ -100,10 +135,9 @@ def fetch_tcia_series(collection: str, series_uid: str, note: str,
         archive = out.parent / f"{out.name}.zip"
         _log(f"  {short}: downloading…")
         t0 = time.time()
-        with requests.get(f"{NBIA}/getImage",
-                          params={"SeriesInstanceUID": series_uid},
-                          timeout=1800, stream=True) as r:
-            r.raise_for_status()
+        with _get_with_retry(f"{NBIA}/getImage",
+                             params={"SeriesInstanceUID": series_uid},
+                             timeout=1800, stream=True) as r:
             with open(archive, "wb") as f:
                 for chunk in r.iter_content(1 << 22):
                     f.write(chunk)

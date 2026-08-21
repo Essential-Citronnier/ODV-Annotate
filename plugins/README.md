@@ -236,6 +236,93 @@ regardless of what is installed.
 
 ---
 
+## The conformance kit
+
+`plugins/_shared/tests` checks *our* adapters through the code they share. The
+conformance kit checks *any* adapter, including one that shares nothing with
+ours, by running it the way the host does and reporting what it did.
+
+```bash
+python -m plugins.conformance plugins/sam2                    # one adapter
+python -m plugins.conformance plugins/gemma plugins/sam2      # several
+python -m plugins.conformance plugins/mine --python .venv/bin/python
+python -m plugins.conformance plugins/mine --json > conformance.json
+```
+
+Exit status is 0 when every applicable check passed and 1 otherwise, so it drops
+into CI as-is. Every check reports PASS, FAIL, SKIP, or an inconclusive result,
+each with a reason naming the protocol section and what the adapter actually
+did. It needs no network and no third-party packages: an adapter author runs it
+*before* their plugin's environment exists, and a checker that first required
+`pip install` would be assuming the thing it exists to verify.
+
+### What it checks
+
+| | Check | Section |
+|---|---|---|
+| M1–M4 | The manifest's `adapter_dir`, `entry`, and `requirements` resolve to real files; `execution` is one of the three; declared task kinds are protocol kinds; `ram_gb`/`disk_gb` are declared | 0.4, 1, 2 |
+| B1–B2 | `--help` and `--install-weights` work on a bare interpreter with the heavy stack blocked | 4b |
+| W1–W3 | The weight hook accepts every section 4b flag, reports in the section 4 line format, and a `manual` source verifies without downloading | 4b |
+| E1–E3 | A failing run emits one error envelope as a single stdout line, every code is in the enum, and a one-shot writes `result.json` on failure | 3, 4b, 4c |
+| S1 | Progress lines, envelopes, and log lines are distinguishable | 4, 4b |
+| H1–H4 | `--port` is required; `/health` reports `protocol: 1` and the manifest's `plugin_id`; `/capabilities` agrees with the manifest; the server binds loopback only | 1.1, 3 |
+| X1–X3 | `/session/open` returns a `session_id`, `/session/close` accepts it, `max_sessions` is declared and bounded | 1.2 |
+| O1–O2 | The section 4 CLI is accepted and bad input rejected on its merits; `result.json` output paths are relative to `--out` | 4 |
+| R1–R2 | Mask RLE is row-major and sums to `width * height`, and starts with a background run | 5 |
+
+### Two rules it follows, and why they matter to you
+
+**Behaviour, never documentation.** Nothing in the kit reads your source. This
+is not purity: `--install-weights` is dispatched to a separate parser before the
+main one, so it is absent from `--help` while working perfectly, and an earlier
+generation of these checks failed four correct adapters by asserting on help
+text. If the kit says a flag is unsupported, running it is what established
+that.
+
+**A missing dependency is not a reason to skip.** SKIP means the check does not
+apply — a session check on a one-shot, an RLE check on an adapter that emits no
+masks. Where the protocol says a mode must work without the heavy stack, the kit
+blocks those imports in your process and a failure there is a FAIL. Likewise,
+the `manual`-source check denies outbound connections, so "did not download" is
+observed rather than taken on trust. A check the kit could not run at all is
+reported as *inconclusive* and still exits non-zero: a check that did not run
+has not passed.
+
+### What it cannot check for you
+
+The kit constructs a 64×64 probe slice and a foreground prompt at its centre, so
+a mask-producing plugin gets checked end to end without any data of yours. It
+cannot synthesise a DICOM series, so a one-shot adapter's *successful* output
+paths go unchecked unless you hand it a real result:
+
+```bash
+python -m plugins.conformance plugins/totalseg \
+  --oneshot-result /path/to/a/real/run/result.json
+```
+
+An adapter whose weights are absent reports `/health` as `error`, which is
+conformant — the kit checks the envelope and skips the checks that need a loaded
+model, saying so in the reason.
+
+### Testing the kit itself
+
+```bash
+python -m pytest plugins/conformance/tests -q
+```
+
+`plugins/conformance/fixtures/` holds one conformant reference adapter and
+twenty-three deliberately broken siblings — one violation class each, otherwise
+identical — and the test suite asserts that each check FAILS on its own fixture
+and that the conformant control passes everything. A check that cannot fail is
+not a check; the coverage test refuses to pass if any check lacks a fixture that
+breaks it. Tests needing a loopback socket skip on machines that forbid binding,
+rather than being weakened to fit.
+
+If you are writing an adapter, the fixtures double as worked examples of what
+*not* to do, each with the consequence in its header comment.
+
+---
+
 ## The RLE gotcha
 
 Read this before emitting a `mask2d`.
@@ -265,6 +352,11 @@ truthiness, and emits the payload. Its phase convention is pinned by
 hand-computed tests in `_shared/tests/test_rle.py` and by a round trip against
 a decoder written to match the Swift one. If you must encode by hand, verify
 against `_shared.rle.decode_rle` and add a case there.
+
+If your adapter does not use `_shared`, the conformance kit's R2 check is what
+will catch a phase error: it prompts a known foreground point and decodes the
+answer the way the host does, so an inverted mask shows up as the prompted pixel
+coming back background rather than as a payload anyone can see is wrong.
 
 The one other geometry rule: a mask must be the same size as the image the
 session encoded, not the slice the host happens to be displaying. Those differ

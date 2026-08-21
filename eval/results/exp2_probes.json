@@ -1,0 +1,124 @@
+{
+  "experiment": "exp2_fidelity_probes",
+  "machine": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "machine": "arm64",
+    "python": "3.14.3",
+    "logical_cores": 18,
+    "memory_bytes": 137438953472,
+    "model": "MacBook Pro",
+    "chip": "Apple M5 Max",
+    "cores": "18 (6 Super and 12 Performance)",
+    "memory_reported": "128 GB",
+    "gpu_visible": {
+      "torch_mps": false,
+      "torch_cuda": false
+    }
+  },
+  "probes": [
+    {
+      "probe": "comparison_sensitivity",
+      "ok": true,
+      "detail": {
+        "identical_dice": 1.0,
+        "one_voxel_removed_dice": 0.998841,
+        "one_voxel_removed_delta": -1,
+        "one_slice_shift_dice": 0.666667,
+        "structure_dropped_dice": 0.0
+      },
+      "interpretation": "the per-structure comparison resolves a single voxel out of 432, so a Dice of 1.0 elsewhere is a measurement and not a blind spot"
+    },
+    {
+      "probe": "sparse_frame_reconstruction",
+      "ok": true,
+      "detail": {
+        "frames_encoded": 5,
+        "frames_if_dense": 18,
+        "frames_expected_sparse": 5,
+        "unplaced_frames": 0,
+        "per_structure": [
+          {
+            "structure": "early",
+            "dice": 1.0,
+            "reference_voxels": 128,
+            "candidate_voxels": 128,
+            "voxel_delta": 0,
+            "volume_delta_ml": 0.0,
+            "in_reference_only": false,
+            "in_candidate_only": false
+          },
+          {
+            "structure": "late",
+            "dice": 1.0,
+            "reference_voxels": 128,
+            "candidate_voxels": 128,
+            "voxel_delta": 0,
+            "volume_delta_ml": 0.0,
+            "in_reference_only": false,
+            "in_candidate_only": false
+          },
+          {
+            "structure": "middle_single",
+            "dice": 1.0,
+            "reference_voxels": 16,
+            "candidate_voxels": 16,
+            "voxel_delta": 0,
+            "volume_delta_ml": 0.0,
+            "in_reference_only": false,
+            "in_candidate_only": false
+          }
+        ]
+      },
+      "interpretation": "empty frames are omitted and the host still reconstructs every structure on the correct slices, so the sparse encoding is not silently shifting anatomy in z"
+    },
+    {
+      "probe": "overlapping_structures",
+      "ok": false,
+      "expected_lossless": false,
+      "detail": {
+        "intersection_voxels": 256,
+        "per_structure": [
+          {
+            "structure": "aaa_first",
+            "dice": 0.857143,
+            "reference_voxels": 1024,
+            "candidate_voxels": 768,
+            "voxel_delta": -256,
+            "volume_delta_ml": -0.256,
+            "in_reference_only": false,
+            "in_candidate_only": false
+          },
+          {
+            "structure": "zzz_second",
+            "dice": 1.0,
+            "reference_voxels": 576,
+            "candidate_voxels": 576,
+            "voxel_delta": 0,
+            "volume_delta_ml": 0.0,
+            "in_reference_only": false,
+            "in_candidate_only": false
+          }
+        ]
+      },
+      "interpretation": "single-labelmap encoding in _export_dicom_seg is lossy for overlapping structures: the later segment index overwrites the earlier one and the earlier structure silently loses its shared voxels. Unreachable via TotalSegmentator's disjoint `total` task, so it does not affect the cohort result, but it is a latent defect for any adapter whose seg3d structures may overlap"
+    },
+    {
+      "probe": "missing_slice_thickness",
+      "ok": false,
+      "expected_lossless": false,
+      "detail": {
+        "source_has_slice_thickness": false,
+        "shipping_adapter": {
+          "exit_code": 1,
+          "detail": "AttributeError: 'FileDataset' object has no attribute 'SliceThickness'"
+        },
+        "with_eval_fallback": {
+          "exit_code": 0,
+          "detail": "encoded"
+        }
+      },
+      "interpretation": "highdicom reads SliceThickness by attribute access while reading the optional SpacingBetweenSlices with .get(); a source series that omits the Type 2 SliceThickness therefore raises AttributeError inside the Segmentation constructor. Every instance in the CT Lymph Nodes cohort omits it, so the shipping adapter cannot segment this public collection at all without the fallback"
+    }
+  ]
+}

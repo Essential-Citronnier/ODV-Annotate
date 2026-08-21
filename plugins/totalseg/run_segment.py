@@ -40,6 +40,7 @@ from _shared.oneshot import (  # noqa: E402
     parse_oneshot_args,
     run_oneshot,
 )
+from _shared.bench import bench_arg_present, run_oneshot_bench  # noqa: E402
 from _shared.progress import ProgressReporter  # noqa: E402
 from _shared.protocol import ErrorCode, PluginError  # noqa: E402
 from _shared.weights import (  # noqa: E402
@@ -544,6 +545,23 @@ def main(argv: list[str] | None = None) -> int:
             parse_install_args("TotalSegmentator weight installer.", argv),
             install_weights,
         )
+    if bench_arg_present(argv):
+        # Dispatched before the one-shot parser, like --install-weights. The
+        # pipeline is the same one a real invocation runs; only the reporter
+        # differs, so the stage boundaries measured are the adapter's own.
+        def as_pipeline_args(bench_args):
+            return parse_oneshot_args(
+                "TotalSegmentator one-shot adapter for OpenDicomViewer.",
+                tasks=list(TASKS),
+                options=OPTIONS,
+                argv=["--task", bench_args.task or "total",
+                      "--out", bench_args.out or ".",
+                      "--input-series3d", bench_args.input_series3d or "",
+                      "--opt-fast", bench_args.opt_fast or "true"],
+            )
+
+        return run_oneshot_bench(PLUGIN_ID, pipeline, as_pipeline_args, argv)
+
     args = parse_oneshot_args(
         "TotalSegmentator one-shot adapter for OpenDicomViewer.",
         tasks=list(TASKS),

@@ -261,6 +261,13 @@ struct PluginEnvironmentLocator: Sendable {
         // Unbuffered stdout, so progress lines reach the host as they are printed
         // rather than when the child's block buffer happens to fill.
         environment["PYTHONUNBUFFERED"] = "1"
+        // Adapters are imported from inside the .app, which is code-signed as a
+        // sealed resource set. A __pycache__ directory written next to the
+        // adapter sources invalidates that signature — `codesign --verify`
+        // reports "a sealed resource is missing or invalid" — and a broken
+        // signature is a Gatekeeper rejection on a user's machine. Nothing is
+        // gained by caching bytecode for a process that exits, so it is off.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         return environment
     }
 }

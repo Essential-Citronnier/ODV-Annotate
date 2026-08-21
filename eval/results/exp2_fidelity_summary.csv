@@ -1,0 +1,4 @@
+case_id,ok,slices,structures,wall_s,peak_rss_gb,determinism_dice_min,determinism_below_0999,roundtrip_dice_min,roundtrip_below_0999,end_to_end_dice_min,end_to_end_below_0999,unplaced_frames,seg_bytes,error
+tcia_1028210905866391,True,485,78,739.77,24.0,1.0,0,1.0,0,1.0,0,0,282121234,
+tcia_1556218467652708,True,411,80,987.59,24.0,1.0,0,1.0,0,1.0,0,0,313283252,
+tcia_1615802411543660,True,481,107,877.01,24.0,1.0,0,1.0,0,1.0,0,0,308636818,
