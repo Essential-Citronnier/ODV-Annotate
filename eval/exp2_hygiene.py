@@ -46,7 +46,6 @@ import numpy as np
 
 from exp2_fidelity import (  # noqa: E402
     CPU_ONLY_NOTE,
-    PIXEL_MEASURES_NOTE,
     REPO_ROOT,
     SANDBOX_NOTE,
     child_env,
@@ -61,6 +60,7 @@ from harness import (  # noqa: E402
     Recorder,
     StageTimer,
     dice,
+    load_results,
     machine_profile,
     run_subprocess,
 )
@@ -69,8 +69,18 @@ EXPERIMENT = "exp2_hygiene"
 ADAPTER = REPO_ROOT / "plugins" / "totalseg" / "run_segment.py"
 
 # Published reference. Wasserthal et al., Radiology: Artificial Intelligence
-# 2023;5(5):e230024, report a Dice score of 0.943 on their test set for the
-# full-resolution model. The band below is deliberately wide and is a
+# 2023;5(5):e230024 (doi:10.1148/ryai.230024). Verified against the retrieved
+# article text rather than quoted from recall: "The proposed model showed a
+# high Dice score (0.943) on the test set, which included a wide range of
+# clinical data with major abnormalities."
+#
+# Note what that number is and is not. It is a single aggregate over the
+# authors' own test set for the FULL-RESOLUTION model. It is not a per-
+# structure figure, not the 3 mm `fast` model this check runs, and not
+# measured on the four cases used here. It is drawn as a reference line so a
+# reader can see the order of magnitude our masks land at; it is not a
+# threshold either path is expected to meet. The band below is deliberately
+# wide and is a
 # smoke-test threshold, not a target: this check runs the 3 mm `fast` model,
 # which trades resolution for speed and scores lower than the full-resolution
 # model -- most visibly on small and thin structures -- and it runs on four
@@ -223,7 +233,11 @@ def run_case(case_dir: Path, scratch: Path, shim_dir: Path, python: str,
              "hygiene check only -- not a claim about TotalSegmentator accuracy",
              "reference CT converted NIfTI -> DICOM; both paths read the same series"]
     if sandbox:
-        notes += [SANDBOX_NOTE, PIXEL_MEASURES_NOTE]
+        notes.append(SANDBOX_NOTE)
+    # No pixel-measures note here: worker_nifti_to_dicom writes SliceThickness,
+    # so the tag is present and neither the adapter's derivation nor the
+    # evaluation's old fallback is exercised on this path. Recording a patch
+    # that never engaged would misattribute the result.
     started = time.perf_counter()
     peaks: dict[str, float] = {}
 
@@ -345,7 +359,6 @@ def worker_native_from_series(args: argparse.Namespace) -> int:
 def write_csv(rows_path: Path, csv_path: Path) -> int:
     import csv
 
-    from harness import load_results
 
     _, rows = load_results(rows_path)
     fields = ["case_id", "path", "structure", "dice", "reference_voxels",
@@ -413,10 +426,23 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{EXPERIMENT}: {len(cases)} reference cases -> {args.out}", flush=True)
     print(f"  accelerator visible: {machine_profile()['gpu_visible']}", flush=True)
     print("  NOTE: hygiene check, not an accuracy claim", flush=True)
+    # done_case_ids() deliberately reports only SUCCESSES, so --resume retries
+    # a case that failed. That is the right default (a failure is often
+    # transient), but it appends a second row for a case that fails again, and
+    # a silently duplicated failure row is confusing to whoever reads the file
+    # later. Announce the retry so the duplicate is explained at the point it
+    # is created. The JSONL stays append-only -- it is the audit trail, and
+    # both attempts belong in it; exp2_tables.py reports each case once.
+    previously_failed = {row["case_id"] for row in
+                         (load_results(args.out)[1] if args.out.exists() else [])
+                         if not row.get("ok")} - done
     for case in cases:
         if case.name in done:
             print(f"  [skip] {case.name}", flush=True)
             continue
+        if case.name in previously_failed:
+            print(f"  [retry] {case.name} failed on an earlier run; "
+                  "a second row will be appended", flush=True)
         recorder.write(run_case(case, args.scratch, shim_dir, args.python,
                                 args.fast, args.sandbox, args.keep_intermediates))
 

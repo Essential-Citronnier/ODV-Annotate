@@ -93,6 +93,12 @@ in `exp1_conformance_roundtrip.csv`.
 | stomach | 758 275 | 758 275 | 758 275 | 1.000000 | 1.000000 |
 | urinary bladder | 4 365 | 4 365 | 4 365 | 1.000000 | 1.000000 |
 
+`omit_empty_frames` is checked in both directions: no encoded frame is entirely
+zero, and no segment has an *interior* source slice missing from its frame run
+(the direction that would mean content was silently dropped). The gap check was
+confirmed against a positive control — deleting one interior frame of the
+largest segment flips it to FAIL.
+
 Across all six cases: **30/30 structures decode at Dice 1.000000 vs encoded**,
 zero voxel difference, geometry preserved in every case, zero structures missing
 from the SEG, and the deliberately empty `gallbladder` correctly dropped before

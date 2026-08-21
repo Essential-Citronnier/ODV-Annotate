@@ -941,6 +941,17 @@ def arbitration_scenarios(manifest: dict) -> list[dict]:
     gemma, sam2, sam3, ts = (ram["gemma-4-e4b"], ram["sam2"],
                              ram["sam3"], ram["totalsegmentator"])
 
+    # The figure TotalSegmentator's manifest carried when the eviction-mechanics
+    # scenarios were written. Those scenarios exercise LRU ordering,
+    # multi-eviction, and the one-shot sibling rule -- none of which is about
+    # this plugin's declaration; it is merely the request that drives them.
+    # After commit de234fe corrected ram_gb to 23.5, reading it live would make
+    # each of them refuse on size alone, before reaching the behaviour under
+    # test, so the mechanics would go unexercised while still reporting a
+    # result. Pinned here; the scenarios that ARE about the declaration read
+    # `ts` live and are expected to track it.
+    TS_PRE_CORRECTION = 3.5
+
     def residency(plugin_id: str, last_used: float = 0.0,
                   evictable: bool = True) -> dict:
         return {"id": plugin_id, "ram": ram[plugin_id],
@@ -950,11 +961,11 @@ def arbitration_scenarios(manifest: dict) -> list[dict]:
         # The case the design exists for: 16 GiB, Gemma resident, a
         # TotalSegmentator one-shot arrives. 5.0 + 3.5 exceeds the 8 GiB budget.
         {"name": "16gb/oneshot-evicts-resident-gemma", "physicalGB": 16.0,
-         "request": {"id": "totalsegmentator", "ram": ts},
+         "request": {"id": "totalsegmentator", "ram": TS_PRE_CORRECTION},
          "residents": [residency("gemma-4-e4b")], "oneShot": True},
         # Same demand on 32 GiB: the budget is 16 GiB and both fit.
         {"name": "32gb/oneshot-coexists-with-gemma", "physicalGB": 32.0,
-         "request": {"id": "totalsegmentator", "ram": ts},
+         "request": {"id": "totalsegmentator", "ram": TS_PRE_CORRECTION},
          "residents": [residency("gemma-4-e4b")], "oneShot": True},
         # A plugin mid-request must block admission rather than be stopped
         # under the user.
@@ -1003,7 +1014,7 @@ def arbitration_scenarios(manifest: dict) -> list[dict]:
         # the subprocess's peak lands on top of the server's.
         {"name": "16gb/oneshot-not-exempt-from-own-resident-sibling",
          "physicalGB": 16.0,
-         "request": {"id": "totalsegmentator", "ram": ts},
+         "request": {"id": "totalsegmentator", "ram": TS_PRE_CORRECTION},
          "residents": [residency("totalsegmentator", last_used=0),
                        residency("gemma-4-e4b", last_used=100)],
          "oneShot": True},
@@ -1049,11 +1060,43 @@ def arbitration_scenarios(manifest: dict) -> list[dict]:
         # divergence is entirely a consequence of which number the manifest
         # carries. That is what makes an inaccurate declaration a correctness
         # problem for admission rather than a documentation nit.
+        # 3.5 is pinned rather than read from the manifest. It is the figure
+        # the manifest carried when this experiment ran, and the row exists to
+        # record what that figure caused the arbiter to decide. Once the
+        # declaration was corrected (commit de234fe raised it to 23.5) reading
+        # it live would silently turn this row into a duplicate of the one
+        # below, erasing the very comparison it was built to make.
         {"name": "16gb/totalseg-admitted-on-its-declaration", "physicalGB": 16.0,
-         "request": {"id": "totalsegmentator", "ram": ts},
+         "request": {"id": "totalsegmentator", "ram": 3.5},
          "residents": [], "oneShot": True},
         {"name": "16gb/totalseg-refused-on-its-measurement", "physicalGB": 16.0,
          "request": {"id": "totalsegmentator", "ram": 20.9},
+         "residents": [], "oneShot": True},
+        # --- What the corrected declaration costs --------------------------
+        # Commit de234fe raised ram_gb to 23.5, which is the honest figure and
+        # the right change. These rows record its consequence, because an
+        # honest declaration is not a free one: against a budget of half
+        # physical memory, 23.5 GB does not fit a 16 GB machine and does not
+        # fit a 32 GB machine either. TotalSegmentator becomes admissible
+        # somewhere around 47 GB of physical memory.
+        #
+        # This is not an argument for going back to 3.5. The plugin genuinely
+        # needs that memory, and a refusal the user can see beats an admission
+        # that swaps the machine to a standstill. It is an argument that the
+        # remedy is a smaller working set -- the per-task ram_gb the schema
+        # now carries, a --roi-subset path, or streaming the volume -- rather
+        # than a smaller number.
+        {"name": "16gb/totalseg-refused-on-corrected-declaration",
+         "physicalGB": 16.0,
+         "request": {"id": "totalsegmentator", "ram": ts},
+         "residents": [], "oneShot": True},
+        {"name": "32gb/totalseg-refused-on-corrected-declaration",
+         "physicalGB": 32.0,
+         "request": {"id": "totalsegmentator", "ram": ts},
+         "residents": [], "oneShot": True},
+        {"name": "48gb/totalseg-admitted-on-corrected-declaration",
+         "physicalGB": 48.0,
+         "request": {"id": "totalsegmentator", "ram": ts},
          "residents": [], "oneShot": True},
     ]
 
@@ -1102,6 +1145,15 @@ ARBITRATION_EXPECTATIONS: dict[str, dict[str, Any]] = {
         {"decision": "admit", "evictions": []},
     "16gb/totalseg-refused-on-its-measurement":
         {"decision": "refuse", "evictions": []},
+    # The corrected declaration is honest and therefore restrictive: at 23.5 GB
+    # against a half-of-physical budget, the plugin needs roughly a 47 GB
+    # machine before it is admissible at all.
+    "16gb/totalseg-refused-on-corrected-declaration":
+        {"decision": "refuse", "evictions": []},
+    "32gb/totalseg-refused-on-corrected-declaration":
+        {"decision": "refuse", "evictions": []},
+    "48gb/totalseg-admitted-on-corrected-declaration":
+        {"decision": "admit", "evictions": []},
 }
 
 

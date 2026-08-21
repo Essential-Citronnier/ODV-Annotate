@@ -80,7 +80,7 @@ reader on a synthetic 6-slice series:
 | Comparison sensitivity | identical → 1.000; **one voxel** removed from a 432-voxel structure → 0.998841; shifted one slice → 0.667; structure dropped → 0.000 | The comparison resolves a single voxel. A Dice of 1.0 elsewhere is a measurement, not a blind spot. |
 | Sparse frame reconstruction | 5 frames encoded where a dense encoding would write 18; all 3 structures reconstructed at Dice 1.0, 0 unplaced | `omit_empty_frames` does not shift anatomy in z. |
 | Overlapping structures | **0.857 for the earlier-encoded structure, 256 voxels silently lost** | A real defect. See §5. |
-| Missing `SliceThickness` | **Shipping adapter exits 1 with `AttributeError`** | A real defect. See §4. |
+| Missing `SliceThickness` | Was: shipping adapter exits 1 with `AttributeError`. **Now: exit 0, encoded** | A real defect, since fixed (commit 9a3f8f0); the probe is now a regression test. See §4. |
 
 ## 4. Defect found and FIXED: SEG export on series without SliceThickness
 
@@ -132,6 +132,30 @@ Both are ways of supplying the same missing Pixel Measures element, and the
 fidelity numbers do not depend on which supplies it — the round trip compares
 masks, not header provenance. §2 was re-verified against the shipped encoder on
 one full cohort series after the fix landed; see §4.1.
+
+### 4.1 Re-verification against the shipped encoder
+
+The §2 cohort was measured before commit 9a3f8f0 existed, with the evaluation's
+fallback supplying the Pixel Measures element. After the fix landed, one full
+cohort series was re-run end to end with that fallback **off**, so the adapter's
+own derivation was in the path:
+
+| | structures | min Dice | < 0.999 | unplaced frames |
+|---|---|---|---|---|
+| SEG round trip | 80 | 1.000000 | 0 | 0 |
+| End to end | 80 | 1.000000 | 0 | 0 |
+
+Identical to the pre-fix measurement for the same series (`exp2_fidelity_postfix.jsonl`).
+This is the expected outcome rather than a surprise — both mechanisms supply
+the same missing header element, and the comparison is over mask voxels — but
+it is the difference between asserting that and having measured it.
+
+The provenance notes were corrected at the same time. Result rows previously
+recorded "pixel-measures fallback applied" unconditionally; rows now record
+either that the evaluation forced the fallback on, or that the adapter derived
+the spacing and no evaluation-side patch was applied. The hygiene runs record
+neither, because that path writes `SliceThickness` and never exercised either
+mechanism — the old note was claiming a patch that had not engaged.
 
 ## 5. Defect found: overlapping structures are clipped — latent, not reachable
 
@@ -249,6 +273,7 @@ on the target hardware, with GPU visible and multiprocessing unrestricted.
 | `eval/exp2_figures.py` | Figures, with programmatic text-overlap verification |
 | `eval/exp2_tables.py` | Tables 1 and 2 |
 | `eval/results/exp2_fidelity.jsonl` / `.csv` | 7 cases; 2,067 per-structure rows |
+| `eval/results/exp2_fidelity_postfix.jsonl` | Re-verification of one series against the shipped encoder (§4.1) |
 | `eval/results/exp2_hygiene.jsonl` / `.csv` | 6 cases (4 ok, 2 recorded failures) |
 | `eval/results/exp2_probes.json` | The four controlled probes |
 | `eval/results/exp2_overlap_reachability.json` | Overlap reachability on real cohort output |

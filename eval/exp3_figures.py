@@ -52,6 +52,15 @@ STAGE_ORDER = [
     ("Writing DICOM SEG", "DICOM SEG export", "#4361ee"),
 ]
 
+# Declarations corrected after these measurements were taken. The figure plots
+# each point against the declaration in force when it was measured -- that is
+# what the arbiter was deciding on -- and marks the corrected value separately,
+# so the panel neither rewrites history nor silently disagrees with the
+# manifest a reader would go and check.
+CORRECTED_DECLARATIONS = {
+    "totalsegmentator": 23.5,  # commit de234fe, from this experiment's finding
+}
+
 PLUGIN_LABELS = {
     "gemma-4-e4b": "Gemma 4 E4B",
     "sam2": "SAM 2",
@@ -252,176 +261,186 @@ def figure_declared_vs_measured(header: dict, per_plugin: dict,
                                 out_path: Path, order: list[str]) -> None:
     """The experiment's headline: a 6x overrun, and what it costs admission.
 
-    Two panels because the finding has two halves that a single chart cannot
-    carry. The left panel is the measurement -- every peak-RSS reading against
-    the figure the manifest declares, with the overrun stated as a multiple
-    rather than left for the reader to divide. The right panel is the
-    consequence: the same arbiter, asked the same question with the declared
-    and the measured figure, deciding differently.
-
-    The paired-bar arrangement on the right is the argument for auditing
-    declared resources, so it is drawn to be readable without the prose.
+    Two panels because the finding has two halves that one chart cannot carry.
+    Left is the measurement -- what each plugin declares against what it was
+    measured using, with the overrun stated as a multiple rather than left for
+    the reader to divide. Right is the consequence: the same shipped arbiter,
+    asked the same question with the declared and the measured figure, deciding
+    differently. That contrast is the argument for auditing declared
+    resources, so it is drawn to be read without the prose.
     """
-    fig, axes = plt.subplots(
-        1, 2, figsize=(11.4, 4.6), gridspec_kw={"width_ratios": [1.15, 1.0]})
-    ax_measure, ax_decide = axes
-
-    # ---- left panel: declared against every measurement -------------------
     checks = _crosscheck_rows(rows)
     bench_points = [
         {"label": PLUGIN_LABELS.get(p, p),
          "declared": per_plugin[p]["declared_ram_gb"],
-         "peak": per_plugin[p]["peak_rss_gb"],
-         "detail": "bench"}
+         "peak": per_plugin[p]["peak_rss_gb"]}
         for p in order
         if p in per_plugin and per_plugin[p].get("peak_rss_gb") is not None
         and (per_plugin[p].get("bench_ok") or per_plugin[p].get("model_ran"))
     ]
 
-    declared_ts = checks[0]["declared"] if checks else 3.5
-    limit = max([point["peak"] for point in bench_points]
-                + [check["peak"] for check in checks] + [declared_ts]) * 1.18
+    fig, axes = plt.subplots(
+        1, 2, figsize=(11.6, 5.0), gridspec_kw={"width_ratios": [1.0, 1.05]})
+    ax_measure, ax_decide = axes
+
+    # ---- A: declared against measured -------------------------------------
+    ts_declared = checks[0]["declared"] if checks else 3.5
+    all_peaks = [c["peak"] for c in checks] + [b["peak"] for b in bench_points]
+    limit = max(all_peaks + [ts_declared]) * 1.22
 
     ax_measure.plot([0, limit], [0, limit], color="#555555", linewidth=1.0,
                     linestyle="--", zorder=2)
-    ax_measure.text(limit * 0.985, limit * 0.985, "declaration exactly honest",
-                    fontsize=6.8, color="#555555", ha="right", va="bottom",
+    ax_measure.text(limit * 0.98, limit * 0.98, "declaration exactly honest",
+                    fontsize=6.6, color="#555555", ha="right", va="bottom",
                     rotation=45, rotation_mode="anchor")
     ax_measure.fill_between([0, limit], [0, limit], [limit, limit],
                             color="#fb8500", alpha=0.13, zorder=0)
     ax_measure.fill_between([0, limit], [0, 0], [0, limit],
                             color="#8ecae6", alpha=0.14, zorder=0)
-    ax_measure.text(limit * 0.04, limit * 0.955,
+    # Kept high-left, clear of the annotated measurement cluster that sits
+    # just above the declaration on the x-axis.
+    ax_measure.text(limit * 0.045, limit * 0.985,
                     "measured ABOVE declared\nthe arbiter over-admits",
-                    fontsize=7.5, color="#8a4b00", va="top", weight="bold")
-    ax_measure.text(limit * 0.58, limit * 0.08,
+                    fontsize=7.6, color="#8a4b00", va="top", weight="bold")
+    ax_measure.text(limit * 0.50, limit * 0.07,
                     "declared above measured\nthe plugin is starved",
-                    fontsize=7.5, color="#245e73", va="bottom")
+                    fontsize=7.6, color="#245e73", va="bottom")
 
-    # Every TotalSegmentator reading is drawn, not a summary of them: the
-    # finding rests on repeated agreement, so the repetition is the evidence
-    # and hiding it behind a mean would discard the point.
+    # Every TotalSegmentator run is drawn rather than a summary of them: the
+    # finding rests on repeated agreement, so the repetition is the evidence.
+    for check in checks:
+        ax_measure.scatter([check["declared"]], [check["peak"]], s=88,
+                           marker="o", color="#c1121f", zorder=5,
+                           edgecolor="white", linewidth=1.1)
     if checks:
-        fast = [c for c in checks if c["fast"]]
-        full = [c for c in checks if c["fast"] is False]
-        for subset, marker, face, name in (
-                (fast, "o", "#c1121f", "TotalSegmentator, fast (3 mm)"),
-                (full, "D", "#6a040f", "TotalSegmentator, full resolution")):
-            if not subset:
-                continue
-            ax_measure.scatter([c["declared"] for c in subset],
-                               [c["peak"] for c in subset],
-                               s=74, marker=marker, color=face, zorder=4,
-                               edgecolor="white", linewidth=0.9,
-                               label=name)
         peaks = [c["peak"] for c in checks]
         ratios = [c["peak"] / c["declared"] for c in checks]
+        # A vertical rule from the declaration to the measurements makes the
+        # size of the gap the thing the eye lands on.
         ax_measure.annotate(
-            f"TotalSegmentator\n{min(peaks):.1f}–{max(peaks):.1f} GB measured\n"
-            f"vs {declared_ts:.1f} GB declared\n"
-            f"= {min(ratios):.1f}\u00d7 to {max(ratios):.1f}\u00d7 over",
-            (declared_ts, max(peaks)), textcoords="offset points",
-            xytext=(16, -6), fontsize=8.2, va="top", weight="bold",
+            "", xy=(ts_declared, max(peaks)), xytext=(ts_declared, ts_declared),
+            arrowprops=dict(arrowstyle="<->", color="#6a040f", linewidth=1.4),
+            zorder=4)
+        ax_measure.text(
+            ts_declared + limit * 0.035, (max(peaks) + ts_declared) / 2,
+            f"TotalSegmentator\n{min(peaks):.1f}\u2013{max(peaks):.1f} GB measured\n"
+            f"vs {ts_declared:.1f} GB declared\n"
+            f"{min(ratios):.1f}\u00d7 to {max(ratios):.1f}\u00d7 over",
+            fontsize=8.6, va="center", ha="left", weight="bold",
             color="#6a040f")
+
+    # Where the declaration has since been corrected, show both: the figure
+    # the measurements were taken against and the one now shipped. Without
+    # this the panel silently disagrees with the manifest a reader would go
+    # and check.
+    corrected = CORRECTED_DECLARATIONS.get("totalsegmentator")
+    if checks and corrected and abs(corrected - ts_declared) > 0.01:
+        ax_measure.axvline(corrected, color="#2a9d8f", linewidth=1.2,
+                           linestyle=":", zorder=2)
+        ax_measure.text(corrected + limit * 0.012, limit * 0.30,
+                        f"corrected to {corrected:.1f} GB\nafter this measurement",
+                        fontsize=7.2, color="#1d6f66", rotation=90,
+                        va="center", ha="left")
 
     for point in bench_points:
         if point["label"].startswith("TotalSeg"):
             continue
-        ax_measure.scatter([point["declared"]], [point["peak"]], s=64,
-                           marker="s", color="#219ebc", zorder=4,
-                           edgecolor="white", linewidth=0.8,
-                           label="other plugins, bench")
+        ax_measure.scatter([point["declared"]], [point["peak"]], s=62,
+                           marker="s", color="#219ebc", zorder=5,
+                           edgecolor="white", linewidth=0.8)
         ax_measure.annotate(
-            f"{point['label']}\n{point['peak']:.2f} of "
-            f"{point['declared']:.1f} GB",
+            f"{point['label']}\n{point['peak']:.2f} of {point['declared']:.1f} GB",
             (point["declared"], point["peak"]), textcoords="offset points",
-            xytext=(10, -2), fontsize=7.5, va="center", color="#125670")
+            xytext=(11, 1), fontsize=7.6, va="center", color="#125670")
 
     ax_measure.set_xlim(0, limit)
     ax_measure.set_ylim(0, limit)
     ax_measure.set_xlabel("declared in manifest, ram_gb (GB)")
     ax_measure.set_ylabel("measured peak resident set size (GB)")
     ax_measure.set_title("A. What the plugins actually use", loc="left",
-                         fontsize=9.5, weight="bold")
+                         fontsize=10, weight="bold")
     ax_measure.spines[["top", "right"]].set_visible(False)
-    handles, labels = ax_measure.get_legend_handles_labels()
-    unique = dict(zip(labels, handles))
-    ax_measure.legend(unique.values(), unique.keys(), frameon=False,
-                      fontsize=6.9, loc="lower right")
 
-    # ---- right panel: the same arbiter, two answers ------------------------
+    # ---- B: the same arbiter, two answers ----------------------------------
     pairs = [
-        ("Same one-shot request,\ndeclared vs measured figure",
-         ("16gb/totalseg-admitted-on-its-declaration", "on 3.5 GB declared"),
-         ("16gb/totalseg-refused-on-its-measurement", "on 20.9 GB measured")),
-        ("Start a 5 GB server while a\none-shot holds its peak",
+        ("The same one-shot request, admitted against\n"
+         "the declared figure and against the measured one",
+         ("16gb/totalseg-admitted-on-its-declaration", "asked with 3.5 GB declared"),
+         ("16gb/totalseg-refused-on-its-measurement", "asked with 20.9 GB measured")),
+        ("Starting a 5 GB resident server while a\none-shot is holding its peak",
          ("16gb/start-server-while-oneshot-runs-unreported",
-          "one-shot not reported\n(what the host asks)"),
+          "one-shot NOT reported\n(what the host asks today)"),
          ("16gb/start-server-while-oneshot-runs-reported",
           "one-shot reported\n(what it should ask)")),
     ]
 
     y_positions: list[float] = []
     y_labels: list[str] = []
+    group_anchors: list[tuple[float, str]] = []
     row = 0.0
-    for title, (bad_case, bad_label), (good_case, good_label) in pairs:
-        for case, label in ((bad_case, bad_label), (good_case, good_label)):
+    for title, first, second in pairs:
+        group_anchors.append((row + 0.85, title))
+        for case, label in (first, second):
             metrics = arbitration.get(case, {})
             decision = metrics.get("decision", "?")
             admitted = decision == "admit"
-            # An admission that the machine cannot honour is the failure mode
-            # this figure exists to show, so it carries the alarm colour and a
-            # refusal -- the safe answer -- carries the calm one.
+            # An admission the machine cannot honour is the failure this
+            # figure exists to show, so it takes the alarm colour; a refusal
+            # is the safe answer and takes the calm one.
             colour = "#c1121f" if admitted else "#2a9d8f"
-            width = 1.0
-            ax_decide.barh([row], [width], height=0.58, color=colour,
-                           edgecolor="white", linewidth=0.8)
-            ax_decide.text(0.035, row, decision.upper(), va="center",
-                           ha="left", fontsize=9, color="white", weight="bold")
-            verdict = ("machine cannot hold it" if admitted
-                       else "correctly waits")
-            ax_decide.text(width + 0.03, row, verdict, va="center", ha="left",
-                           fontsize=7.6,
+            ax_decide.barh([row], [1.0], height=0.52, color=colour,
+                           edgecolor="white", linewidth=0.8, zorder=3)
+            ax_decide.text(0.04, row, decision.upper(), va="center", ha="left",
+                           fontsize=9.5, color="white", weight="bold", zorder=4)
+            ax_decide.text(1.06, row,
+                           "machine cannot hold it" if admitted
+                           else "correctly waits",
+                           va="center", ha="left", fontsize=7.8,
                            color="#8a1c1c" if admitted else "#1d6f66")
             y_positions.append(row)
             y_labels.append(label)
             row -= 1.0
-        row -= 0.55
+        row -= 0.95
 
     ax_decide.set_yticks(y_positions)
     ax_decide.set_yticklabels(y_labels, fontsize=7.6)
-    ax_decide.set_xlim(0, 1.85)
+    ax_decide.set_ylim(row + 0.5, 1.5)
+    ax_decide.set_xlim(0, 2.05)
     ax_decide.set_xticks([])
-    ax_decide.spines[["top", "right", "bottom"]].set_visible(False)
+    ax_decide.spines[["top", "right", "bottom", "left"]].set_visible(False)
+    ax_decide.tick_params(axis="y", length=0)
     ax_decide.set_title(
-        "B. The same arbiter, on a 16 GB machine\n"
-        "     (8 GiB budget) — decisions from the shipped policy",
-        loc="left", fontsize=9.5, weight="bold")
+        "B. The same arbiter on a 16 GB machine (8 GiB budget)",
+        loc="left", fontsize=10, weight="bold")
 
-    for index, (title, _, _) in enumerate(pairs):
-        anchor = y_positions[index * 2] + 0.72
-        ax_decide.text(0.0, anchor, title, fontsize=7.8, style="italic",
+    for anchor, title in group_anchors:
+        ax_decide.text(0.0, anchor, title, fontsize=7.9, style="italic",
                        color="#333333", va="bottom")
 
-    gpu = header.get("machine", {}).get("gpu_visible", {})
     machine = header.get("machine", {})
+    gpu = machine.get("gpu_visible", {})
     chip = machine.get("chip", machine.get("machine", "unknown"))
+    spread = max((c["spread"] for c in checks), default=0.0)
+    series_count = len({c["series"] for c in checks})
     fig.suptitle(
         "Declared resources are not audited, and the arbiter trusts them",
-        x=0.006, ha="left", fontsize=11.5, weight="bold")
+        x=0.006, ha="left", fontsize=12, weight="bold")
     fig.text(
         0.006, 0.008,
-        f"A: peak RSS measured per adapter process on {chip}, CPU only "
-        f"(torch MPS available: {gpu.get('torch_mps')}). TotalSegmentator "
-        "points are three independent instruments (parent accounting, child "
-        "RUSAGE_SELF, child sampler) that agreed to within 0.00 GB on each "
-        "run, across two series and two task variants. Gemma 4 E4B and SAM 3 "
-        "are absent: no Metal device and a licence gate respectively.  "
-        "B: decisions produced by compiling the shipped ResourceArbiter.swift, "
-        "not by reimplementing its policy. Both refusals and both admissions "
-        "are the policy behaving exactly as written.",
-        fontsize=6.4, ha="left", va="bottom", wrap=True)
-    fig.tight_layout(rect=(0, 0.10, 1, 0.93))
+        f"A: peak RSS per adapter process on {chip}, CPU only (torch MPS "
+        f"available: {gpu.get('torch_mps')}). Each TotalSegmentator point is "
+        f"three independent instruments \u2014 parent accounting, child "
+        f"RUSAGE_SELF, child self-sampler \u2014 agreeing to within "
+        f"{spread:.2f} GB, across {series_count} series. All points are the "
+        "fast (3 mm) variant, the manifest default; full resolution could not "
+        "be fetched on this network and is expected to be higher, not lower. "
+        "Gemma 4 E4B and SAM 3 are absent: no Metal device, and a licence "
+        "gate.   B: decisions produced by compiling the shipped "
+        "ResourceArbiter.swift rather than reimplementing its policy. All four "
+        "rows are that policy behaving exactly as written; only the figure it "
+        "was given differs.",
+        fontsize=6.5, ha="left", va="bottom", wrap=True)
+    fig.tight_layout(rect=(0, 0.11, 1, 0.94))
     fig.savefig(out_path, dpi=300)
     plt.close(fig)
 

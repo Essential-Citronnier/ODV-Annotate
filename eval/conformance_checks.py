@@ -396,16 +396,31 @@ def check_perframe_consistency(seg) -> Finding:
                    f"covering all {len(known)} segments", value)
 
 
-def check_omit_empty_frames(seg, decoded_by_segment: dict[int, int] | None) -> Finding:
-    """omit_empty_frames must not have dropped a frame that had content.
+def check_omit_empty_frames(seg, decoded_by_segment: dict[int, int] | None,
+                            source_positions: set[tuple] | None = None) -> Finding:
+    """Check what `omit_empty_frames` did to the frame set, in both directions.
 
     The adapter asks highdicom to omit empty frames, which is a size
-    optimisation. The failure mode it risks is dropping a frame that was *not*
-    empty, which silently removes anatomy from the segmentation. This is
-    checked by counting, for each segment, the frames present in the file and
-    comparing against the non-empty slice count of the decoded pixel data: if
-    any encoded frame is entirely zero, an empty frame survived; if any segment
-    has fewer frames than it has non-empty slices, a non-empty one was dropped.
+    optimisation. Two things can go wrong, and they are not symmetric:
+
+    *A frame that is entirely zero survived.* Harmless but wasteful, and a sign
+    the omission did not apply. Detected directly: decode the pixel data and
+    compare each segment's encoded frame count against the number of its frames
+    that carry at least one set pixel.
+
+    *A frame that had content was dropped.* This silently removes anatomy and is
+    the failure that matters. It cannot be detected from the SEG alone -- a file
+    with a slice missing is internally consistent, and nothing inside it records
+    what the mask contained before encoding. It is detected here by geometry
+    instead: a dropped interior frame leaves a gap in a segment's sequence of
+    plane positions. For each segment, the frames present are located in the
+    source series' ordered slice positions, and any *interior* source slice
+    absent from that run is reported. Interior only, because a segment
+    legitimately starting and ending partway through the volume is the normal
+    case -- it is a hole in the middle of a structure that indicates loss.
+
+    Without `source_positions` only the first direction is checked, and the
+    finding says so rather than implying a clean result.
     """
     if decoded_by_segment is None:
         return Finding("omit_empty_frames", "WARN",
@@ -413,24 +428,59 @@ def check_omit_empty_frames(seg, decoded_by_segment: dict[int, int] | None) -> F
                        None)
     perframe = getattr(seg, "PerFrameFunctionalGroupsSequence", []) or []
     frames_per_segment: dict[int, int] = {}
+    positions_per_segment: dict[int, set[tuple]] = {}
     for frame in perframe:
         sid = _first(frame, "SegmentIdentificationSequence")
         if sid is None:
             continue
-        n = int(sid.ReferencedSegmentNumber)
-        frames_per_segment[n] = frames_per_segment.get(n, 0) + 1
+        number = int(sid.ReferencedSegmentNumber)
+        frames_per_segment[number] = frames_per_segment.get(number, 0) + 1
+        pos = _first(frame, "PlanePositionSequence")
+        if pos is not None and getattr(pos, "ImagePositionPatient", None) is not None:
+            positions_per_segment.setdefault(number, set()).add(
+                tuple(round(float(v), 2) for v in pos.ImagePositionPatient))
 
     empty_frames = {n: c for n, c in decoded_by_segment.items()
                     if frames_per_segment.get(n, 0) > c}
+
+    # Interior gaps, per segment, against the source slice grid.
+    gaps: dict[int, int] = {}
+    checked_gaps = source_positions is not None
+    if checked_gaps:
+        ordered = sorted(source_positions, key=lambda p: p[::-1])
+        index = {p: i for i, p in enumerate(ordered)}
+        for number, seen in positions_per_segment.items():
+            indices = sorted(index[p] for p in seen if p in index)
+            if len(indices) < 2:
+                continue
+            missing = (indices[-1] - indices[0] + 1) - len(indices)
+            if missing > 0:
+                gaps[number] = missing
+
     value = {"segments": len(frames_per_segment),
              "total_frames": sum(frames_per_segment.values()),
-             "segments_with_all_zero_frames": len(empty_frames)}
+             "segments_with_all_zero_frames": len(empty_frames),
+             "interior_gaps_checked": checked_gaps,
+             "segments_with_interior_gaps": len(gaps),
+             "interior_frames_missing": sum(gaps.values())}
+
+    if gaps:
+        return Finding("omit_empty_frames", "FAIL",
+                       f"{len(gaps)} segments have interior slices missing from "
+                       f"their frame run ({sum(gaps.values())} frames): content "
+                       f"may have been dropped", value)
     if empty_frames:
         return Finding("omit_empty_frames", "WARN",
                        f"{len(empty_frames)} segments carry frames whose pixel data "
                        f"is entirely zero", value)
+    if not checked_gaps:
+        return Finding("omit_empty_frames", "WARN",
+                       "every encoded frame carries at least one set pixel; source "
+                       "slice positions were not supplied, so dropped frames were "
+                       "not checked", value)
     return Finding("omit_empty_frames", "PASS",
-                   "every encoded frame carries at least one set pixel", value)
+                   "every encoded frame carries content and no segment has an "
+                   "interior slice missing", value)
 
 
 def check_content_identification(seg) -> Finding:
@@ -469,6 +519,7 @@ def source_series_facts(series_dir: Path) -> dict:
     sop_uids: set[str] = set()
     for_uids: set[str] = set()
     series_uids: set[str] = set()
+    positions: set[tuple] = set()
     for path in sorted(Path(series_dir).glob("*.dcm")):
         ds = pydicom.dcmread(str(path), stop_before_pixels=True)
         if getattr(ds, "Modality", None) == "SEG":
@@ -478,12 +529,15 @@ def source_series_facts(series_dir: Path) -> dict:
             for_uids.add(ds.FrameOfReferenceUID)
         if getattr(ds, "SeriesInstanceUID", None):
             series_uids.add(ds.SeriesInstanceUID)
+        if getattr(ds, "ImagePositionPatient", None) is not None:
+            positions.add(tuple(round(float(v), 2) for v in ds.ImagePositionPatient))
     return {
         "sop_instance_uids": sop_uids,
         "frame_of_reference_uid": next(iter(for_uids)) if len(for_uids) == 1 else None,
         "frame_of_reference_count": len(for_uids),
         "series_instance_uid": next(iter(series_uids)) if len(series_uids) == 1 else None,
         "instance_count": len(sop_uids),
+        "slice_positions": positions,
     }
 
 
@@ -537,7 +591,7 @@ def audit_seg(seg_path: Path, series_dir: Path | None = None) -> list[Finding]:
         check_referenced_series(seg, facts.get("sop_instance_uids")),
         check_frame_of_reference(seg, facts.get("frame_of_reference_uid")),
         check_perframe_consistency(seg),
-        check_omit_empty_frames(seg, decoded),
+        check_omit_empty_frames(seg, decoded, facts.get("slice_positions")),
         check_content_identification(seg),
     ]
     if decoded is None:

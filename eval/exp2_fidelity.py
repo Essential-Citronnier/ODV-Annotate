@@ -60,6 +60,7 @@ from harness import (  # noqa: E402
     Recorder,
     StageTimer,
     dice,
+    load_results,
     machine_profile,
     run_subprocess,
 )
@@ -98,9 +99,18 @@ SANDBOX_NOTE = (
     "generator (sandbox denies AF_UNIX bind for multiprocessing.Manager); "
     "applied identically to both paths; preserves correctness, not timing"
 )
+# Recorded only when the evaluation's own fallback is switched on. Since
+# commit 9a3f8f0 the adapter derives the spacing itself, so the default path
+# records the note below instead -- claiming a patch that was not applied
+# would misattribute the result.
 PIXEL_MEASURES_NOTE = (
-    "highdicom pixel-measures fallback applied: source instances omit "
-    "SliceThickness (0018,0050) and the unpatched adapter raises AttributeError"
+    "highdicom pixel-measures fallback FORCED ON by the evaluation "
+    "(--pixel-measures-fallback), reproducing pre-9a3f8f0 adapter behaviour"
+)
+DERIVED_THICKNESS_NOTE = (
+    "source instances omit SliceThickness (0018,0050); the adapter derived "
+    "slice spacing from the source geometry (commit 9a3f8f0) and no "
+    "evaluation-side pixel-measures patch was applied"
 )
 CPU_ONLY_NOTE = "CPU-only: no accelerator visible to torch in this sandbox"
 
@@ -161,11 +171,12 @@ def _install_nnunet_substitution():
 def _install_pixel_measures_fallback():
     """Let highdicom encode a SEG whose source instances omit SliceThickness.
 
-    highdicom reads SliceThickness by attribute access while reading the
-    optional SpacingBetweenSlices with .get(), so a source series that omits
-    the (Type 2, permitted-empty) SliceThickness raises AttributeError from
-    inside the Segmentation constructor. SliceThickness is itself optional in
-    the Pixel Measures Sequence, so omitting it produces a conformant SEG.
+    SUPERSEDED by the adapter's own fix (commit 9a3f8f0), which derives slice
+    spacing from the source geometry -- positions projected onto the slice
+    normal, median gap -- and no longer needs this. Kept, and reachable only
+    through --pixel-measures-fallback, for one reason: it is what lets the
+    experiment be re-run against a PRE-FIX adapter to reproduce the original
+    defect. It is off by default, so the measured path is the shipped one.
     """
     import highdicom.image as hi
     from highdicom.content import PixelMeasuresSequence
@@ -215,10 +226,16 @@ class _LazyPatcher:
         return spec
 
 
+# Two independent substitutions, two independent switches. They were once one
+# flag, which conflated an environment workaround (nnU-Net cannot start here)
+# with a workaround for an adapter defect that has since been FIXED upstream.
+# Keeping them fused would have meant the experiment silently kept measuring a
+# patched encoder after the real one started working.
 if os.environ.get("ODV_EXP2_SANDBOX") == "1":
     sys.meta_path.insert(0, _LazyPatcher(
         "nnunetv2.inference.predict_from_raw_data",
         _install_nnunet_substitution))
+if os.environ.get("ODV_EXP2_PIXEL_MEASURES_FALLBACK") == "1":
     sys.meta_path.insert(0, _LazyPatcher(
         "highdicom.image", _install_pixel_measures_fallback))
 '''
@@ -232,12 +249,14 @@ def write_sitecustomize(scratch: Path) -> Path:
     return shim_dir
 
 
-def child_env(shim_dir: Path, scratch: Path, sandbox: bool) -> dict[str, str]:
+def child_env(shim_dir: Path, scratch: Path, sandbox: bool,
+              pixel_measures_fallback: bool = False) -> dict[str, str]:
     env = dict(os.environ)
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = (f"{shim_dir}{os.pathsep}{existing}" if existing
                          else str(shim_dir))
     env["ODV_EXP2_SANDBOX"] = "1" if sandbox else "0"
+    env["ODV_EXP2_PIXEL_MEASURES_FALLBACK"] = "1" if pixel_measures_fallback else "0"
     # nnU-Net and dicom2nifti both write large intermediates; keep them inside
     # the experiment's scratch rather than a system temp the sandbox may deny.
     env["TMPDIR"] = str(scratch)
@@ -522,17 +541,19 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def run_case(series_dir: Path, scratch: Path, shim_dir: Path, python: str,
              fast: bool, sandbox: bool, determinism: bool,
-             keep: bool) -> CaseResult:
+             keep: bool, pixel_measures_fallback: bool = False) -> CaseResult:
     case_id = series_dir.name
     timer = StageTimer()
-    env = child_env(shim_dir, scratch, sandbox)
+    env = child_env(shim_dir, scratch, sandbox, pixel_measures_fallback)
     work = scratch / case_id
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
     notes = [CPU_ONLY_NOTE]
     if sandbox:
-        notes += [SANDBOX_NOTE, PIXEL_MEASURES_NOTE]
+        notes.append(SANDBOX_NOTE)
+    notes.append(PIXEL_MEASURES_NOTE if pixel_measures_fallback
+                 else DERIVED_THICKNESS_NOTE)
     peaks: dict[str, float] = {}
     started = time.perf_counter()
 
@@ -801,7 +822,7 @@ def _encode_masks_via_adapter(series_dir: Path, masks: dict[str, np.ndarray],
 
 
 def probe_cohort_overlap(mask_dirs: list[Path], reference_dirs: list[Path],
-                         ) -> dict[str, Any]:
+                         results_path: Path | None = None) -> dict[str, Any]:
     """Is the overlapping-structure defect reachable through this adapter today?
 
     The controlled probe proves the encoder loses voxels when two structures
@@ -857,16 +878,65 @@ def probe_cohort_overlap(mask_dirs: list[Path], reference_dirs: list[Path],
                 colliding.append(f"{series_dir.name}/{name}:{collisions}")
             coverage[array] += 1
 
-    # A third, independent line of evidence, already on disk: clipping is
-    # exactly what the defect DOES, so if any two structures had shared a voxel
-    # in the cohort, the earlier-encoded one would have come back short and its
-    # round-trip Dice would be below 1.0. Every round-trip comparison in
-    # exp2_fidelity.jsonl is exactly 1.0, which is only possible if no
-    # collision occurred. This holds over the whole cohort rather than the
-    # cases re-measured here, and it needs no extra computation.
+    # A third line of evidence, read off the recorded cohort rather than
+    # asserted: clipping is what the defect DOES, so a collision anywhere in
+    # the cohort would have left the earlier-encoded structure short and its
+    # round-trip Dice below 1.0. Counted from the results file so the sentence
+    # cannot drift from the data it describes.
+    corroborating = "no cohort results file to cross-check"
+    if results_path is not None and results_path.exists():
+        try:
+            _, recorded = load_results(results_path)
+            entries = [entry for row in recorded if row.get("ok")
+                       for entry in (row.get("metrics") or {}).get(
+                           "per_structure_roundtrip") or []]
+            imperfect = [e for e in entries if e["dice"] < 1.0]
+            corroborating = (
+                f"clipping is the defect's mechanism, so any cohort collision "
+                f"would have shown up as a round-trip Dice below 1.0 for the "
+                f"earlier-encoded structure; of {len(entries)} round-trip "
+                f"comparisons recorded in {results_path.name}, "
+                + (f"all are exactly 1.0, which independently rules out a "
+                   f"collision anywhere in the cohort"
+                   if not imperfect else
+                   f"{len(imperfect)} are below 1.0 (worst "
+                   f"{min(e['dice'] for e in imperfect)}), which is CONSISTENT "
+                   f"WITH a collision and must be investigated"))
+        except Exception as exc:  # noqa: BLE001 -- cross-check is advisory
+            corroborating = f"cross-check unavailable: {type(exc).__name__}"
+
+    disjoint = native_overlap == 0 and resampled_overlap == 0
+    # Derived from the measurement, never asserted over it. An earlier version
+    # hardcoded the "not reachable" conclusion, which would have written a
+    # false reassurance into the results file the first time a larger cohort
+    # or a different task DID collide -- the exact failure this experiment
+    # exists to catch.
+    if disjoint:
+        interpretation = (
+            "TotalSegmentator's `total` task derives every per-structure mask "
+            "from one integer labelmap by equality test "
+            "(totalsegmentator/nnunet.py: `binary_img = img_data == k`), so "
+            "its structures are disjoint by construction, and this run "
+            "measured them as still disjoint after the exporter's "
+            "nearest-neighbour resampling onto the source grid. On this "
+            "cohort the single-labelmap encoding defect is therefore NOT "
+            "reachable: it is a documented limitation of the seg3d output "
+            "kind for future adapters whose structures may overlap, not an "
+            "active bug in this pipeline")
+    else:
+        interpretation = (
+            f"REACHABLE: {resampled_overlap} voxel(s) are claimed by more than "
+            f"one structure after resampling onto the source grid "
+            f"({native_overlap} before resampling). The single-labelmap "
+            "encoding in _export_dicom_seg silently drops the overlap from "
+            "whichever structure is encoded first, so this cohort loses mask "
+            "voxels with no error raised. This is an ACTIVE BUG, not a latent "
+            "limitation, and the affected structures are listed in "
+            "`colliding_structures`")
+
     return {
         "probe": "cohort_overlap_reachability",
-        "ok": native_overlap == 0 and resampled_overlap == 0,
+        "ok": disjoint,
         "detail": {
             "cases": len(mask_dirs),
             "structures_native": native_structures,
@@ -875,21 +945,8 @@ def probe_cohort_overlap(mask_dirs: list[Path], reference_dirs: list[Path],
             "multiply_covered_voxels_after_resampling": resampled_overlap,
             "colliding_structures": colliding[:20],
         },
-        "interpretation": (
-            "TotalSegmentator's `total` task derives every per-structure mask "
-            "from one integer labelmap by equality test, so its structures are "
-            "disjoint by construction, and they remain disjoint after the "
-            "exporter's nearest-neighbour resampling onto the source grid. The "
-            "single-labelmap encoding defect is therefore NOT reachable through "
-            "the adapters shipping today -- it is a documented limitation of "
-            "the seg3d output kind for future adapters whose structures may "
-            "overlap, not an active bug in this pipeline"),
-        "corroborating_evidence": (
-            "clipping is the defect's mechanism, so any cohort collision would "
-            "have shown up as a round-trip Dice below 1.0 for the "
-            "earlier-encoded structure; all 689 round-trip comparisons in "
-            "exp2_fidelity.jsonl are exactly 1.0, which independently rules "
-            "out a collision anywhere in the cohort"),
+        "interpretation": interpretation,
+        "corroborating_evidence": corroborating,
     }
 
 
@@ -1039,12 +1096,19 @@ def run_probes(scratch: Path) -> list[dict[str, Any]]:
     # difference rather than something else about the stripped series.
     shim_dir = write_sitecustomize(scratch)
     outcomes: dict[str, dict[str, Any]] = {}
-    for label, sandbox in (("without_fallback", False), ("with_fallback", True)):
+    # The evaluation's own fallback is now OFF for the shipping arm, so that
+    # arm exercises the adapter's real derivation (commit 9a3f8f0) rather than
+    # a patched highdicom. The second arm forces the fallback on, which is how
+    # the pre-fix defect can still be reproduced from this script.
+    for label, fallback in (("shipping_adapter", False),
+                            ("with_eval_fallback", True)):
         code, output, _ = run_subprocess(
             [sys.executable, str(Path(__file__).resolve()),
              "--worker", "probe-thickness", "--series", str(stripped),
              "--output", str(work / f"stripped_{label}.dcm")],
-            cwd=REPO_ROOT, env=child_env(shim_dir, scratch, sandbox),
+            cwd=REPO_ROOT,
+            env=child_env(shim_dir, scratch, sandbox=False,
+                          pixel_measures_fallback=fallback),
             timeout=900.0)
         message = ""
         for line in output.splitlines():
@@ -1054,23 +1118,29 @@ def run_probes(scratch: Path) -> list[dict[str, Any]]:
 
     probes.append({
         "probe": "missing_slice_thickness",
-        # `ok` describes the SHIPPING adapter, which is the one without the
-        # fallback. It fails, and recording that as a pass would hide it.
-        "ok": outcomes["without_fallback"]["exit_code"] == 0,
-        "expected_lossless": False,
+        # `ok` describes the SHIPPING adapter -- the arm with the evaluation's
+        # fallback OFF. It now passes, because the adapter derives the spacing
+        # itself; before commit 9a3f8f0 it exited 1 with AttributeError.
+        "ok": outcomes["shipping_adapter"]["exit_code"] == 0,
+        "expected_lossless": True,
         "detail": {
             "source_has_slice_thickness": False,
-            "shipping_adapter": outcomes["without_fallback"],
-            "with_eval_fallback": outcomes["with_fallback"],
+            "shipping_adapter": outcomes["shipping_adapter"],
+            "with_eval_fallback": outcomes["with_eval_fallback"],
         },
         "interpretation": (
-            "highdicom reads SliceThickness by attribute access while reading "
-            "the optional SpacingBetweenSlices with .get(); a source series "
-            "that omits the Type 2 SliceThickness therefore raises "
+            "REGRESSION TEST for a defect found by this experiment and since "
+            "fixed. highdicom reads SliceThickness by attribute access while "
+            "reading the optional SpacingBetweenSlices with .get(), so a "
+            "source series omitting the Type 2 SliceThickness raised "
             "AttributeError inside the Segmentation constructor. Every "
-            "instance in the CT Lymph Nodes cohort omits it, so the shipping "
-            "adapter cannot segment this public collection at all without the "
-            "fallback"),
+            "instance of the CT Lymph Nodes cohort omits it, so the adapter "
+            "could not process the collection at all. Commit 9a3f8f0 makes "
+            "the adapter derive the spacing itself -- slice positions "
+            "projected onto the slice normal, median gap -- and this probe now "
+            "encodes with the evaluation's fallback OFF. It is kept so the "
+            "defect cannot return unnoticed"),
+        "fixed_by": "plugins/totalseg/run_segment.py, commit 9a3f8f0",
     })
 
     return probes
@@ -1085,7 +1155,6 @@ def write_csv(rows_path: Path, csv_path: Path) -> int:
     """Flatten the per-structure records to one row per (case, comparison, structure)."""
     import csv
 
-    from harness import load_results
 
     _, rows = load_results(rows_path)
     fields = ["case_id", "comparison", "structure", "dice", "reference_voxels",
@@ -1158,6 +1227,10 @@ def main(argv: list[str] | None = None) -> int:
                              "real cohort output; repeatable")
     parser.add_argument("--probes-only", action="store_true",
                         help="run only the controlled probes (needs no cohort data)")
+    parser.add_argument("--pixel-measures-fallback", action="store_true",
+                        help="force the evaluation's own highdicom pixel-measures "
+                             "patch on, reproducing pre-9a3f8f0 adapter behaviour; "
+                             "off by default so the shipped derivation is measured")
     parser.add_argument("--keep-intermediates", action="store_true")
     parser.add_argument("--resume", action="store_true",
                         help="skip cases already recorded as ok")
@@ -1173,7 +1246,8 @@ def main(argv: list[str] | None = None) -> int:
         # the source: pairs of (native mask dir, source series dir).
         pairs = [tuple(p.split("=", 1)) for p in args.overlap_check]
         report = probe_cohort_overlap([Path(m) for m, _ in pairs],
-                                      [Path(s) for _, s in pairs])
+                                      [Path(s) for _, s in pairs],
+                                      results_path=args.out)
         path = args.out.parent / "exp2_overlap_reachability.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"machine": machine_profile(),
@@ -1224,7 +1298,8 @@ def main(argv: list[str] | None = None) -> int:
             continue
         recorder.write(run_case(path, args.scratch, shim_dir, args.python,
                                 args.fast, args.sandbox, args.determinism,
-                                args.keep_intermediates))
+                                args.keep_intermediates,
+                                args.pixel_measures_fallback))
 
     csv_path = args.csv or args.out.with_suffix(".csv")
     count = write_csv(args.out, csv_path)

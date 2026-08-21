@@ -309,6 +309,320 @@ def stage_prepare(series_dirs: list[Path], prepared_root: Path,
 
 
 # ---------------------------------------------------------------------------
+# Stage: shipped
+# ---------------------------------------------------------------------------
+
+
+def stage_shipped(series_dirs: list[Path], work_root: Path, python: Path,
+                  task: str, fast: bool, recorder: Recorder,
+                  done: set[str]) -> None:
+    """Invoke the shipped adapter exactly as the host does, on unmodified data.
+
+    This stage exists to answer one question and to answer it on the record:
+    *can the plugin, as shipped, produce a DICOM SEG for this public cohort at
+    all?* It spawns `plugins/totalseg/run_segment.py` through its real CLI --
+    `--task <task> --out <dir> --input-series3d <series>`, the exact command line
+    PLUGIN_PROTOCOL.md section 4 specifies -- against the **unprepared** source
+    series, with no shim and no repair. Nothing about the adapter is bypassed
+    or substituted.
+
+    A failure here is a result, not an obstacle. It is recorded with the
+    adapter's own `result.json` error envelope, because that envelope is what
+    the host would show the user, and the whole point of the protocol's
+    §4c requirement is that the adapter explain itself rather than return a
+    bare exit code.
+
+    Runs are bounded by `timeout`: inference in this environment is CPU-only,
+    and a case that exceeds the budget is recorded as a timeout rather than
+    left to run. That is itself reportable -- it says the shipped path could
+    not be demonstrated here, which is different from saying it is broken.
+    """
+    for series_dir in series_dirs:
+        case_id = f"shipped/{series_dir.name}"
+        if case_id in done:
+            print(f"  [skip] {case_id}", flush=True)
+            continue
+        out_dir = work_root / "shipped" / series_dir.name
+        if out_dir.is_dir():
+            shutil.rmtree(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        argv = [str(python), str(REPO / "plugins" / "totalseg" / "run_segment.py"),
+                "--task", task, "--out", str(out_dir),
+                "--input-series3d", str(series_dir)]
+        if task == "total":
+            argv += ["--opt-fast", "true" if fast else "false"]
+
+        started = time.perf_counter()
+        timed_out = False
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=SHIPPED_TIMEOUT_S)
+            returncode, output = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            returncode, output = None, ""
+        wall = time.perf_counter() - started
+
+        # §4/§4c: the adapter writes result.json on failure as well as success,
+        # and the host reads it either way. Read it the same way.
+        envelope: dict[str, Any] = {}
+        result_path = out_dir / "result.json"
+        if result_path.is_file():
+            try:
+                envelope = json.loads(result_path.read_text())
+            except json.JSONDecodeError:
+                envelope = {"_unparseable": result_path.read_text()[:500]}
+
+        seg_path = out_dir / "segmentation.dcm"
+        produced = seg_path.is_file()
+        error_code = (envelope.get("error") or {}).get("code")
+        error_message = (envelope.get("error") or {}).get("message")
+
+        metrics = {
+            "series_dir": str(series_dir),
+            "invocation": " ".join(argv[1:]),
+            "exit_code": returncode,
+            "timed_out": timed_out,
+            "result_json_written": result_path.is_file(),
+            "error_code": error_code,
+            "error_message": error_message,
+            "seg_produced": produced,
+            "task": task,
+            "fast": fast,
+        }
+        if produced:
+            metrics["seg_path"] = str(seg_path)
+            metrics["seg_bytes"] = seg_path.stat().st_size
+
+        if timed_out:
+            error = (f"shipped adapter exceeded the {SHIPPED_TIMEOUT_S:.0f}s budget; "
+                     f"inference here is CPU-only")
+        elif not produced:
+            error = (f"shipped adapter exited {returncode} without a SEG: "
+                     f"{error_message or output[-400:]}")
+        else:
+            error = None
+
+        recorder.write(CaseResult(
+            experiment=EXPERIMENT, case_id=case_id, ok=produced, wall_s=wall,
+            metrics=metrics, error=error,
+            notes=["shipped-adapter-cli", "unmodified-source-series"]))
+
+
+# How long the shipped adapter is given per case before the run is recorded as
+# a timeout. Generous relative to a GPU run and still far short of what
+# single-threaded CPU inference needs on a contended machine -- which is the
+# point: the budget is what makes "could not be demonstrated here" a measured
+# statement rather than an impression.
+SHIPPED_TIMEOUT_S = float(os.environ.get("ODV_SHIPPED_TIMEOUT_S", 1800.0))
+
+
+# ---------------------------------------------------------------------------
+# Stage: fixture
+# ---------------------------------------------------------------------------
+
+
+def stage_fixture(series_dirs: list[Path], work_root: Path, python: Path,
+                  recorder: Recorder, done: set[str]) -> None:
+    """Encode deterministic masks through the adapter's real SEG exporter.
+
+    Why this exists alongside `segment`. The claim under test is about the
+    *encoding* -- whether the DICOM SEG our plugin layer writes is conformant
+    and readable by an independent implementation. That claim is a property of
+    `_export_dicom_seg`, which is what this stage exercises: the adapter's own
+    function, unmodified, called on real DICOM series with real geometry. What
+    the mask voxels mean is irrelevant to it. Segmentation *accuracy* is a
+    different claim and belongs to the pipeline-fidelity experiment.
+
+    Two things are gained by not routing conformance through nnU-Net.
+
+    First, it runs. Inference here is CPU-only and, on a shared machine, did
+    not complete within any reasonable budget (see eval/results/exp1_findings.md). A
+    conformance result that cannot be reproduced without a free GPU is not much
+    of a conformance result.
+
+    Second, and more usefully, the mask content can be *chosen* to attack the
+    encoder. Real TotalSegmentator output is well-behaved: compact blobs, no
+    overlaps. It would not exercise the cases where a SEG writer actually
+    fails. These fixtures deliberately include a structure that overlaps
+    another, a structure one voxel thick, a structure present on a single
+    slice, a structure touching the volume boundary, and a structure that is
+    empty -- each of which probes a distinct part of the Segmentation IOD
+    (respectively: the labelmap collapse, nearest-neighbour resampling,
+    omit_empty_frames, frame position encoding, and segment admission).
+
+    The masks are written on the source series' own grid, so no resampling
+    happens before encoding and any difference observed downstream is
+    attributable to the SEG round trip rather than to interpolation.
+    """
+    worker = work_root / "_fixture_worker.py"
+    worker.parent.mkdir(parents=True, exist_ok=True)
+    worker.write_text(_FIXTURE_WORKER)
+
+    for series_dir in series_dirs:
+        case_id = f"fixture/{series_dir.name}"
+        if case_id in done:
+            print(f"  [skip] {case_id}", flush=True)
+            continue
+        work = work_root / series_dir.name
+        work.mkdir(parents=True, exist_ok=True)
+        started = time.perf_counter()
+        proc = subprocess.run(
+            [str(python), str(worker), str(REPO), str(series_dir), str(work)],
+            capture_output=True, text=True)
+        wall = time.perf_counter() - started
+
+        payload: dict[str, Any] = {}
+        for line in reversed((proc.stdout or "").splitlines()):
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and "ok" in candidate:
+                payload = candidate
+                break
+
+        if proc.returncode != 0 or not payload.get("ok"):
+            tail = ((proc.stderr or "") + (proc.stdout or ""))[-1500:]
+            recorder.write(CaseResult(
+                experiment=EXPERIMENT, case_id=case_id, ok=False, wall_s=wall,
+                error=(payload.get("error")
+                       or f"fixture worker exited {proc.returncode}: {tail}"),
+                notes=["adapter-exporter"]))
+            continue
+
+        recorder.write(CaseResult(
+            experiment=EXPERIMENT, case_id=case_id, ok=True, wall_s=wall,
+            stages_s=payload.get("timings", {}),
+            metrics={
+                "series_dir": str(series_dir),
+                "seg_path": payload["seg"],
+                "masks_dir": payload["masks_dir"],
+                "structure_count": len(payload["structures"]),
+                "structures": payload["structures"],
+                "fixture_design": payload.get("design", {}),
+                "provenance": payload.get("provenance", {}),
+                "seg_bytes": payload.get("seg_bytes"),
+                "totalsegmentator_version": payload.get("totalsegmentator_version"),
+            },
+            notes=["adapter-exporter", "synthetic-masks"]))
+
+
+# Runs in the TotalSegmentator interpreter. Calls the adapter's own
+# `_structure_masks`, `_volumes_ml` and `_export_dicom_seg` -- this is a driver
+# for the adapter, not a reimplementation of it.
+_FIXTURE_WORKER = '''\
+import json, sys, time
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+series_dir = Path(sys.argv[2])
+work = Path(sys.argv[3])
+
+sys.path.insert(0, str(repo / "plugins"))
+sys.path.insert(0, str(repo / "plugins" / "totalseg"))
+
+import numpy as np
+import SimpleITK as sitk
+import run_segment as rs
+from _shared.progress import ProgressReporter
+
+reporter = ProgressReporter(stream=sys.stderr)
+masks_dir = work / "masks"
+masks_dir.mkdir(parents=True, exist_ok=True)
+timings = {}
+
+t0 = time.perf_counter()
+reader = sitk.ImageSeriesReader()
+reader.SetFileNames(reader.GetGDCMSeriesFileNames(str(series_dir)))
+reference = reader.Execute()
+timings["reference_read_s"] = time.perf_counter() - t0
+
+nx, ny, nz = reference.GetSize()
+zz, yy, xx = np.mgrid[0:nz, 0:ny, 0:nx]
+cy, cx = ny // 2, nx // 2
+
+# Each fixture targets a specific encoder behaviour. Names are borrowed from
+# TotalSegmentator's vocabulary so the SNOMED coverage check is meaningful.
+design = {
+    "liver": "solid ellipsoid, well-conditioned control",
+    "aorta": "thin 1-voxel-thick shell, stresses nearest-neighbour resampling",
+    "spleen": "single-slice structure, stresses omit_empty_frames",
+    "stomach": "overlaps liver, exposes labelmap collapse ordering",
+    "urinary_bladder": "touches the volume boundary in x and y",
+    "gallbladder": "empty, must be dropped before encoding",
+}
+
+radius = max(6, min(nx, ny) // 6)
+masks = {
+    "liver": (((zz - nz // 2) ** 2) / max(1, (nz // 4) ** 2)
+              + ((yy - cy) ** 2) / float(radius * radius)
+              + ((xx - cx) ** 2) / float(radius * radius)) < 1.0,
+    "aorta": np.abs(np.sqrt((yy - cy) ** 2.0 + (xx - cx) ** 2.0)
+                    - (radius * 1.6)) < 1.0,
+    "spleen": ((np.abs(zz - max(1, nz // 4)) <= 0)
+               & (((yy - cy // 2) ** 2 + (xx - cx // 2) ** 2) < (radius * radius) / 4)),
+    # Deliberately shares voxels with liver.
+    "stomach": (((zz - nz // 2) ** 2) / max(1, (nz // 4) ** 2)
+                + ((yy - cy) ** 2) / float(radius * radius)
+                + ((xx - cx) ** 2) / float(radius * radius)) < 0.35,
+    "urinary_bladder": ((yy < 3) & (xx < 3)),
+    "gallbladder": np.zeros((nz, ny, nx), dtype=bool),
+}
+
+t0 = time.perf_counter()
+for name, array in masks.items():
+    image = sitk.GetImageFromArray(array.astype(np.uint8))
+    image.CopyInformation(reference)
+    sitk.WriteImage(image, str(masks_dir / (name + ".nii.gz")))
+timings["fixture_write_s"] = time.perf_counter() - t0
+
+provenance = {
+    "module": rs.__file__,
+    "export_function": "run_segment._export_dicom_seg",
+    "mask_scan_function": "run_segment._structure_masks",
+    "volumes_function": "run_segment._volumes_ml",
+    "adapter_sha256": __import__("hashlib").sha256(
+        Path(rs.__file__).read_bytes()).hexdigest()[:16],
+    "masks": "synthetic, written on the source series grid",
+}
+
+t0 = time.perf_counter()
+selected = rs._structure_masks(masks_dir)
+timings["mask_scan_s"] = time.perf_counter() - t0
+
+t0 = time.perf_counter()
+volumes = rs._volumes_ml(selected)
+timings["volumes_s"] = time.perf_counter() - t0
+
+seg_path = work / rs.SEG_FILENAME
+try:
+    t0 = time.perf_counter()
+    rs._export_dicom_seg(series_dir, selected, seg_path, "total", reporter)
+    timings["seg_export_s"] = time.perf_counter() - t0
+except BaseException as exc:
+    print(json.dumps({"ok": False,
+                      "error": "%s: %s" % (type(exc).__name__, exc),
+                      "timings": timings}))
+    raise SystemExit(1)
+
+print(json.dumps({
+    "ok": True,
+    "seg": str(seg_path),
+    "masks_dir": str(masks_dir),
+    "structures": [name for name, _ in selected],
+    "design": design,
+    "volumes_ml": volumes,
+    "seg_bytes": seg_path.stat().st_size,
+    "provenance": provenance,
+    "timings": timings,
+    "totalsegmentator_version": rs._totalsegmentator_version(),
+}))
+'''
+
+
+# ---------------------------------------------------------------------------
 # Stage: segment
 # ---------------------------------------------------------------------------
 
@@ -551,7 +865,7 @@ def stage_roundtrip(rows: list[dict], recorder: Recorder, done: set[str],
         series_dir = Path(metrics.get("series_dir", ""))
         masks_dir = Path(metrics.get("masks_dir", ""))
         name = series_dir.name
-        case_id = f"roundtrip/{name}"
+        case_id = f"roundtrip/{row['case_id'].split('/', 1)[0]}/{name}"
         if case_id in done:
             print(f"  [skip] {case_id}", flush=True)
             continue
@@ -726,7 +1040,7 @@ def stage_audit(rows: list[dict], recorder: Recorder, done: set[str]) -> None:
         metrics = row.get("metrics", {})
         seg_path = Path(metrics.get("seg_path", ""))
         series_dir = Path(metrics.get("series_dir", ""))
-        case_id = f"audit/{series_dir.name}"
+        case_id = f"audit/{row['case_id'].split('/', 1)[0]}/{series_dir.name}"
         if case_id in done:
             print(f"  [skip] {case_id}", flush=True)
             continue
@@ -804,7 +1118,9 @@ def stage_sample(rows: list[dict], destination: Path) -> Path | None:
     import pydicom
 
     candidates = [r for r in rows
-                  if r["case_id"].startswith("segment/") and r["ok"]
+                  if r["ok"]
+                  and (r["case_id"].startswith("segment/")
+                       or r["case_id"].startswith("fixture/"))
                   and Path(r["metrics"].get("seg_path", "")).is_file()]
     if not candidates:
         print("sample: no successfully produced SEG to publish", flush=True)
@@ -888,7 +1204,7 @@ def stage_sample(rows: list[dict], destination: Path) -> Path | None:
         "These are a *prepared* copy of a public TCIA series: the archive export",
         "omits `SliceThickness`, which the adapter's SEG export requires, so the",
         "value implied by the slice positions was written in. Nothing else was",
-        "changed. See `docs/EVALUATION.md`.",
+        "changed. See `eval/results/exp1_findings.md`.",
         "",
     ]
     (destination / "SAMPLE.md").write_text("\n".join(lines))
@@ -902,6 +1218,17 @@ def stage_sample(rows: list[dict], destination: Path) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
+# What each producing stage means, spelled out in the derived tables. A bare
+# stage name ("fixture") invites the reader to assume a test double wrote the
+# SEG; every row here was written by the shipped adapter's own encoder, and the
+# column says so.
+PRODUCER_LABEL = {
+    "fixture": "shipped-adapter-encoder/synthetic-masks",
+    "segment": "shipped-adapter-full-pipeline",
+    "shipped": "shipped-adapter-cli",
+}
+
+
 def write_tables(results_path: Path) -> list[Path]:
     _, rows = load_results(results_path)
     stem = results_path.with_suffix("")
@@ -911,10 +1238,13 @@ def write_tables(results_path: Path) -> list[Path]:
     for row in rows:
         if not row["case_id"].startswith("roundtrip/") or not row["ok"]:
             continue
-        case = row["case_id"].split("/", 1)[1]
+        parts = row["case_id"].split("/")
+        stage, case = (parts[1], parts[2]) if len(parts) > 2 else ("", parts[1])
+        producer = PRODUCER_LABEL.get(stage, stage)
         for entry in row["metrics"].get("per_structure", []):
             geometry = entry.get("geometry_matches_source", {})
             structure_rows.append({
+                "producer": producer,
                 "case": case,
                 "structure": entry["structure"],
                 "present_in_seg": entry.get("present_in_seg"),
@@ -944,19 +1274,24 @@ def write_tables(results_path: Path) -> list[Path]:
     for row in rows:
         if not row["case_id"].startswith("audit/"):
             continue
-        case = row["case_id"].split("/", 1)[1]
+        parts = row["case_id"].split("/")
+        stage, case = (parts[1], parts[2]) if len(parts) > 2 else ("", parts[1])
+        producer = PRODUCER_LABEL.get(stage, stage)
         if not row["ok"] and not row["metrics"]:
-            audit_rows.append({"case": case, "check": "(audit failed)",
-                               "status": "FAIL", "detail": row.get("error", "")})
+            audit_rows.append({"producer": producer, "case": case,
+                               "check": "(audit failed)", "status": "FAIL",
+                               "detail": row.get("error", "")})
             continue
         for finding in row["metrics"].get("findings", []):
-            audit_rows.append({"case": case, "check": finding["check"],
+            audit_rows.append({"producer": producer, "case": case,
+                               "check": finding["check"],
                                "status": finding["status"],
                                "detail": finding["detail"]})
     if audit_rows:
         path = Path(f"{stem}_audit.csv")
         with open(path, "w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["case", "check", "status", "detail"])
+            writer = csv.DictWriter(
+                handle, fieldnames=["producer", "case", "check", "status", "detail"])
             writer.writeheader()
             writer.writerows(audit_rows)
         written.append(path)
@@ -1006,8 +1341,8 @@ def main(argv: list[str] | None = None) -> int:
                              "series. Conformance does not depend on extent, and "
                              "segmentation here is CPU-only. Recorded per case.")
     parser.add_argument("--stages", default="prepare,segment,roundtrip,audit",
-                        help="Comma-separated subset of prepare,segment,roundtrip,"
-                             "audit,sample")
+                        help="Comma-separated subset of prepare,shipped,fixture,"
+                             "segment,roundtrip,audit,sample")
     parser.add_argument("--threads", type=int, default=None,
                         help="Torch thread floor for the shim. Defaults to the "
                              "core count; lower it when the machine is shared.")
@@ -1036,7 +1371,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"prepare: {len(series)} series", flush=True)
         series = stage_prepare(series, args.work / "prepared", recorder, done,
                                max_slices=args.max_slices)
-    elif "segment" in stages:
+    elif "segment" in stages or "fixture" in stages:
         # Segmenting without preparing is only correct if the series already
         # carries SliceThickness; the adapter raises AttributeError otherwise.
         prepared_root = args.work / "prepared"
@@ -1048,6 +1383,15 @@ def main(argv: list[str] | None = None) -> int:
                       flush=True)
                 series = existing
 
+    if "shipped" in stages:
+        print(f"shipped: {len(series)} series", flush=True)
+        stage_shipped(series, args.work, args.python, args.task,
+                      args.fast == "true", recorder, done)
+
+    if "fixture" in stages:
+        print(f"fixture: {len(series)} series", flush=True)
+        stage_fixture(series, args.work, args.python, recorder, done)
+
     if "segment" in stages:
         print(f"segment: {len(series)} series", flush=True)
         stage_segment(series, args.work, args.python, args.task,
@@ -1055,7 +1399,9 @@ def main(argv: list[str] | None = None) -> int:
                       threads=args.threads)
 
     _, rows = load_results(args.results)
-    segmented = [r for r in rows if r["case_id"].startswith("segment/") and r["ok"]]
+    segmented = [r for r in rows
+                 if r["ok"] and (r["case_id"].startswith("segment/")
+                                 or r["case_id"].startswith("fixture/"))]
 
     if "roundtrip" in stages:
         print(f"roundtrip: {len(segmented)} SEGs", flush=True)
