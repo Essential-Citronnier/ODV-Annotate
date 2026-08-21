@@ -261,6 +261,79 @@ def _volumes_ml(masks: list[tuple[str, Path]]) -> dict[str, float]:
     return metrics
 
 
+def _ensure_slice_thickness(source_images: list, reporter: ProgressReporter) -> None:
+    """Give the source datasets a SliceThickness when the series omits one.
+
+    highdicom requires SliceThickness to build the Pixel Measures Sequence, but
+    the attribute is type 2 in the CT Image module — an absent or empty value is
+    standard-legal, and real public archives ship series without it. Every one of
+    the seven TCIA series used for evaluation omits both SliceThickness and
+    SpacingBetweenSlices, so refusing them would mean refusing conformant data.
+
+    Spacing is recovered from the source geometry, which is what any consumer
+    would have to do anyway: positions are projected onto the slice normal
+    (correct for oblique acquisitions, unlike differencing the z coordinate) and
+    the median gap is taken. Mutation is in memory only; the files on disk are
+    untouched.
+    """
+    import numpy as np
+
+    missing = [ds for ds in source_images
+               if getattr(ds, "SliceThickness", None) in (None, "")]
+    if not missing:
+        return
+
+    positions = []
+    for ds in source_images:
+        position = getattr(ds, "ImagePositionPatient", None)
+        orientation = getattr(ds, "ImageOrientationPatient", None)
+        if position is None or orientation is None:
+            raise PluginError(
+                ErrorCode.BAD_INPUT,
+                "The series omits SliceThickness and also lacks the "
+                "ImagePositionPatient/ImageOrientationPatient needed to derive "
+                "it, so slice spacing cannot be established.",
+                recoverable=False,
+            )
+        axes = np.asarray(orientation, dtype=float)
+        normal = np.cross(axes[:3], axes[3:])
+        positions.append(float(np.dot(np.asarray(position, dtype=float), normal)))
+
+    if len(positions) < 2:
+        raise PluginError(
+            ErrorCode.BAD_INPUT,
+            "The series omits SliceThickness and has fewer than two slices, "
+            "so spacing cannot be derived.",
+            recoverable=False,
+        )
+
+    gaps = np.diff(np.sort(np.asarray(positions)))
+    spacing = float(np.median(np.abs(gaps)))
+    if not spacing > 0:
+        raise PluginError(
+            ErrorCode.BAD_INPUT,
+            "The series omits SliceThickness and its slice positions give a "
+            "non-positive spacing, so the geometry is unusable.",
+            recoverable=False,
+        )
+
+    # Non-uniform spacing is reported rather than silently averaged: a variable
+    # gap means the derived value is wrong for some frames.
+    spread = float(np.max(np.abs(gaps)) - np.min(np.abs(gaps)))
+    if spread > 0.01:
+        reporter.log(
+            f"Warning: slice spacing varies by {spread:.3f} mm across the "
+            f"series; using the median {spacing:.3f} mm."
+        )
+
+    reporter.log(
+        f"SliceThickness absent from {len(missing)} of {len(source_images)} "
+        f"instances; derived {spacing:.3f} mm from slice positions."
+    )
+    for ds in missing:
+        ds.SliceThickness = spacing
+
+
 def _export_dicom_seg(series_dir: Path, masks: list[tuple[str, Path]],
                       out_path: Path, ts_task: str,
                       reporter: ProgressReporter) -> None:
@@ -336,6 +409,8 @@ def _export_dicom_seg(series_dir: Path, masks: list[tuple[str, Path]],
             ErrorCode.INTERNAL,
             "Segmentation produced no structures that overlap the source series.",
         )
+
+    _ensure_slice_thickness(source_images, reporter)
 
     reporter.log(f"Encoding {len(descriptions)} segments into a binary SEG")
     segmentation = hd.seg.Segmentation(
