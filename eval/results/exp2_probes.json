@@ -105,20 +105,21 @@
     },
     {
       "probe": "missing_slice_thickness",
-      "ok": false,
-      "expected_lossless": false,
+      "ok": true,
+      "expected_lossless": true,
       "detail": {
         "source_has_slice_thickness": false,
         "shipping_adapter": {
-          "exit_code": 1,
-          "detail": "AttributeError: 'FileDataset' object has no attribute 'SliceThickness'"
+          "exit_code": 0,
+          "detail": "encoded"
         },
         "with_eval_fallback": {
           "exit_code": 0,
           "detail": "encoded"
         }
       },
-      "interpretation": "highdicom reads SliceThickness by attribute access while reading the optional SpacingBetweenSlices with .get(); a source series that omits the Type 2 SliceThickness therefore raises AttributeError inside the Segmentation constructor. Every instance in the CT Lymph Nodes cohort omits it, so the shipping adapter cannot segment this public collection at all without the fallback"
+      "interpretation": "REGRESSION TEST for a defect found by this experiment and since fixed. highdicom reads SliceThickness by attribute access while reading the optional SpacingBetweenSlices with .get(), so a source series omitting the Type 2 SliceThickness raised AttributeError inside the Segmentation constructor. Every instance of the CT Lymph Nodes cohort omits it, so the adapter could not process the collection at all. Commit 9a3f8f0 makes the adapter derive the spacing itself -- slice positions projected onto the slice normal, median gap -- and this probe now encodes with the evaluation's fallback OFF. It is kept so the defect cannot return unnoticed",
+      "fixed_by": "plugins/totalseg/run_segment.py, commit 9a3f8f0"
     }
   ]
 }

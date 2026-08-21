@@ -1,0 +1,85 @@
+producer,case,check,status,detail
+fixture,tcia_1028210905866391,sop_class,PASS,Segmentation Storage
+fixture,tcia_1028210905866391,modality,PASS,SEG
+fixture,tcia_1028210905866391,segmentation_type,PASS,BINARY
+fixture,tcia_1028210905866391,pixel_encoding,PASS,BINARY encoding as required
+fixture,tcia_1028210905866391,frames_vs_perframe,PASS,"1355 frames, 1355 per-frame items"
+fixture,tcia_1028210905866391,segment_sequence,PASS,5 segments numbered 1..5
+fixture,tcia_1028210905866391,segment_coding,WARN,"5/5 segments carry a generic 'anatomical structure' code as their SegmentedPropertyType; only 1 distinct type code(s) across the file, so the specific anatomy is recoverable only from the free-text SegmentLabel"
+fixture,tcia_1028210905866391,segment_algorithm,PASS,every segment declares its algorithm type and identification
+fixture,tcia_1028210905866391,referenced_series,PASS,all 485 source instances referenced
+fixture,tcia_1028210905866391,frame_of_reference,PASS,matches the source series
+fixture,tcia_1028210905866391,perframe_consistency,PASS,"1355 frames, all identified and positioned, covering all 5 segments"
+fixture,tcia_1028210905866391,omit_empty_frames,PASS,every encoded frame carries at least one set pixel
+fixture,tcia_1028210905866391,content_identification,WARN,"absent: ContentDescription, ContentCreatorName, SeriesDescription"
+fixture,tcia_1028210905866391,pixel_data_decodable,PASS,pixel_array decoded
+fixture,tcia_1556218467652708,sop_class,PASS,Segmentation Storage
+fixture,tcia_1556218467652708,modality,PASS,SEG
+fixture,tcia_1556218467652708,segmentation_type,PASS,BINARY
+fixture,tcia_1556218467652708,pixel_encoding,PASS,BINARY encoding as required
+fixture,tcia_1556218467652708,frames_vs_perframe,PASS,"1147 frames, 1147 per-frame items"
+fixture,tcia_1556218467652708,segment_sequence,PASS,5 segments numbered 1..5
+fixture,tcia_1556218467652708,segment_coding,WARN,"5/5 segments carry a generic 'anatomical structure' code as their SegmentedPropertyType; only 1 distinct type code(s) across the file, so the specific anatomy is recoverable only from the free-text SegmentLabel"
+fixture,tcia_1556218467652708,segment_algorithm,PASS,every segment declares its algorithm type and identification
+fixture,tcia_1556218467652708,referenced_series,PASS,all 411 source instances referenced
+fixture,tcia_1556218467652708,frame_of_reference,PASS,matches the source series
+fixture,tcia_1556218467652708,perframe_consistency,PASS,"1147 frames, all identified and positioned, covering all 5 segments"
+fixture,tcia_1556218467652708,omit_empty_frames,PASS,every encoded frame carries at least one set pixel
+fixture,tcia_1556218467652708,content_identification,WARN,"absent: ContentDescription, ContentCreatorName, SeriesDescription"
+fixture,tcia_1556218467652708,pixel_data_decodable,PASS,pixel_array decoded
+fixture,tcia_1615802411543660,sop_class,PASS,Segmentation Storage
+fixture,tcia_1615802411543660,modality,PASS,SEG
+fixture,tcia_1615802411543660,segmentation_type,PASS,BINARY
+fixture,tcia_1615802411543660,pixel_encoding,PASS,BINARY encoding as required
+fixture,tcia_1615802411543660,frames_vs_perframe,PASS,"1343 frames, 1343 per-frame items"
+fixture,tcia_1615802411543660,segment_sequence,PASS,5 segments numbered 1..5
+fixture,tcia_1615802411543660,segment_coding,WARN,"5/5 segments carry a generic 'anatomical structure' code as their SegmentedPropertyType; only 1 distinct type code(s) across the file, so the specific anatomy is recoverable only from the free-text SegmentLabel"
+fixture,tcia_1615802411543660,segment_algorithm,PASS,every segment declares its algorithm type and identification
+fixture,tcia_1615802411543660,referenced_series,PASS,all 481 source instances referenced
+fixture,tcia_1615802411543660,frame_of_reference,PASS,matches the source series
+fixture,tcia_1615802411543660,perframe_consistency,PASS,"1343 frames, all identified and positioned, covering all 5 segments"
+fixture,tcia_1615802411543660,omit_empty_frames,PASS,every encoded frame carries at least one set pixel
+fixture,tcia_1615802411543660,content_identification,WARN,"absent: ContentDescription, ContentCreatorName, SeriesDescription"
+fixture,tcia_1615802411543660,pixel_data_decodable,PASS,pixel_array decoded
+fixture,tcia_2083024417478217,sop_class,PASS,Segmentation Storage
+fixture,tcia_2083024417478217,modality,PASS,SEG
+fixture,tcia_2083024417478217,segmentation_type,PASS,BINARY
+fixture,tcia_2083024417478217,pixel_encoding,PASS,BINARY encoding as required
+fixture,tcia_2083024417478217,frames_vs_perframe,PASS,"1355 frames, 1355 per-frame items"
+fixture,tcia_2083024417478217,segment_sequence,PASS,5 segments numbered 1..5
+fixture,tcia_2083024417478217,segment_coding,WARN,"5/5 segments carry a generic 'anatomical structure' code as their SegmentedPropertyType; only 1 distinct type code(s) across the file, so the specific anatomy is recoverable only from the free-text SegmentLabel"
+fixture,tcia_2083024417478217,segment_algorithm,PASS,every segment declares its algorithm type and identification
+fixture,tcia_2083024417478217,referenced_series,PASS,all 485 source instances referenced
+fixture,tcia_2083024417478217,frame_of_reference,PASS,matches the source series
+fixture,tcia_2083024417478217,perframe_consistency,PASS,"1355 frames, all identified and positioned, covering all 5 segments"
+fixture,tcia_2083024417478217,omit_empty_frames,PASS,every encoded frame carries at least one set pixel
+fixture,tcia_2083024417478217,content_identification,WARN,"absent: ContentDescription, ContentCreatorName, SeriesDescription"
+fixture,tcia_2083024417478217,pixel_data_decodable,PASS,pixel_array decoded
+fixture,tcia_2121018880599426,sop_class,PASS,Segmentation Storage
+fixture,tcia_2121018880599426,modality,PASS,SEG
+fixture,tcia_2121018880599426,segmentation_type,PASS,BINARY
+fixture,tcia_2121018880599426,pixel_encoding,PASS,BINARY encoding as required
+fixture,tcia_2121018880599426,frames_vs_perframe,PASS,"1377 frames, 1377 per-frame items"
+fixture,tcia_2121018880599426,segment_sequence,PASS,5 segments numbered 1..5
+fixture,tcia_2121018880599426,segment_coding,WARN,"5/5 segments carry a generic 'anatomical structure' code as their SegmentedPropertyType; only 1 distinct type code(s) across the file, so the specific anatomy is recoverable only from the free-text SegmentLabel"
+fixture,tcia_2121018880599426,segment_algorithm,PASS,every segment declares its algorithm type and identification
+fixture,tcia_2121018880599426,referenced_series,PASS,all 493 source instances referenced
+fixture,tcia_2121018880599426,frame_of_reference,PASS,matches the source series
+fixture,tcia_2121018880599426,perframe_consistency,PASS,"1377 frames, all identified and positioned, covering all 5 segments"
+fixture,tcia_2121018880599426,omit_empty_frames,PASS,every encoded frame carries at least one set pixel
+fixture,tcia_2121018880599426,content_identification,WARN,"absent: ContentDescription, ContentCreatorName, SeriesDescription"
+fixture,tcia_2121018880599426,pixel_data_decodable,PASS,pixel_array decoded
+fixture,tcia_3182831987332065,sop_class,PASS,Segmentation Storage
+fixture,tcia_3182831987332065,modality,PASS,SEG
+fixture,tcia_3182831987332065,segmentation_type,PASS,BINARY
+fixture,tcia_3182831987332065,pixel_encoding,PASS,BINARY encoding as required
+fixture,tcia_3182831987332065,frames_vs_perframe,PASS,"1367 frames, 1367 per-frame items"
+fixture,tcia_3182831987332065,segment_sequence,PASS,5 segments numbered 1..5
+fixture,tcia_3182831987332065,segment_coding,WARN,"5/5 segments carry a generic 'anatomical structure' code as their SegmentedPropertyType; only 1 distinct type code(s) across the file, so the specific anatomy is recoverable only from the free-text SegmentLabel"
+fixture,tcia_3182831987332065,segment_algorithm,PASS,every segment declares its algorithm type and identification
+fixture,tcia_3182831987332065,referenced_series,PASS,all 489 source instances referenced
+fixture,tcia_3182831987332065,frame_of_reference,PASS,matches the source series
+fixture,tcia_3182831987332065,perframe_consistency,PASS,"1367 frames, all identified and positioned, covering all 5 segments"
+fixture,tcia_3182831987332065,omit_empty_frames,PASS,every encoded frame carries at least one set pixel
+fixture,tcia_3182831987332065,content_identification,WARN,"absent: ContentDescription, ContentCreatorName, SeriesDescription"
+fixture,tcia_3182831987332065,pixel_data_decodable,PASS,pixel_array decoded

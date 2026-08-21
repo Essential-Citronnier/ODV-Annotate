@@ -82,10 +82,17 @@ reader on a synthetic 6-slice series:
 | Overlapping structures | **0.857 for the earlier-encoded structure, 256 voxels silently lost** | A real defect. See §5. |
 | Missing `SliceThickness` | **Shipping adapter exits 1 with `AttributeError`** | A real defect. See §4. |
 
-## 4. Defect found: the shipping adapter cannot segment this public collection
+## 4. Defect found and FIXED: SEG export on series without SliceThickness
 
-`_export_dicom_seg` raises `AttributeError: 'FileDataset' object has no
-attribute 'SliceThickness'` on every series in the cohort.
+**Status: fixed in `plugins/totalseg/run_segment.py`, commit 9a3f8f0.** Found by
+this experiment, fixed by the track that owns the adapter, and re-verified here
+against the shipped code. Reported because the defect and its cause are worth
+the paper's space — an evaluation that finds a real blocker in its own subject
+is evidence the evaluation works.
+
+As originally found, `_export_dicom_seg` raised
+`AttributeError: 'FileDataset' object has no attribute 'SliceThickness'` on
+every series in the cohort.
 
 **Mechanism.** highdicom's `_Image._get_pixel_measures_sequence` reads
 `source_image.SliceThickness` by attribute access while reading the optional
@@ -100,19 +107,31 @@ cannot process this public TCIA collection, and will fail on any scanner or
 anonymisation pipeline that drops the tag.
 
 **Confirmed by construction.** Probe 4 strips `SliceThickness` from a
-controlled series and runs the exporter twice as child processes, with and
-without a fallback: exit 1 with the `AttributeError` without it, exit 0 with
-it. The failure is attributable to the tag and nothing else.
+controlled series and runs the exporter as a child process. Before the fix it
+exited 1 with the `AttributeError`; the failure was attributable to the tag and
+nothing else.
 
-**Fix.** `SliceThickness` is itself optional within the Pixel Measures
-Sequence, so passing `slice_thickness=None` produces a conformant SEG. The
-evaluation applies this as a runtime fallback in order to measure anything at
-all; the fallback is recorded in the `notes` of every affected result row. **The
-fix belongs in `plugins/totalseg/run_segment.py`, which is not my file** — the
-adapter should construct an explicit `PixelMeasuresSequence` and pass it to
-`hd.seg.Segmentation` as `pixel_measures=`, deriving slice spacing from
-`ImagePositionPatient` when `SliceThickness` is absent. Reported for the track
-that owns that file.
+**The fix, and how it was verified here.** The adapter now derives slice
+spacing from the source geometry rather than reading the absent tag: slice
+positions are projected onto the slice **normal** — not differenced in z, which
+on this cohort gives 224 mm because the files do not sort by position — and the
+median gap is taken. Non-uniform spacing is logged rather than silently
+averaged, and when the geometry needed to derive it is also missing the adapter
+fails with `bad_input` naming the cause instead of raising `AttributeError`.
+
+Probe 4 is now a **regression test** rather than a defect report. It runs the
+exporter with the evaluation's own fallback switched **off**, so it exercises
+the shipped derivation: `shipping_adapter: exit_code 0, "encoded"`. The
+evaluation's fallback still exists behind a separate switch
+(`ODV_EXP2_PIXEL_MEASURES_FALLBACK`) purely so a pre-fix adapter can still be
+made to reproduce the original failure.
+
+Note on the measured cohort. The 689-comparison result in §2 was produced with
+the evaluation's fallback active, because the adapter fix did not yet exist.
+Both are ways of supplying the same missing Pixel Measures element, and the
+fidelity numbers do not depend on which supplies it — the round trip compares
+masks, not header provenance. §2 was re-verified against the shipped encoder on
+one full cohort series after the fix landed; see §4.1.
 
 ## 5. Defect found: overlapping structures are clipped — latent, not reachable
 
@@ -172,8 +191,13 @@ and geometry-preserving, and being common to both paths it cannot advantage
 either. 327 per-structure comparisons; the two paths score identically to
 6 decimal places on every one.
 
-**This is a hygiene check, not an accuracy claim.** Wasserthal et al. report
-Dice 0.943 for the full-resolution model; this runs the 3 mm `fast` model,
+**This is a hygiene check, not an accuracy claim.** Wasserthal et al.
+(*Radiology: Artificial Intelligence* 2023;5(5):e230024, doi:10.1148/ryai.230024)
+report Dice 0.943 for the full-resolution model — verified against the
+retrieved article text, not quoted from recall. That figure is a single
+aggregate over the authors' own test set, not a per-structure value and not
+the model run here; it is drawn as a reference line for order of magnitude,
+not as a threshold either path is expected to meet. This runs the 3 mm `fast` model,
 which trades resolution for speed and scores lower, on four cases. Large
 structures at ~0.95 and an all-structure mean of ~0.83 are consistent with the
 fast model and rule out a silently broken pipeline. They support no statement
@@ -185,6 +209,13 @@ particular should not be read as one.
 That is a property of those NIfTI files, not of the plugin layer. They were not
 rescued by rewriting the reference geometry — a hygiene check whose reference
 was adjusted to make it pass is not a check.
+
+Note on reading `exp2_hygiene.jsonl` directly: the harness's `done_case_ids()`
+reports only successes, so `--resume` retries a failed case and appends a
+second row when it fails again. Both `s0189` and `s0193` therefore appear
+twice. The JSONL is append-only by design and keeps every attempt as the audit
+trail; `exp2_tables.py` reports each case once, and the runner now announces a
+retry at the point it creates the duplicate.
 
 ## 7. What could not be measured here, and why
 

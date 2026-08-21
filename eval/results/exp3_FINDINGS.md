@@ -52,6 +52,19 @@ prompt: **12.0 s cold, 8.8 s warm**. That is what an eviction costs the user.
 
 ## Finding 1 — TotalSegmentator's declared memory is wrong by ~6×
 
+> **RESOLVED in commit `de234fe`**: `ram_gb` raised 3.5 → 23.5, and the
+> manifest schema gained an optional per-task `ram_gb`.
+>
+> Two notes on the number itself, so the paper does not overstate its
+> provenance. First, 23.5 GB exceeds the highest figure in this experiment's
+> record (23.10 GB) by 0.4 GB; the recorded measurements are 20.85, 21.40 and
+> 23.10 GB. If 23.5 was taken from the superseded cross-check row described
+> below, it should be re-derived — though as a *declaration* it errs toward
+> safety, which is the correct direction to err. Second, it remains a
+> `fast=true` figure: full resolution runs five models rather than one and is
+> still unmeasured, so the per-task field is where that gap will eventually be
+> closed.
+
 `ram_gb: 3.5` against a measured peak of **20.85 GB** on a 411-slice abdominal
 CT (`bench/totalsegmentator`, `input_series=tcia_1556218467652708`).
 
@@ -102,27 +115,44 @@ cross-check pass `fast=true`, which is the manifest's default for the `total`
 task. So the 6× overrun is not the expensive configuration overrunning its
 budget — it is the *cheap* one.
 
-Full resolution could not be measured here. It requires five further weight
-datasets (`Dataset291`–`Dataset295`) fetched from a GitHub releases URL that
-this network refuses; recorded as
-`crosscheck/totalsegmentator/fullres/tcia_1556218467652708` with the
-`ProxyError`, not silently omitted. Full resolution processes the same volume
-at roughly 3.4× the voxel count of the 3 mm variant along the through-plane
-axis, so its peak should be expected to exceed 23 GB rather than fall below it,
-but that is an inference and not a measurement, and it should be measured
-before it is quoted.
+Full resolution could not be measured here, and the reason is structural
+rather than incidental. Where `fast` runs a single 3 mm model
+(`Dataset297`), full resolution runs **five** separate models
+(`Dataset291`–`Dataset295`, per `map_tasks_config.py`) over the volume at full
+through-plane resolution. Its footprint is therefore not a scaled version of
+the measured one, and no multiplier applied to 23 GB would be a defensible
+estimate of it.
+
+Two acquisition attempts are on the record. The adapter's own fetch is
+recorded as `crosscheck/totalsegmentator/fullres/tcia_1556218467652708`
+carrying the `ProxyError` from the GitHub releases host. A second attempt
+through a network path that does reach that host retrieved three of the five
+archives in ~17 minutes before exceeding the time budget allotted to this
+measurement, so it was stopped rather than run to completion.
+
+**This is a gap, not an estimate.** The honest statement is that the
+manifest's single figure has been shown wrong by ~6× for the default
+configuration, and that the non-default configuration is unmeasured and runs
+five models instead of one. Measuring it needs a machine that can reach
+`github.com/wasserth/TotalSegmentator/releases` and roughly an hour of CPU
+time, or minutes on a visible GPU.
 
 **Proposed correction.** Declare `ram_gb` per task and per option combination
 rather than once per plugin. The measured `fast` figure alone justifies at
-least `24.0` for `total`; the full-resolution figure is likely higher and
-should be measured on a machine that can reach the weight host before a number
-is chosen. A single scalar `ram_gb` cannot describe a plugin whose footprint
+least `24.0` for `total` with `fast=true`; the full-resolution figure is
+unmeasured and must not be guessed from it, for the reason above. A single scalar `ram_gb` cannot describe a plugin whose footprint
 depends on options the caller selects, which is the structural version of this
 finding: the protocol gives a plugin one number to describe every
 configuration it can be invoked in. I did not edit the manifest or the
 protocol: both are other tracks' files.
 
 ## Finding 2 — a running one-shot is invisible to the arbiter
+
+> **RESOLVED in commit `de234fe`**: `residentSet()` now includes plugins with
+> in-flight one-shot invocations. The arbitration scenario pair below is
+> retained deliberately — it is the measurement that established the defect,
+> and after the fix the `…-unreported` row describes a state the host can no
+> longer produce, which is the point.
 
 `PluginRuntime.residentSet()` derives residency from `runtimeStates`, and a
 one-shot subprocess never enters that dictionary — it is spawned, tracked in
@@ -166,6 +196,16 @@ track's file; reported, not edited.
 
 ## Finding 4 — DICOM SEG export requires an attribute this cohort omits
 
+> **RESOLVED in commit `9a3f8f0`.** The adapter now derives slice spacing from
+> the source geometry — slice positions projected onto the slice normal, then
+> the median gap — logging non-uniform spacing rather than averaging it away,
+> and failing with `bad_input` naming the cause when the geometry needed to
+> derive it is also absent. Verified by the owning track at 1.000 mm derived
+> from 411 instances on `tcia_1556218467652708`. The projection-onto-normal
+> detail matters and is worth keeping in the paper: on this cohort the naive
+> z-coordinate difference gives 224 mm, because the files do not sort by
+> position. The defect is documented below as found.
+
 Segmentation completed and produced all 117 structures, then
 `_export_dicom_seg` raised `AttributeError: 'FileDataset' object has no
 attribute 'SliceThickness'`. All seven TCIA series in the cohort omit
@@ -183,6 +223,11 @@ cannot be derived. Another track's file; reported, not edited.
 
 ## Finding 5 — the shared harness misattributes peak RSS
 
+> **RESOLVED in commit `de234fe`**, along with Findings 1 and 2. This
+> experiment keeps using its own `run_subprocess_isolated` so that the
+> measurements reported here remain the ones the figures were drawn from,
+> rather than being silently re-derived through a changed harness.
+
 `harness.run_subprocess` reads `getrusage(RUSAGE_CHILDREN).ru_maxrss` around
 the call and returns `max(after, before)`. That field is a high-water mark over
 **every child the process has ever reaped** — it never resets and is not a
@@ -198,16 +243,52 @@ experiment, `exp3_resources.py` measures peak RSS itself via
 whose children accounting starts empty. `eval/harness.py` is another track's
 file; reported, not edited.
 
-## Arbitration: 17/17 scenarios match the shipped policy
+## Finding 6 — the corrected declaration makes the plugin inadmissible on the target machine
+
+Re-running the arbitration scenarios against the corrected manifest surfaces a
+consequence worth stating plainly, because it was not visible while the
+declaration was wrong. At an honest `ram_gb: 23.5` against a budget of half
+physical memory, the shipped policy decides:
+
+| Machine | Budget | Decision on `total` |
+|---|---|---|
+| 16 GB | 8 GiB | **refuse** |
+| 32 GB | 16 GiB | **refuse** |
+| 48 GB | 24 GiB | admit |
+
+TotalSegmentator becomes admissible at roughly **47 GB of physical memory**.
+The 16 GB machine the design targets can no longer run it at all, and neither
+can a 32 GB one.
+
+This is not an argument for restoring 3.5. The plugin genuinely allocates that
+memory; a refusal the user can see is better than an admission that drives the
+machine into swap. It does mean the honest declaration converts a silent
+failure mode into a visible unavailability, and that the real remedy is a
+smaller working set rather than a smaller number — the per-task `ram_gb` the
+schema now carries, a `--roi-subset` path, or streaming the volume rather than
+holding it whole. Recorded as
+`{16gb,32gb}/totalseg-refused-on-corrected-declaration` and
+`48gb/totalseg-admitted-on-corrected-declaration`.
+
+A note on the scenario suite itself: three eviction-mechanics scenarios now
+pin the pre-correction 3.5 GB figure rather than reading the manifest. They
+exercise LRU ordering, multi-eviction and the one-shot sibling rule, and with
+a live 23.5 they would refuse on size before reaching any of that — still
+reporting a result while testing nothing. The scenarios that are *about* the
+declaration continue to read it live.
+
+## Arbitration: 20/20 scenarios match the shipped policy
 
 Driven by compiling `ResourceArbiter.swift` and `PluginTypes.swift` into a
 JSON-in/JSON-out driver, so the decisions are the shipped type's own rather
 than a Python restatement of the policy. Coverage includes LRU eviction order,
 multiple eviction, non-evictability of busy and session-holding plugins, the
 reentrant self-start case, live-headroom refusal on a large but loaded machine,
-the exact-budget boundary, and the two pairs above. Full table:
-`eval/results/exp3_resources_arbitration.csv`. The existing Swift suite also
-passes unchanged (60 tests, 0 failures).
+the exact-budget boundary, the two pairs above, and the post-correction
+admissibility rows of Finding 6. Full table:
+`eval/results/exp3_resources_arbitration.csv`. Re-run after commits `de234fe`
+and `9a3f8f0` landed: all 20 still match, and the full Swift suite passes
+(201 tests, 1 skipped, 0 failures).
 
 Two of my initial expectations were wrong and the arbiter was right; those are
 corrected in the scenario comments rather than hidden. One early scenario was
