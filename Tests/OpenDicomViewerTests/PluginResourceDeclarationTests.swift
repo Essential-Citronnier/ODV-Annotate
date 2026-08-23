@@ -3,7 +3,7 @@
 // wrong or invisible declaration defeats the policy without the policy being
 // wrong. Both failure modes were found by measurement rather than by reasoning:
 //
-//   - TotalSegmentator declared 3.5 GB and peaked at 20.9-23.2 GB across four
+//   - TotalSegmentator declared 3.5 GB and peaked at 20.9-23.1 GB across four
 //     runs on two series. On a 16 GB machine the declaration admitted a job
 //     needing more than the whole machine.
 //   - A one-shot invocation never enters the runtime-state table, so residency
@@ -44,11 +44,11 @@ final class PluginResourceDeclarationTests: XCTestCase {
         let totalseg = try XCTUnwrap(manifest.plugin(id: "totalsegmentator"))
         let total = totalseg.declaredRAMGB(forTask: "total")
 
-        // The measured peak was 20.9-23.2 GB. The declaration must cover it:
+        // The measured peak was 20.9-23.1 GB. The declaration must cover it:
         // under-declaring is the direction that admits an impossible job.
         XCTAssertGreaterThanOrEqual(
             total, 20.9,
-            "the `total` task declares \(total) GB but was measured at up to 23.2 GB")
+            "the `total` task declares \(total) GB but was measured at up to 23.1 GB")
     }
 
     /// Every declaration must be positive and plausible; a zero or negative

@@ -84,8 +84,9 @@ session-holding plugins, the exact-budget boundary, and live-headroom refusal.
 
 **And that is the problem.** The policy answers correctly the question it is
 asked, and the question is a manifest declaration. TotalSegmentator declared
-3.5 GB; measured peak was **20.9–23.4 GB**, cross-checked three ways and
-reproduced on a second series. On the 16 GB machine this policy targets, that
+3.5 GB; measured peak was **20.9–23.1 GB** over four recorded runs (20.85,
+21.40, 22.70, 23.10 GB), cross-checked three ways and reproduced on a second
+series. On the 16 GB machine this policy targets, that
 declaration admits a job needing more than the whole machine. A second defect
 compounded it: a running one-shot never entered the runtime-state table, so the
 heaviest process on the machine was invisible to admission and a resident engine
