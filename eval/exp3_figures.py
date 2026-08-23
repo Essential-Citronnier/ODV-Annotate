@@ -104,14 +104,21 @@ def collect(results_path: Path) -> tuple[dict, dict]:
         elif phase == "bench":
             entry["bench_ok"] = row["ok"]
             entry["bench_error"] = row.get("error")
-            # A run that recorded a substantive stage did load and exercise the
-            # model, even if a later stage failed. That distinction decides
-            # whether its peak RSS is a measurement of the plugin or of a
-            # Python interpreter that exited early.
+            # Whether the model was actually resident, which decides if the
+            # peak RSS measures the plugin or a Python interpreter that exited
+            # early.
+            #
+            # A recorded `model_load` stage is NOT sufficient evidence. Since
+            # the bench mode began attaching partial timings to failures, a
+            # load that raised part-way still reports the stage it died in --
+            # so SAM 3 hitting its licence gate and Gemma finding no Metal
+            # device both carry a `model_load` entry while never having held a
+            # model. What distinguishes them is a stage that can only be
+            # reached *after* weights are resident.
+            stages = row.get("stages_s", {})
             entry["model_ran"] = any(
-                key in row.get("stages_s", {})
-                for key in ("model_load", "encode", "inference",
-                            "Running segmentation"))
+                key in stages
+                for key in ("encode", "inference", "Running segmentation"))
             if not row["ok"]:
                 # A bench that could not run is a stated result, not a blank.
                 # The protocol error code is what distinguishes "the licence
@@ -170,8 +177,16 @@ def figure_stage_timing(header: dict, per_plugin: dict, out_path: Path,
         left = np.zeros(len(present))
         drawn = []
         for key, label, colour in stages:
-            values = np.array([per_plugin[p]["stages"].get(key, 0.0) or 0.0
-                               for p in present])
+            # A plugin whose model never became resident contributes nothing to
+            # the per-use panel. Its recorded `model_load` is the stage a
+            # failure died in, not a cost anyone pays, and drawing it as a bar
+            # would present a licence refusal and an absent GPU as though they
+            # were fast inference.
+            values = np.array([
+                (per_plugin[p]["stages"].get(key, 0.0) or 0.0)
+                if (title.startswith("One-time") or per_plugin[p].get("model_ran"))
+                else 0.0
+                for p in present])
             if not values.any():
                 continue
             ax.barh(y, values, left=left, color=colour, label=label,
@@ -341,6 +356,24 @@ def figure_declared_vs_measured(header: dict, per_plugin: dict,
                         f"corrected to {corrected:.1f} GB\nafter this measurement",
                         fontsize=7.2, color="#1d6f66", rotation=90,
                         va="center", ha="left")
+
+    # The completed bench run belongs on the chart too, plotted against the
+    # declaration in force when it ran -- which, after commit de234fe, is the
+    # corrected 23.5. It lands just below parity, and that is the point: it is
+    # the run that validates the correction, measured independently of the runs
+    # that motivated it.
+    for point in bench_points:
+        if not point["label"].startswith("TotalSeg"):
+            continue
+        ax_measure.scatter([point["declared"]], [point["peak"]], s=88,
+                           marker="D", color="#2a9d8f", zorder=5,
+                           edgecolor="white", linewidth=1.1)
+        ax_measure.annotate(
+            f"after correction\n{point['peak']:.2f} of {point['declared']:.1f} GB"
+            f" = {point['peak'] / point['declared']:.2f}\u00d7",
+            (point["declared"], point["peak"]), textcoords="offset points",
+            xytext=(-8, -30), fontsize=7.6, va="center", ha="right",
+            color="#1d6f66", weight="bold")
 
     for point in bench_points:
         if point["label"].startswith("TotalSeg"):

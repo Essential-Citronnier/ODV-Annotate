@@ -1265,6 +1265,11 @@ def phase_restart(recorder: Recorder, repo: Path, paths: EvalPaths,
                 "restart_cost_s": (round(import_s + load_s, 3)
                                    if load_s is not None else None),
                 "declared_ram_gb": plugin.get("ram_gb"),
+                # Recorded on every row for the same reason as the bench phase:
+                # a timing without its input is not a measurement of anything
+                # reproducible.
+                "input_slice_png": Path(slice_png).name,
+                "peak_rss_gb": (round(peak / 1e9, 3) if peak else None),
             }
             recorder.write(CaseResult(
                 experiment=EXPERIMENT, case_id=case_id, ok=(code == 0),

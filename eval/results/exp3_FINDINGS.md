@@ -38,17 +38,56 @@ AF_UNIX and loopback TCP alike. This splits the table in two.
 | SAM 2 | session | 3.0 GB | **1.45 GB** | 0.48× | 69 s | 184 MB in 24 s |
 | SAM 3 | session | 6.0 GB | not measured | — | 71 s | licence gate held |
 | Gemma 4 E4B | resident-server | 5.0 GB | not measured | — | 60 s | 5.18 GB in 879 s |
-| TotalSegmentator | one-shot | 3.5 GB | **20.85 GB** | **5.96×** | 176 s | 166 MB in 52 s |
+| TotalSegmentator | one-shot | 3.5 GB → 23.5 GB | **22.70 GB** | **6.5× as declared; 0.97× corrected** | 176 s | 166 MB in 52 s |
+
+### The corrected declaration, validated end to end
+
+After commits `de234fe` and `9a3f8f0`, TotalSegmentator completes the **whole**
+pipeline for the first time in this environment — segmentation, volume
+measurement, and DICOM SEG export — because the slice-thickness fix removed the
+export failure that previously truncated every run:
+
+| Stage | Time | |
+|---|---|---|
+| environment check | ~0 s | |
+| segmentation | 54.2 s | 80 structures |
+| volume measurement | 6.1 s | |
+| DICOM SEG export | 10.9 s | 314 MB written |
+| **total** | **76.4 s** | 412-slice CT, CPU-only, thread substitution |
+
+Peak RSS **22.70 GB against the corrected 23.5 GB declaration — a ratio of
+0.97×**. So the corrected figure is validated by an independent run that had
+no part in deriving it, and it is correct in the safe direction, with about
+0.8 GB of headroom. This is the check that the Finding 1 remedy actually
+holds, not merely that the number was raised.
+
+Note that the DICOM SEG export is **14% of total wall time** and was invisible
+in every earlier measurement, since it was the stage that used to fail. A
+one-shot's cost is not just its model.
 
 Stage detail for the two plugins whose models ran:
 
-- **SAM 2**: model load 11.3 s, encode 1701 ms/slice, decode 200 ms/prompt,
-  RLE 13 ms. **Encode is 8.5× decode.**
+- **SAM 2**: model load 4.5 s, encode 544 ms/slice, decode 30 ms/prompt,
+  RLE 5 ms. **Encode is 18.1× decode.**
+
+  These supersede an earlier set (load 11.3 s, encode 1701 ms, decode 200 ms,
+  ratio 8.5×) measured while a TotalSegmentator run was saturating the CPU.
+  The contended figures were wrong in a way worth naming: contention inflated
+  encode and decode unequally, so it compressed the *ratio* that justifies the
+  `session` execution model — understating it by better than half. Peak RSS was
+  unaffected (1.447 GB then, 1.451 GB now), which is what one would expect of
+  an allocation figure, and is a small check that the two runs measured the
+  same work.
 - **TotalSegmentator**: environment check ~0 s, segmentation 149.2 s,
   volume measurement 14.4 s, DICOM SEG export failed (below).
 
 Restart cost, measured by stopping a resident SAM 2 and re-serving the same
-prompt: **12.0 s cold, 8.8 s warm**. That is what an eviction costs the user.
+prompt: **2.9 s cold, 2.9 s warm**. That is what an eviction costs the user on
+this machine, CPU-only. Cold and warm agree because the cost is dominated by
+loading a 184 MB checkpoint into a torch graph rather than by reading it off
+disk, so a warm filesystem cache buys almost nothing — which is itself the
+useful result: the price of an eviction cannot be cached away. Supersedes
+12.0 s / 8.8 s measured under CPU contention.
 
 ## Finding 1 — TotalSegmentator's declared memory is wrong by ~6×
 
@@ -66,7 +105,12 @@ prompt: **12.0 s cold, 8.8 s warm**. That is what an eviction costs the user.
 > closed.
 
 `ram_gb: 3.5` against a measured peak of **20.85 GB** on a 411-slice abdominal
-CT (`bench/totalsegmentator`, `input_series=tcia_1556218467652708`).
+CT. That original bench row was superseded when the phase was re-run to record
+its input series (and again after the export fix let the pipeline complete), so
+the figure survives here and in the prose below rather than in the current
+JSONL; the run that replaced it on the same series measured 22.70 GB, and the
+cross-checks below measured 23.10 and 21.40 GB. Every one of those is ~6× the
+3.5 GB that was declared at the time.
 
 The `crosscheck` phase re-measures the same pipeline with three instruments
 that share no code path — the parent's per-child accounting, the child's own
@@ -80,12 +124,12 @@ two different series. All rows are in the JSONL under
 | `tcia_2121018880599426` | 493 | 21.40 GB | 21.40 GB | 21.40 GB | 0.00 GB | **6.11×** |
 
 Three instruments agreeing to the byte on two independent volumes, with the
-overrun reproducing on both, is the evidence for this finding. The bench figure
-of 20.85 GB and the cross-check figure of 23.10 GB are the same pipeline on the
-same series, measured with and without the adapter's DICOM SEG export stage
-attached. Across the three independent pipeline runs recorded — one bench and
-two cross-checks — the peak spans **20.9–23.1 GB, i.e. 5.96× to 6.60× the
-declaration whichever run you take**.
+overrun reproducing on both, is the evidence for this finding. Across every
+pipeline run measured on this cohort — two cross-checks and the completed bench
+run above — the peak spans **21.4–23.1 GB, i.e. 6.1× to 6.6× the 3.5 GB that
+was declared**. The earlier 20.85 GB reading, taken before the export fix let
+the pipeline finish, sits just below that band and does not change the
+conclusion.
 
 External sampling with `psutil` is deliberately not among the instruments:
 this sandbox denies the `sysctl` it needs, so it reports zero and would look
@@ -126,9 +170,12 @@ estimate of it.
 Two acquisition attempts are on the record. The adapter's own fetch is
 recorded as `crosscheck/totalsegmentator/fullres/tcia_1556218467652708`
 carrying the `ProxyError` from the GitHub releases host. A second attempt
-through a network path that does reach that host retrieved three of the five
-archives in ~17 minutes before exceeding the time budget allotted to this
-measurement, so it was stopped rather than run to completion.
+through a network path that does reach that host was stopped after ~17 minutes
+on the time budget allotted to this measurement, having completed **one** of
+the five archives (225 MB); a second was partial and a third was a 9-byte stub
+from a mis-derived filename. None of the fetched files survive in the
+workspace, so the full-resolution figure has no partial result behind it
+either.
 
 **This is a gap, not an estimate.** The honest statement is that the
 manifest's single figure has been shown wrong by ~6× for the default

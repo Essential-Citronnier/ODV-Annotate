@@ -50,7 +50,7 @@ instances it references into the directory above and writes `SAMPLE.md`.
 > **Note on the source series.** The instances in `source_series/` are a
 > *prepared* copy: the public cohort omits `SliceThickness` entirely, and the
 > adapter cannot currently write a SEG without it (see the findings in
-> `docs/EVALUATION.md`). The prepared copy adds the value implied by the slice
+> `eval/results/exp1_findings.md`). The prepared copy adds the value implied by the slice
 > positions and changes nothing else. Load the copy, not the original archive
 > download — the SEG references these instances.
 
@@ -77,7 +77,7 @@ Check, and record in the table:
 |---|---|---|
 | S1 | The SEG loads without an error dialog | A reader rejecting the file is a conformance failure regardless of what the automated audit said |
 | S2 | The segment list shows the expected number of segments | Segments silently dropped on read indicate a per-frame or segment-description problem |
-| S3 | Segment names match the anatomy (`liver`, `aorta`, …) and are not `Segment_1`, `Segment_2`, … | Generic names mean the viewer fell back to numbering because it could not use the labels or the codes. See the coding finding in `docs/EVALUATION.md` — this is the check most likely to fail |
+| S3 | Segment names match the anatomy (`liver`, `aorta`, …) and are not `Segment_1`, `Segment_2`, … | Generic names mean the viewer fell back to numbering because it could not use the labels or the codes. See the coding finding in `eval/results/exp1_findings.md` — this is the check most likely to fail |
 | S4 | Each segment is a distinct colour, and two segments are not the same colour | The adapter does not set `RecommendedDisplayCIELabValue`, so colours are assigned by the viewer |
 | S5 | Masks overlay the correct anatomy in the axial view | Wrong placement means a geometry or frame-position problem the automated round trip would not catch |
 | S6 | Scroll from the first to the last slice: the mask follows the same structure throughout and does not appear inverted top-to-bottom relative to the CT | **z-flip.** The classic DICOM SEG defect. Compare against a structure with obvious cranio-caudal asymmetry — liver low, lungs high |
