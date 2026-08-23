@@ -1634,10 +1634,14 @@ def make_figures(results_path: Path, figures_dir: Path) -> list[Path]:
                        loc="left", pad=9)
         panel_letter(ax_b, "b")
 
+    # Wrapped onto two lines: as one left-anchored line this ran past the right
+    # edge of the canvas and the device caveat — the part a reader most needs —
+    # was the piece that got clipped.
     fig.suptitle(
-        f"SAM 2 (sam2.1-hiera-small) over the ODV plugin protocol · {chip} · "
+        f"SAM 2 (sam2.1-hiera-small) over the ODV plugin protocol · {chip}\n"
         f"{device_note} · mean of {n_series} slices in b",
-        fontsize=7, y=0.985, color="#555555", x=0.09, ha="left")
+        fontsize=7, y=1.005, color="#555555", x=0.09, ha="left",
+        linespacing=1.5)
     path = figures_dir / "exp4_encode_decode.png"
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
