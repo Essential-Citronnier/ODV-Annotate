@@ -49,11 +49,18 @@ export failure that previously truncated every run:
 
 | Stage | Time | |
 |---|---|---|
-| environment check | ~0 s | |
+| environment check | 0.001 s | |
 | segmentation | 54.2 s | 80 structures |
 | volume measurement | 6.1 s | |
 | DICOM SEG export | 10.9 s | 314 MB written |
-| **total** | **76.4 s** | 412-slice CT, CPU-only, thread substitution |
+| **pipeline total** | **71.2 s** | sum of the adapter's own stages |
+| **subprocess wall** | **76.4 s** | 412-slice CT, CPU-only, thread substitution |
+
+The 5.2 s between the two is interpreter startup and the torch/nnU-Net import
+chain, which happens before the adapter's first stage boundary and so is
+outside every figure the adapter reports about itself. It is a real cost the
+user pays on every one-shot invocation — a one-shot cannot amortise it the way
+a resident server does — so both numbers are given rather than picking one.
 
 Peak RSS **22.70 GB against the corrected 23.5 GB declaration — a ratio of
 0.97×**. So the corrected figure is validated by an independent run that had
@@ -61,7 +68,7 @@ no part in deriving it, and it is correct in the safe direction, with about
 0.8 GB of headroom. This is the check that the Finding 1 remedy actually
 holds, not merely that the number was raised.
 
-Note that the DICOM SEG export is **14% of total wall time** and was invisible
+Note that the DICOM SEG export is **15% of the pipeline** (10.9 of 71.2 s) and was invisible
 in every earlier measurement, since it was the stage that used to fail. A
 one-shot's cost is not just its model.
 
@@ -317,12 +324,20 @@ holding it whole. Recorded as
 `{16gb,32gb}/totalseg-refused-on-corrected-declaration` and
 `48gb/totalseg-admitted-on-corrected-declaration`.
 
-A note on the scenario suite itself: three eviction-mechanics scenarios now
-pin the pre-correction 3.5 GB figure rather than reading the manifest. They
-exercise LRU ordering, multi-eviction and the one-shot sibling rule, and with
-a live 23.5 they would refuse on size before reaching any of that — still
-reporting a result while testing nothing. The scenarios that are *about* the
-declaration continue to read it live.
+A note on the scenario suite itself: four eviction-mechanics scenarios now pin
+the pre-correction 3.5 GB figure rather than reading the manifest. They
+exercise LRU ordering, multi-eviction, the one-shot sibling rule and the
+residency-reporting pair, and with a live 23.5 they would refuse on size
+before reaching any of that — still reporting a result while testing nothing.
+The scenarios that are *about* the declaration continue to read it live.
+
+Pinning applies to **both sides** of a scenario — the request and any resident
+entry for the same plugin. An earlier version pinned only the request, so
+`oneshot-not-exempt-from-own-resident-sibling` described a machine on which
+one plugin held two different declarations at once (resident at the live
+23.5, requesting at 3.5), giving a `residentDemandGB` of 28.5 that
+corresponded to no real configuration. It now reports 8.5 = 3.5 + 5.0, which
+is the arithmetic the scenario claims to test.
 
 ## Arbitration: 20/20 scenarios match the shipped policy
 

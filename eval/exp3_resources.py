@@ -953,8 +953,16 @@ def arbitration_scenarios(manifest: dict) -> list[dict]:
     TS_PRE_CORRECTION = 3.5
 
     def residency(plugin_id: str, last_used: float = 0.0,
-                  evictable: bool = True) -> dict:
-        return {"id": plugin_id, "ram": ram[plugin_id],
+                  evictable: bool = True, ram_gb: float | None = None) -> dict:
+        """One resident engine as the arbiter sees it.
+
+        `ram_gb` overrides the manifest declaration. It exists because a
+        scenario that pins a plugin's declared figure on the request side must
+        pin it on the resident side too: the same plugin appearing at two
+        different declarations within one scenario is not a test of anything
+        the host can produce.
+        """
+        return {"id": plugin_id, "ram": ram[plugin_id] if ram_gb is None else ram_gb,
                 "lastUsed": last_used, "evictable": evictable}
 
     return [
@@ -1015,7 +1023,13 @@ def arbitration_scenarios(manifest: dict) -> list[dict]:
         {"name": "16gb/oneshot-not-exempt-from-own-resident-sibling",
          "physicalGB": 16.0,
          "request": {"id": "totalsegmentator", "ram": TS_PRE_CORRECTION},
-         "residents": [residency("totalsegmentator", last_used=0),
+         # Pinned on the resident side as well as the request side. The
+         # resident and the requester are the SAME plugin here -- that is the
+         # whole point of the scenario -- so reading the live manifest for one
+         # and the pinned figure for the other would describe a machine where
+         # one plugin holds two different declarations at once.
+         "residents": [residency("totalsegmentator", last_used=0,
+                                 ram_gb=TS_PRE_CORRECTION),
                        residency("gemma-4-e4b", last_used=100)],
          "oneShot": True},
         # Live headroom overrides a comfortable declared budget: the machine is
@@ -1042,7 +1056,13 @@ def arbitration_scenarios(manifest: dict) -> list[dict]:
         # the cost of the omission rather than a fault in the policy.
         {"name": "16gb/start-server-while-oneshot-runs-reported", "physicalGB": 16.0,
          "request": {"id": "gemma-4-e4b", "ram": gemma},
-         "residents": [residency("totalsegmentator", evictable=False)]},
+         # Pinned: this pair is about whether the policy is TOLD about the
+         # running one-shot, and its arithmetic is 3.5 + 5.0 against an 8 GiB
+         # budget. With the corrected 23.5 the reported row would still
+         # refuse, but on size alone -- it would pass while no longer
+         # exercising the non-evictability that makes the pair meaningful.
+         "residents": [residency("totalsegmentator", evictable=False,
+                                 ram_gb=TS_PRE_CORRECTION)]},
         {"name": "16gb/start-server-while-oneshot-runs-unreported",
          "physicalGB": 16.0,
          "request": {"id": "gemma-4-e4b", "ram": gemma},
