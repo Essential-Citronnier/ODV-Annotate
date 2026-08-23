@@ -1,5 +1,37 @@
 # Follow-up paper — working outline
 
+> **Status, after the evaluation.** The four experiments this outline called for
+> have run on public data requiring no ethics approval, plus a fifth on
+> deployability. What follows is updated to record what they established. The
+> headline is not the plugin store; it is that **evaluating the architecture
+> found three defects in it that reading the code did not**, and that is the
+> paper's strongest argument for the approach.
+>
+> | Experiment | Result | Where |
+> |---|---|---|
+> | 1 · Standard conformance | dcmqi decodes 30/30 structures losslessly, geometry preserved; 15 IOD checks pass on 6 cases; 2 WARNs stand as an interoperability defect | `eval/results/exp1_findings.md` |
+> | 2 · Pipeline fidelity | 689 per-structure comparisons, minimum Dice 1.000000, 0 unplaced frames, over 7 TCIA series | `eval/results/exp2_tables.md` |
+> | 3 · Resources & arbitration | 20 arbitration scenarios, 0 mismatches; declared memory found wrong by 6× | `eval/results/exp3_FINDINGS.md` |
+> | 4 · Session model | encode costs 17.1× a decode — but the alternative costs 2–5% of a decode, so the ratio does **not** justify the lifecycle on performance grounds | `eval/results/exp4_session_REPORT.md` |
+> | 5 · Deployability | 9/9 checks on the packaged app after fixing three defects that made a shipped build fail | `eval/results/exp5_deployability.jsonl` |
+>
+> **Defects the evaluation found and drove fixes for**, each of which would have
+> shipped: a declared memory figure wrong by 6× (admitting, on a 16 GB machine, a
+> job needing more than the machine); a running one-shot invisible to the memory
+> arbiter; a DICOM SEG export that failed on **every** series in a public
+> collection because it required an attribute the standard makes optional; and a
+> packaged application that bundled no adapters and broke its own code signature
+> on first launch.
+>
+> **Claims that must be weakened from the original framing.** The session
+> execution model was justified in the architecture document by the
+> encode/decode cost ratio. That ratio is real and large, but the experiment
+> measured the alternative too, and an implicit content-addressed cache in a
+> resident server costs 1.8–4.7 ms per prompt. So the ratio rules out *no
+> caching*; it does not select the session lifecycle. The defensible
+> justification is lifecycle control and enforceable memory bounds. State it
+> that way.
+
 Successor to Heo et al., *OpenDicomViewer: A Lightweight Open-Source DICOM
 Viewer for macOS Built with Swift*, JIIM 2026.
 
