@@ -1,17 +1,86 @@
-# Gemma 4 E4B resident adapter (Apple Silicon, macOS 14+).
+# Gemma 4 E4B resident adapter (Apple Silicon, macOS 14+) — full lock.
 #
 # Installed into this plugin's own virtualenv (PLUGIN_PROTOCOL.md section 7).
 # MLX and torch are not co-installable in practice, which is why the SAM and
 # TotalSegmentator adapters have separate environments.
+#
+# The pins below are exactly mlx-server/requirements.txt (the built-in AI
+# server runs the same model), resolved for the bundled CPython 3.11 on macOS
+# 14 arm64. Keep the two files identical below their headers; a test checks.
 
-mlx>=0.22.0
-mlx-vlm>=0.4.0
-
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-
-Pillow>=10.0.0
-pydantic>=2.0.0
-
-# Weight acquisition (PLUGIN_PROTOCOL.md section 4b).
-huggingface_hub>=0.24.0
+aiohappyeyeballs==2.7.1   # via aiohttp
+aiohttp==3.14.5           # via fsspec
+aiosignal==1.4.0          # via aiohttp
+annotated-doc==0.0.5      # via fastapi, typer
+annotated-types==0.8.0    # via pydantic
+anyio==4.15.1             # via httpx, starlette, watchfiles
+attrs==26.1.0             # via aiohttp
+certifi==2026.7.22        # via httpcore, httpx, requests
+cffi==2.1.1               # via miniaudio, sounddevice
+charset-normalizer==3.5.2  # via requests
+click==8.5.0              # via huggingface-hub, uvicorn
+datasets==5.1.0           # via mlx-vlm
+dill==0.4.1               # via datasets, multiprocess
+fastapi==0.139.0          # via mlx-vlm, -r top.in
+filelock==4.1.1           # via datasets, huggingface-hub
+frozenlist==1.8.0         # via aiohttp, aiosignal
+fsspec==2026.7.0          # via datasets, huggingface-hub
+h11==0.16.0               # via httpcore, uvicorn
+hf-xet==1.7.0             # via huggingface-hub
+httpcore==1.0.9           # via httpx
+httptools==0.9.0          # via uvicorn
+httpx==0.28.1             # via huggingface-hub
+huggingface-hub==1.31.0   # via datasets, mlx-audio, tokenizers, transformers, -r top.in
+idna==3.20                # via anyio, httpx, requests, yarl
+jinja2==3.1.6             # via mlx-lm
+llguidance==1.9.1         # via mlx-vlm
+markdown-it-py==4.2.0     # via rich
+markupsafe==3.0.4         # via jinja2
+mdurl==0.1.2              # via markdown-it-py
+miniaudio==1.71           # via mlx-audio, mlx-vlm
+mlx-audio==0.4.6          # via mlx-vlm
+mlx-lm==0.31.3            # via mlx-audio, mlx-vlm, -r top.in
+mlx-metal==0.32.0         # via mlx
+mlx-vlm==0.6.4            # via -r top.in
+mlx==0.32.0               # via mlx-audio, mlx-lm, mlx-vlm, -r top.in
+multidict==7.1.0          # via aiohttp, yarl
+multiprocess==0.70.19     # via datasets
+numpy==2.4.6              # via datasets, mlx-audio, mlx-lm, mlx-vlm, opencv-python, pandas, scipy, transformers
+opencv-python==5.0.0.93   # via mlx-vlm
+packaging==26.3           # via datasets, huggingface-hub, transformers
+pandas==3.0.6             # via datasets
+pillow==12.3.0            # via mlx-vlm, -r top.in
+propcache==0.5.4          # via aiohttp, yarl
+protobuf==7.36.2          # via mlx-lm
+pyarrow==26.0.0           # via datasets
+pycparser==3.11           # via cffi
+pydantic-core==2.46.5     # via pydantic
+pydantic==2.13.5          # via fastapi, -r top.in
+pygments==2.21.0          # via rich
+python-dateutil==2.9.0.post0  # via pandas
+python-dotenv==1.2.4      # via uvicorn
+python-multipart==0.0.32  # via mlx-vlm
+pyyaml==6.0.3             # via datasets, huggingface-hub, mlx-lm, transformers, uvicorn
+regex==2026.9.29          # via transformers
+requests==2.34.2          # via mlx-vlm
+rich==15.0.0              # via typer
+safetensors==0.8.0        # via transformers
+scipy==1.17.1             # via mlx-audio
+sentencepiece==0.2.2      # via mlx-lm
+shellingham==1.5.4        # via typer
+six==1.17.0               # via python-dateutil
+sounddevice==0.5.6        # via mlx-audio
+starlette==1.6.0          # via fastapi, mlx-vlm, -r top.in
+tokenizers==0.22.2        # via transformers
+tqdm==4.70.1              # via datasets, huggingface-hub, mlx-audio, mlx-vlm, transformers
+transformers==5.12.1      # via mlx-audio, mlx-lm, mlx-vlm, -r top.in
+typer==0.27.3             # via transformers
+typing-extensions==4.16.0  # via aiohttp, aiosignal, anyio, fastapi, huggingface-hub, pydantic, pydantic-core, starlette, typing-inspection
+typing-inspection==0.4.4  # via fastapi, pydantic
+urllib3==2.8.0            # via requests
+uvicorn==0.50.2           # via mlx-vlm, -r top.in
+uvloop==0.23.0            # via uvicorn
+watchfiles==1.3.0         # via uvicorn
+websockets==17.2          # via uvicorn
+xxhash==4.0.1             # via datasets
+yarl==1.25.1              # via aiohttp

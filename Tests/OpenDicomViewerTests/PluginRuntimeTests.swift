@@ -257,6 +257,24 @@ final class PluginRuntimeTests: XCTestCase {
         XCTAssertEqual(store.state(for: Self.gemmaRef), .ready)
     }
 
+    /// Section 7: a downloaded weight directory without the host's completion
+    /// marker may hold a download a crash cut short; it is not ready.
+    func testReverifyRequiresTheDownloadCompletionMarker() throws {
+        let store = PluginInstallStore(paths: makePaths())
+        let manifest = try fixtureManifest()
+
+        try store.update(Self.gemmaRef) { record in
+            record.installState = .ready
+            record.venvPath = "/present/.venv/bin/python3"
+            record.weightPaths = ["gemma-weights": "/present/weights"]
+            record.installedWeightIDs = ["gemma-weights"]
+        }
+
+        let marker = "/present/weights/" + PluginPaths.weightCompletionMarker
+        _ = store.reverify(manifest: manifest) { $0.hasPrefix("/present") && $0 != marker }
+        XCTAssertEqual(store.state(for: Self.gemmaRef), .notInstalled)
+    }
+
     func testReverifySendsAMissingManualCheckpointBackToTheLicenseGate() throws {
         let store = PluginInstallStore(paths: makePaths())
         let manifest = try fixtureManifest()

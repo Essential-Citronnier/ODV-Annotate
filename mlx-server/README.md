@@ -6,8 +6,10 @@ Local AI inference server for DICOM annotation using **Gemma 4 E4B** (4-bit quan
 
 - **Apple Silicon Mac** (M1 Pro or better recommended)
 - **macOS 14.0+** (Sonoma)
-- **Python 3.10+**
-- **16GB+ RAM** recommended (model uses ~4-5GB)
+- **Python 3.11–3.13** (the app bundles CPython 3.11; `requirements.txt` is a
+  full lock resolved for it)
+- **16GB+ RAM** recommended (model uses ~5GB)
+- **~8GB free disk** on first run (~1.5GB packages + ~5.2GB model)
 
 ## Quick Start
 
@@ -19,7 +21,10 @@ cd mlx-server
 First run will:
 1. Create a Python virtual environment
 2. Install dependencies (mlx, mlx-vlm, fastapi, etc.)
-3. Download the model from Hugging Face (~4.5GB, one-time)
+3. Download the model from Hugging Face (~5.2GB, one-time) into
+   `~/.cache/huggingface/hub` (`HF_HOME` / `HF_HUB_CACHE` move it). While it
+   downloads, `/health` reports `"phase": "downloading"` with
+   `download_bytes` / `download_total_bytes`.
 4. Start the server on `http://127.0.0.1:8741`
 
 ## Usage

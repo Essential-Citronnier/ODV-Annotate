@@ -8,6 +8,7 @@ import base64
 import io
 import os
 import unittest
+from pathlib import Path
 
 os.environ["ODV_AI_TOKEN"] = "test-token"
 os.environ.pop("ODV_PARENT_PID", None)
@@ -135,6 +136,8 @@ class HTTPTests(unittest.TestCase):
     def setUp(self):
         server._model = None
         server._load_error = None
+        server._phase = "starting"
+        server._expected_bytes = None
 
     def test_missing_token_rejected(self):
         self.assertEqual(self.client.get("/health").status_code, 401)
@@ -157,6 +160,37 @@ class HTTPTests(unittest.TestCase):
         body = self.client.get("/health", headers=AUTH).json()
         self.assertEqual(body["status"], "error")
         self.assertIn("offline", body["error"])
+
+    def test_health_reports_download_progress(self):
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as cache:
+            blobs = Path(cache) / ("models--" + server.MODEL_ID.replace("/", "--")) / "blobs"
+            blobs.mkdir(parents=True)
+            (blobs / "aaa").write_bytes(b"x" * 1000)
+            (blobs / "bbb.incomplete").write_bytes(b"x" * 500)
+            with mock.patch.object(server, "_hub_cache_dir", return_value=Path(cache)):
+                self.assertFalse(server.snapshot_present())
+                server._phase = "downloading"
+                server._expected_bytes = 5000
+                body = self.client.get("/health", headers=AUTH).json()
+                self.assertEqual(body["status"], "loading")
+                self.assertEqual(body["phase"], "downloading")
+                self.assertEqual(body["download_bytes"], 1500)
+                self.assertEqual(body["download_total_bytes"], 5000)
+
+                snapshot = blobs.parent / "snapshots" / server.MODEL_REVISION
+                snapshot.mkdir(parents=True)
+                (snapshot / "config.json").write_text("{}")
+                self.assertFalse(server.snapshot_present())  # no weights yet
+                (snapshot / "model.safetensors").write_bytes(b"w")
+                self.assertTrue(server.snapshot_present())
+
+        server._phase = "loading"
+        body = self.client.get("/health", headers=AUTH).json()
+        self.assertEqual(body["phase"], "loading")
+        self.assertIsNone(body["download_bytes"])
 
     def test_no_cors_headers(self):
         response = self.client.options(

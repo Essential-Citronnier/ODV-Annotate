@@ -354,6 +354,8 @@ struct PluginEnvironmentLocator: Sendable {
         if environment["HOME"] == nil {
             environment["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
         }
+        // pip and huggingface_hub ignore the macOS proxy settings.
+        environment = SystemProxyEnvironment.applying(to: environment)
         // Unbuffered stdout, so progress lines reach the host as they are printed
         // rather than when the child's block buffer happens to fill.
         environment["PYTHONUNBUFFERED"] = "1"
@@ -389,6 +391,32 @@ enum PluginHostEnvironment {
     static let licenseKey = "ODV_PLUGIN_LICENSE_KEY"
 }
 
+// MARK: - Network preflight
+
+enum PluginNetworkCheck {
+    /// Probe each URL once (system proxy applies, as URLSession uses it) and
+    /// describe the first that does not answer. Any HTTP status counts as an
+    /// answer: the question is reachability, not what the server says.
+    static let live: @Sendable ([URL]) async -> String? = { urls in
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 10
+        let session = URLSession(configuration: configuration)
+        defer { session.finishTasksAndInvalidate() }
+        for url in urls {
+            var request = URLRequest(url: url)
+            request.httpMethod = "HEAD"
+            do {
+                _ = try await session.data(for: request)
+            } catch {
+                return "Could not reach \(url.host ?? url.absoluteString) "
+                    + "(\(error.localizedDescription)). Check your internet connection "
+                    + "or proxy settings, then try again."
+            }
+        }
+        return nil
+    }
+}
+
 // MARK: - Installer
 
 /// Weight acquisition hook, spawned as
@@ -408,6 +436,7 @@ enum PluginInstallHook {
                          "--source", weight.source.rawValue,
                          "--dest", destination.path]
         if let repo = weight.repo { arguments += ["--repo", repo] }
+        if let revision = weight.revision { arguments += ["--revision", revision] }
         if let task = weight.task { arguments += ["--task", task] }
         return arguments
     }
@@ -482,6 +511,9 @@ final class ErrorEnvelopeBox: @unchecked Sendable {
 struct PluginInstaller: Sendable {
     let locator: PluginEnvironmentLocator
     let store: PluginInstallStore
+    /// Checks that the hosts an install needs answer, returning a message
+    /// when one does not. Nil skips the check (tests, offline fixtures).
+    var networkCheck: (@Sendable ([URL]) async -> String?)? = nil
 
     /// Called with each state transition, on an arbitrary executor.
     typealias StateSink = @Sendable (PluginTaskRef, PluginInstallState) -> Void
@@ -492,9 +524,13 @@ struct PluginInstaller: Sendable {
 
     // MARK: Readiness inspection
 
-    /// Whether the plugin's venv exists and looks usable.
+    /// Whether the plugin's venv exists and still belongs to the interpreter
+    /// that would rebuild it. One made while the app ran from the DMG or a
+    /// translocated path links to an interpreter that is gone once the app
+    /// runs from /Applications; it is rebuilt rather than reused.
     func hasVenv(_ pluginID: String) -> Bool {
-        FileManager.default.fileExists(atPath: paths.venvPython(pluginID).path)
+        PythonVenvCheck.isUsable(venv: paths.venv(pluginID),
+                                 python: locator.pythonOverride == nil ? locator.bundledPython : nil)
     }
 
     /// Destination directory for a weight, and for `.manual` weights the exact
@@ -653,8 +689,33 @@ struct PluginInstaller: Sendable {
             return fail("Could not create the plugin directory: \(error.localizedDescription)")
         }
 
+        // Step 0: preflight. Fail now, with a reason, rather than minutes
+        // into a download that cannot finish.
+        let needsVenv = !hasVenv(plugin.id)
+        let alreadyPresent = Set(presentWeights(plugin: plugin, task: task))
+        let toDownload = task.weights.filter { $0.source != .manual && !alreadyPresent.contains($0.id) }
+        let requiredBytes = Int64(
+            (toDownload.reduce(0) { $0 + $1.sizeGB } * 1.1 + (needsVenv ? 2 : 0)) * 1_000_000_000)
+        if requiredBytes > 0,
+           let message = LocalAIDiskSpace.shortfallMessage(
+            requiredBytes: requiredBytes,
+            availableBytes: LocalAIDiskSpace.availableBytes(at: paths.pluginRoot(plugin.id)),
+            what: plugin.name) {
+            return fail(message)
+        }
+        if let networkCheck {
+            var hosts: [URL] = []
+            if needsVenv { hosts.append(URL(string: "https://pypi.org/simple/pip/")!) }
+            if toDownload.contains(where: { $0.source == .huggingface }) {
+                hosts.append(URL(string: "https://huggingface.co/api/models")!)
+            }
+            if !hosts.isEmpty, let message = await networkCheck(hosts) {
+                return fail(message)
+            }
+        }
+
         // Step 1: environment.
-        if !hasVenv(plugin.id) {
+        if needsVenv {
             publish(.installing(progress: 0.02))
             guard let python = locator.findPython3() else {
                 return fail("No usable Python 3 interpreter was found.")
@@ -664,7 +725,9 @@ struct PluginInstaller: Sendable {
             do {
                 let outcome = try await PluginProcessRunner.run(
                     executable: URL(fileURLWithPath: python),
-                    arguments: ["-m", "venv", paths.venv(plugin.id).path],
+                    // --clear: a broken venv (dangling interpreter links) is
+                    // rebuilt from scratch rather than patched over.
+                    arguments: ["-m", "venv", "--clear", paths.venv(plugin.id).path],
                     environment: locator.processEnvironment(for: plugin.id),
                     onStdoutLine: { log($0) },
                     onStderrLine: { log($0) })

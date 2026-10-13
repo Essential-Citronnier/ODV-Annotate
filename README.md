@@ -68,21 +68,32 @@ Download the latest `.dmg` from [Releases](../../releases), open it, and drag **
 
 ### First-Run AI Setup
 
-On first launch, the app automatically:
+Nothing is downloaded at launch. The first time you use AI (press `G`, `⌘G`,
+or choose an item in the **AI** menu), the app asks once whether to enable
+local AI. If you agree, it:
 
-1. Extracts the bundled Python 3.11 runtime
-2. Creates an isolated virtual environment
-3. Installs MLX and dependencies
-4. Downloads the Gemma 4 E4B model (~4.5GB, one-time)
+1. Creates an isolated virtual environment from the Python 3.11 runtime that
+   ships inside the app (it is already unpacked; there is nothing to extract)
+   in `~/Library/Application Support/OpenDicomViewer/mlx-server/.venv`
+2. Installs MLX and the other pinned Python packages (~1.5 GB)
+3. Starts the AI server on `http://127.0.0.1:8741`, which downloads the Gemma 4
+   E4B model (~5.2 GB, one-time) into the Hugging Face cache,
+   `~/.cache/huggingface/hub`
+4. Runs the analysis you asked for as soon as the model is loaded
 
-After setup, the AI server starts on `http://127.0.0.1:8741`. You can also control it from the **AI** menu.
+Expect 10–30 minutes on a first run, depending on your connection; the AI
+inspector shows download progress and the server log, and you can keep working
+meanwhile. Later launches only load the model (a few seconds). The system
+proxy configured in System Settings is used for the downloads. You can also
+start, restart or stop the server from the **AI** menu.
 
 ### System Requirements
 
 - **Apple Silicon Mac** (M1 Pro or better recommended)
 - **macOS 14.0+** (Sonoma)
-- **16GB+ RAM** recommended (model uses ~4-5GB)
-- **5GB+ free disk space** for the AI model
+- **16GB+ RAM** recommended (the model uses ~5 GB while loaded)
+- **~8 GB free disk space** for a first AI setup: ~1.5 GB of Python packages
+  plus the ~5.2 GB model, with headroom for the download
 
 > No Python installation required — a standalone Python runtime is bundled with the app.
 
@@ -144,7 +155,7 @@ OpenDicomViewer-Annotate.app/
         └── bin/python3
 ```
 
-> Python packages (MLX, mlx-vlm, FastAPI) and the Gemma 4 E4B model are downloaded on first launch into `~/Library/Application Support/OpenDicomViewer/`.
+> Python packages (MLX, mlx-vlm, FastAPI) are installed on first AI use into `~/Library/Application Support/OpenDicomViewer/`; the Gemma 4 E4B model is downloaded into the Hugging Face cache, `~/.cache/huggingface/hub`.
 
 ### [v1.2.0](https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v1.2.0)
 
@@ -182,7 +193,7 @@ than fetched at runtime, and each plugin gets its own virtualenv.
 
 | Plugin | Execution | Produces | Weights | Licence |
 |---|---|---|---|---|
-| Gemma 4 E4B (MLX) | resident-server | text, boxes | 4.5 GB | Apache-2.0 |
+| Gemma 4 E4B (MLX) | resident-server | text, boxes | 5.2 GB | Apache-2.0 |
 | SAM 2 | session | 2D masks | 0.2 GB | Apache-2.0 |
 | SAM 3 | session | 2D masks | 3.4 GB | SAM Licence — accept terms, place checkpoint |
 | TotalSegmentator (total) | one-shot | DICOM SEG, volumes | 0.2 GB | Apache-2.0 / CC BY 4.0 |
@@ -194,7 +205,12 @@ application never transmits your credentials to the licensing site.
 
 Memory is arbitrated from the declared figures: on a 16 GB machine, starting a
 segmentation stops a resident language model for the duration and restarts it
-afterwards, rather than letting both compete.
+afterwards, rather than letting both compete. The built-in AI server counts
+too, and it and the Gemma plugin never run at the same time (starting one stops
+the other), so the model is never loaded twice. A plugin that declares more
+memory than plugins may use on this Mac (half of it; three quarters for one-shot
+jobs) is shown as unavailable in the store, before its download. Resident
+plugins start on first use; there is no need to press Start first.
 
 Writing a new adapter: [`PLUGIN_PROTOCOL.md`](PLUGIN_PROTOCOL.md) is the
 contract, [`plugins/README.md`](plugins/README.md) is the how-to, and

@@ -12,7 +12,7 @@
       "entry": "server.py",
       "requirements": "requirements.txt",
       "ram_gb": 5.0,
-      "disk_gb": 4.8,
+      "disk_gb": 6.7,
       "requires_apple_silicon": true,
       "tasks": [
         {
@@ -36,7 +36,8 @@
               "id": "gemma-4-e4b-it-4bit",
               "source": "huggingface",
               "repo": "mlx-community/gemma-4-E4B-it-4bit",
-              "size_gb": 4.5
+              "revision": "475b9088d29754a3379866cf5aeb6b41acd313c2",
+              "size_gb": 5.2
             }
           ],
           "options": {
@@ -74,7 +75,8 @@
               "id": "gemma-4-e4b-it-4bit",
               "source": "huggingface",
               "repo": "mlx-community/gemma-4-E4B-it-4bit",
-              "size_gb": 4.5
+              "revision": "475b9088d29754a3379866cf5aeb6b41acd313c2",
+              "size_gb": 5.2
             }
           ]
         },
@@ -99,7 +101,8 @@
               "id": "gemma-4-e4b-it-4bit",
               "source": "huggingface",
               "repo": "mlx-community/gemma-4-E4B-it-4bit",
-              "size_gb": 4.5
+              "revision": "475b9088d29754a3379866cf5aeb6b41acd313c2",
+              "size_gb": 5.2
             }
           ]
         }

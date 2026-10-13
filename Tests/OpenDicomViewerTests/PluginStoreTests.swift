@@ -108,7 +108,7 @@ final class PluginStoreTests: XCTestCase {
 
         XCTAssertEqual(row.pluginName, "Gemma 4 E4B (MLX)")
         XCTAssertEqual(row.taskLabel, "Analyze Image")
-        XCTAssertEqual(row.sizeGB, 4.5, accuracy: 0.0001)
+        XCTAssertEqual(row.sizeGB, 5.2, accuracy: 0.0001)
         XCTAssertEqual(row.ramGB, 5.0, accuracy: 0.0001)
         XCTAssertEqual(row.license.identifier, "Apache-2.0")
         XCTAssertEqual(row.license.gate, .open)
@@ -127,7 +127,7 @@ final class PluginStoreTests: XCTestCase {
         XCTAssertEqual(sam2.sizeText, "184 MB")
 
         let gemma = try XCTUnwrap(store.row(for: gemmaAnalyze))
-        XCTAssertEqual(gemma.sizeText, "4.5 GB")
+        XCTAssertEqual(gemma.sizeText, "5.2 GB")
     }
 
     // MARK: - Deterministic ordering
@@ -371,6 +371,36 @@ final class PluginStoreTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(row.disabledReason).contains("peak memory"))
     }
 
+    /// The arbiter never admits a resident plugin larger than its share of
+    /// physical memory, so the store says so before the download: Gemma's
+    /// 5 GB does not fit the 4 GB share of an 8 GB Mac, and does fit 16 GB.
+    func testResidentPluginLargerThanTheArbiterShareIsUnsupported() throws {
+        let (small, _) = try makeStore(memoryGB: 8)
+        let row = try XCTUnwrap(small.row(for: gemmaAnalyze))
+        XCTAssertFalse(row.isSupported)
+        XCTAssertEqual(row.action, .unavailable)
+        XCTAssertTrue(try XCTUnwrap(row.disabledReason).contains("plugins may use 4.0 GB"))
+
+        let (large, _) = try makeStore(memoryGB: 16)
+        XCTAssertTrue(try XCTUnwrap(large.row(for: gemmaAnalyze)).isSupported)
+    }
+
+    func testInstallAllQueuesEveryOpenUninstalledTaskOfThePlugin() throws {
+        let (store, facade) = try makeStore()
+        let gemmaTasks = store.groups.first { $0.id == "gemma-4-e4b" }?.rows.map(\.ref) ?? []
+        XCTAssertEqual(gemmaTasks.count, 3)
+        XCTAssertEqual(Set(store.installAllCandidates(for: "gemma-4-e4b")), Set(gemmaTasks))
+
+        facade.set(.ready, for: gemmaAnalyze)
+        XCTAssertFalse(store.installAllCandidates(for: "gemma-4-e4b").contains(gemmaAnalyze))
+
+        let done = expectation(description: "install all")
+        Task { await store.installAll("gemma-4-e4b"); done.fulfill() }
+        wait(for: [done], timeout: 2)
+        XCTAssertEqual(Set(facade.installCalls.map(\.ref)), Set(gemmaTasks).subtracting([gemmaAnalyze]))
+        XCTAssertTrue(facade.installCalls.allSatisfy { $0.licenseKey == nil })
+    }
+
     // MARK: - Propagation
 
     func testFacadeStateChangePropagatesToTheRow() throws {
@@ -474,15 +504,17 @@ final class PluginStoreTests: XCTestCase {
             for: try XCTUnwrap(store.row(for: gemmaAnalyze))).reason, "install failed")
     }
 
-    func testMenuRequiresAResidentPluginToBeRunningButNotAOneShotOne() throws {
+    /// `PluginRuntime.invoke` starts a stopped resident plugin on demand, so
+    /// an installed task is runnable whether or not its server is up.
+    func testMenuRunsAnInstalledResidentPluginEvenWhenStopped() throws {
         let (store, facade) = try makeStore()
         let total = PluginTaskRef(pluginID: "totalsegmentator", taskID: "total")
 
         facade.set(.ready, for: gemmaAnalyze)
         let stopped = store.menuAvailability(
             for: try XCTUnwrap(store.row(for: gemmaAnalyze)))
-        XCTAssertFalse(stopped.isRunnable)
-        XCTAssertEqual(stopped.reason, "plugin not running")
+        XCTAssertTrue(stopped.isRunnable)
+        XCTAssertNil(stopped.reason)
 
         facade.setRuntime(.ready, for: "gemma-4-e4b")
         let running = store.menuAvailability(

@@ -39,6 +39,8 @@ def _args(tmp_path, source="huggingface", **overrides):
         argv += ["--repo", overrides["repo"]]
     if "task" in overrides:
         argv += ["--task", overrides["task"]]
+    if "revision" in overrides:
+        argv += ["--revision", overrides["revision"]]
     return parse_install_args("test", argv)
 
 
@@ -64,7 +66,67 @@ def test_manifest_fields_are_carried_verbatim(tmp_path):
 
 def test_optional_manifest_fields_default_to_none(tmp_path):
     args = _args(tmp_path)
-    assert args.repo is None and args.task is None
+    assert args.repo is None and args.task is None and args.revision is None
+
+
+def test_revision_is_carried(tmp_path):
+    args = _args(tmp_path, repo="org/model", revision="abc123")
+    assert args.revision == "abc123"
+
+
+def test_download_pins_the_revision_and_reports_progress(tmp_path, capsys, monkeypatch):
+    """The revision reaches snapshot_download, and progress lines are emitted
+    from the growing size of the destination while the download runs."""
+    import time
+    import types
+
+    from _shared import weights
+    from _shared.progress import ProgressReporter
+
+    calls = {}
+
+    def fake_snapshot_download(repo_id, revision=None, local_dir=None, allow_patterns=None):
+        calls.update(repo_id=repo_id, revision=revision)
+        target = Path(local_dir)
+        for index in range(3):
+            (target / f"part{index}").write_bytes(b"x" * 400)
+            time.sleep(0.25)
+        return local_dir
+
+    hub = types.ModuleType("huggingface_hub")
+    hub.snapshot_download = fake_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    monkeypatch.setattr(weights, "_expected_repo_bytes", lambda *a: 1200)
+    monkeypatch.setattr(weights._DownloadProgress, "__init__",
+                        _fast_progress_init(weights._DownloadProgress.__init__))
+
+    files = weights.download_huggingface("org/model", tmp_path, ProgressReporter(),
+                                         revision="abc123")
+    assert calls == {"repo_id": "org/model", "revision": "abc123"}
+    assert len(files) == 3
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()
+             if line.startswith("{")]
+    polled = [line for line in lines if line["message"].startswith("Downloading org/model:")]
+    assert polled, lines
+    # Interpolated inside the download stage (0.05-0.95), and advancing.
+    assert all(0.05 < line["progress"] <= 0.95 for line in polled)
+    assert polled[-1]["progress"] > polled[0]["progress"] or len(polled) == 1
+
+
+def _fast_progress_init(original):
+    def init(self, dest, reporter, repo, expected, interval=1.0):
+        original(self, dest, reporter, repo, expected, interval=0.05)
+    return init
+
+
+def test_directory_bytes_counts_nested_files(tmp_path):
+    from _shared.weights import directory_bytes
+
+    (tmp_path / "a").write_bytes(b"x" * 10)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.incomplete").write_bytes(b"x" * 5)
+    assert directory_bytes(tmp_path) == 15
+    assert directory_bytes(tmp_path / "missing") == 0
 
 
 # ---------------------------------------------------------------------------

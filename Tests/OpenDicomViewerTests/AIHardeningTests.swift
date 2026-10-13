@@ -163,9 +163,11 @@ final class AIHardeningTests: XCTestCase {
     }
 
     func testReadinessBackoffGrowsAndCaps() {
-        XCTAssertEqual(AIServerManager.readinessBackoff(attempt: 0), 5)
-        XCTAssertEqual(AIServerManager.readinessBackoff(attempt: 1), 10)
-        XCTAssertEqual(AIServerManager.readinessBackoff(attempt: 50), 60)
+        // Capped at ~5 s so download progress and readiness show promptly.
+        XCTAssertEqual(AIServerManager.readinessBackoff(attempt: 0), 2)
+        XCTAssertEqual(AIServerManager.readinessBackoff(attempt: 1), 4)
+        XCTAssertEqual(AIServerManager.readinessBackoff(attempt: 2), 5)
+        XCTAssertEqual(AIServerManager.readinessBackoff(attempt: 50), 5)
     }
 
     // MARK: - PID record

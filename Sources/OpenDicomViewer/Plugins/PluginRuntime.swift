@@ -317,7 +317,7 @@ enum PluginPayloadCoder {
 @MainActor
 final class PluginRuntime: ObservableObject {
 
-    static let shared = PluginRuntime()
+    static let shared = PluginRuntime(networkCheck: PluginNetworkCheck.live)
 
     // MARK: Published state
 
@@ -365,18 +365,33 @@ final class PluginRuntime: ObservableObject {
     private var sessions: [String: SessionLedger] = [:]
     private let urlSession: URLSession
 
+    // MARK: Model memory outside the plugin subsystem
+
+    /// Residents the arbiter must count that are not plugins: the built-in AI
+    /// server, which holds the same 5 GB Gemma model as the Gemma plugin.
+    /// Without this the two could be resident together, invisible to each
+    /// other. Installed by `bootstrapForApplication`; empty in tests.
+    var externalResidents: () -> [PluginResidency] = { [] }
+    /// Stops an external resident the arbiter chose to evict.
+    var stopExternalResident: (String) async -> Void = { _ in }
+    /// Called before a plugin process is spawned, so the app can stop an
+    /// engine that would load the same model (see `exclusiveWithBuiltIn`).
+    var willStartPlugin: (String) async -> Void = { _ in }
+
     // MARK: Init
 
     init(paths: PluginPaths = .standard,
          locator: PluginEnvironmentLocator? = nil,
          arbiter: ResourceArbiter = ResourceArbiter(),
-         portProbe: (@Sendable () -> Int?)? = nil) {
+         portProbe: (@Sendable () -> Int?)? = nil,
+         networkCheck: (@Sendable ([URL]) async -> String?)? = nil) {
         self.paths = paths
         let resolvedLocator = locator ?? PluginEnvironmentLocator.standard(paths: paths)
         self.locator = resolvedLocator
         let store = PluginInstallStore(paths: paths)
         self.store = store
-        self.installer = PluginInstaller(locator: resolvedLocator, store: store)
+        self.installer = PluginInstaller(locator: resolvedLocator, store: store,
+                                         networkCheck: networkCheck)
         self.arbiter = arbiter
         self.ports = portProbe.map { PluginPortAllocator(probe: $0) } ?? PluginPortAllocator()
 
@@ -529,6 +544,11 @@ final class PluginRuntime: ObservableObject {
     /// already done, and unlike a resident server it cannot be transparently
     /// restarted.
     func residentSet(excluding pluginID: String? = nil) -> [PluginResidency] {
+        pluginResidents(excluding: pluginID)
+            + externalResidents().filter { $0.pluginID != pluginID }
+    }
+
+    private func pluginResidents(excluding pluginID: String?) -> [PluginResidency] {
         manifest.plugins.compactMap { plugin -> PluginResidency? in
             guard plugin.id != pluginID else { return nil }
 
@@ -593,9 +613,14 @@ final class PluginRuntime: ObservableObject {
             log(for: requester).line("Refused: \(error.localizedDescription)")
             throw error
         }
+        let external = Set(externalResidents().map(\.pluginID))
         for victim in decision.evictions {
             log(for: requester).line("Stopping \(victim) to free memory.")
-            await stop(victim)
+            if external.contains(victim) {
+                await stopExternalResident(victim)
+            } else {
+                await stop(victim)
+            }
         }
     }
 
@@ -650,6 +675,11 @@ final class PluginRuntime: ObservableObject {
         // A process left over from a failed or wedged start is not ours to
         // reuse; clear it before admission counts it.
         if processes[pluginID] != nil { await stop(pluginID, cancelStart: false) }
+
+        // e.g. stop the built-in AI server before the Gemma plugin loads the
+        // same model, whatever the memory arithmetic says.
+        await willStartPlugin(pluginID)
+        try Task.checkCancellation()
 
         let decision = arbiter.admit(
             PluginResidency(pluginID: pluginID, declaredRamGB: plugin.ramGB),
@@ -775,6 +805,27 @@ final class PluginRuntime: ObservableObject {
     /// Stop a resident plugin, escalating to SIGKILL if it will not leave.
     func stop(_ pluginID: String) async {
         await stop(pluginID, cancelStart: true)
+    }
+
+    /// Before the built-in server loads Gemma: stop any plugin that holds the
+    /// same model (`AIAnalysisEngine.pluginID`), then evict plugins the
+    /// arbiter says must go for the built-in server's declared memory to fit.
+    /// A refusal is logged, not enforced: the built-in engine predates the
+    /// plugin arbiter and the user asked for it explicitly.
+    func makeRoomForBuiltInServer(id: String, declaredRamGB: Double) async {
+        if runtimeState(AIAnalysisEngine.pluginID) != .stopped
+            || processes[AIAnalysisEngine.pluginID] != nil {
+            log(for: AIAnalysisEngine.pluginID).line(
+                "Stopping: the built-in AI server is starting and loads the same model.")
+            await stop(AIAnalysisEngine.pluginID)
+        }
+        let decision = arbiter.admit(
+            PluginResidency(pluginID: id, declaredRamGB: declaredRamGB),
+            residents: pluginResidents(excluding: nil))
+        for victim in decision.evictions {
+            log(for: victim).line("Stopping to free memory for the built-in AI server.")
+            await stop(victim)
+        }
     }
 
     private func stop(_ pluginID: String, cancelStart: Bool) async {

@@ -891,7 +891,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
 
             case .aiAnalyze:
                 // AI analyze triggered by clicking on image
-                model.triggerAIAnalysis(for: panel)
+                model.triggerPreferredAIAnalysis(for: panel)
 
             case .aiPoint:
                 // Option-click subtracts: SAM-family prompting refines a mask by
@@ -2042,11 +2042,24 @@ struct AIInspectorView: View {
     @ObservedObject var model: DICOMModel
     @ObservedObject private var aiService = AIService.shared
     @ObservedObject private var aiServerManager = AIServerManager.shared
+    @ObservedObject private var pluginRuntime = PluginRuntime.shared
     @State private var dotCount: Int = 0
+    /// Mirrors AIAnalysisEngine.preference so the picker redraws.
+    @State private var enginePreference: AIAnalysisEngine? = AIAnalysisEngine.preference
 
     private let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
 
     private var panel: PanelState? { model.activePanel }
+
+    private var engine: AIAnalysisEngine {
+        AIAnalysisEngine.resolve(preference: enginePreference,
+                                 pluginInstalled: pluginInstalled,
+                                 builtInSetUp: aiServerManager.setupState == .ready)
+    }
+
+    private var pluginInstalled: Bool {
+        pluginRuntime.installState(AIAnalysisEngine.pluginAnalyze).isReady
+    }
 
     /// AI annotations computed on the slice currently on screen.
     private var aiAnnotations: [Annotation] {
@@ -2059,18 +2072,48 @@ struct AIInspectorView: View {
         return panel.annotations.filter { $0.isAI }.count - aiAnnotations.count
     }
 
+    /// Whether the panel has anything AI to show, from either engine. Such
+    /// content is shown whatever state the built-in server is in: a plugin
+    /// result or error must not hide behind "Setup required".
+    private var panelHasAIContent: Bool {
+        guard let panel else { return false }
+        return panel.aiAnalysisInProgress || panel.aiError != nil
+            || panel.visibleAIDescription != nil || !aiAnnotations.isEmpty
+    }
+
+    /// The built-in server is installing, downloading or loading.
+    private var builtInBusy: Bool {
+        aiServerManager.setupState == .installingDeps
+            || (aiServerManager.isServerRunning && !aiService.serverStatus.isReady)
+    }
+
     private var statusText: String {
+        if panel?.aiAnalysisInProgress == true { return "Analyzing…" }
+        if engine == .gemmaPlugin {
+            return pluginRuntime.runtimeState(AIAnalysisEngine.pluginID).isReady
+                ? "Plugin ready" : "Plugin starts on first use"
+        }
         switch aiServerManager.setupState {
-        case .notSetup:    return "Setup required"
+        case .notSetup, .unknown where !aiServerManager.isServerRunning:
+            return aiServerManager.aiEnabled == true ? "Setup required" : "Not enabled"
         case .installingDeps: return "Setting up…"
-        case .failed:      return "Failed"
+        case .failed:         return "Failed"
         default: break
         }
-        if panel?.aiAnalysisInProgress == true { return "Analyzing…" }
+        if let progress = aiService.loadProgress, !aiService.serverStatus.isReady {
+            switch progress.phase {
+            case .downloading: return "Downloading model…"
+            case .loading: return "Loading model…"
+            case .starting: return "Starting…"
+            }
+        }
         return aiService.serverStatus.displayText
     }
 
     private var statusColor: Color {
+        if engine == .gemmaPlugin {
+            return pluginRuntime.runtimeState(AIAnalysisEngine.pluginID).isReady ? .green : .gray
+        }
         switch aiServerManager.setupState {
         case .notSetup:       return .orange
         case .installingDeps: return .yellow
@@ -2078,6 +2121,23 @@ struct AIInspectorView: View {
         default: break
         }
         return aiService.serverStatus.color
+    }
+
+    /// Modes from the built-in server once it has answered, else the plugin
+    /// task's declared values.
+    private var modes: [AIAnalyzeMode] {
+        if !aiService.availableModes.isEmpty { return aiService.availableModes }
+        guard engine == .gemmaPlugin,
+              let task = pluginRuntime.manifest.plugin(id: AIAnalysisEngine.pluginID)?
+                .task(id: AIAnalysisEngine.pluginAnalyze.taskID),
+              let values = task.options?["mode"]?.values else { return [] }
+        return values.map { AIAnalyzeMode(key: $0, label: $0.capitalized, description: "") }
+    }
+
+    private var canRun: Bool {
+        guard let panel, panel.image != nil, !panel.aiAnalysisInProgress else { return false }
+        if engine == .builtIn, case .failed = aiServerManager.setupState { return false }
+        return true
     }
 
     var body: some View {
@@ -2103,10 +2163,27 @@ struct AIInspectorView: View {
             .padding(.horizontal)
             .padding(.vertical, 10)
 
-            // Mode picker — only when server is ready
-            if !aiService.availableModes.isEmpty && aiService.serverStatus.isReady {
+            if pluginInstalled {
+                Picker("Engine", selection: Binding(
+                    get: { engine },
+                    set: { newValue in
+                        AIAnalysisEngine.preference = newValue
+                        enginePreference = newValue
+                    })) {
+                    ForEach(AIAnalysisEngine.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .padding(.horizontal)
+                .padding(.bottom, 6)
+                .help("Run Gemma through the built-in AI server or the Gemma plugin from the store. Only one holds the model in memory at a time.")
+            }
+
+            if !modes.isEmpty && (engine == .gemmaPlugin || aiService.serverStatus.isReady) {
                 Picker("Mode", selection: $aiService.selectedMode) {
-                    ForEach(aiService.availableModes) { mode in
+                    ForEach(modes) { mode in
                         Text(mode.label).tag(mode.key)
                     }
                 }
@@ -2118,83 +2195,102 @@ struct AIInspectorView: View {
 
             Divider()
 
-            // Main content — driven by setup state first, then server/panel state
+            // Main content: the panel's results whenever it has any (from
+            // either engine); otherwise, for the built-in engine, its setup
+            // or server state.
             Group {
-                switch aiServerManager.setupState {
-                case .notSetup:
-                    AISetupRequiredView()
-                case .installingDeps:
-                    AIInstallingView(log: aiServerManager.setupLog)
-                case .failed(let msg):
-                    AISetupFailedView(message: msg)
-                default:
-                    if !aiService.serverStatus.isReady && !aiServerManager.isServerRunning {
-                        AIServerStoppedView(isFirstRun: aiServerManager.isFirstRun)
-                    } else {
+                if panelHasAIContent || engine == .gemmaPlugin {
+                    VStack(spacing: 0) {
+                        if engine == .builtIn && builtInBusy {
+                            AIBusyBanner()
+                        }
                         panelContent
                     }
+                } else {
+                    builtInStatusContent
                 }
             }
 
             Divider()
 
-            // Bottom action bar — only shown when server is active
-            if aiService.serverStatus.isReady || aiServerManager.isServerRunning {
-                HStack {
-                    Button(action: {
-                        if let panel = panel {
-                            panel.clearAIAnnotations()
-                            model.triggerAIAnalysis(for: panel)
-                        }
-                    }) {
-                        Label("Reanalyze", systemImage: "arrow.clockwise")
-                            .font(.caption)
+            // Bottom action bar
+            HStack {
+                Button(action: {
+                    if let panel = panel {
+                        panel.clearAIAnnotations()
+                        model.triggerPreferredAIAnalysis(for: panel)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(panel?.image == nil || panel?.aiAnalysisInProgress == true || !aiService.serverStatus.isReady)
-                    .help("⌘G")
-
-                    Button(action: {
-                        if let panel = panel {
-                            model.triggerAIDescribeLatestROI(for: panel)
-                        }
-                    }) {
-                        Label("Describe ROI", systemImage: "text.viewfinder")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(panel?.image == nil || panel?.aiAnalysisInProgress == true || !aiService.serverStatus.isReady)
-                    .help("Describe the most recent ROI Stats rectangle (S) on this slice")
-
-                    Spacer()
-
-                    Button(action: {
-                        panel?.clearAIAnnotations()
-                        model.objectWillChange.send()
-                    }) {
-                        Label("Clear", systemImage: "trash")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(panel?.annotations.contains(where: { $0.isAI }) != true && panel?.aiDescription == nil)
+                }) {
+                    Label("Analyze", systemImage: "arrow.clockwise")
+                        .font(.caption)
                 }
-                .padding(.horizontal)
-                .padding(.top, 8)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!canRun)
+                .help("Analyze this slice (G / ⌘G)")
 
-                Text("Research use only — not for diagnosis. Findings and confidence values are model-generated and unvalidated.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal)
-                    .padding(.bottom, 8)
+                Button(action: {
+                    if let panel = panel {
+                        model.triggerPreferredAIDescribeROI(for: panel)
+                    }
+                }) {
+                    Label("Describe ROI", systemImage: "text.viewfinder")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!canRun)
+                .help("Describe the most recent ROI Stats rectangle (S) on this slice")
+
+                Spacer()
+
+                Button(action: {
+                    panel?.clearAIAnnotations()
+                    model.objectWillChange.send()
+                }) {
+                    Label("Clear", systemImage: "trash")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(panel?.annotations.contains(where: { $0.isAI }) != true && panel?.aiDescription == nil)
+            }
+            .padding(.horizontal)
+            .padding(.top, 8)
+
+            Text("Research use only — not for diagnosis. Findings and confidence values are model-generated and unvalidated.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+        }
+    }
+
+    // MARK: - Built-in engine state (when the panel has no results)
+
+    @ViewBuilder
+    private var builtInStatusContent: some View {
+        switch aiServerManager.setupState {
+        case .installingDeps:
+            AIInstallingView(log: aiServerManager.setupLog)
+        case .failed(let msg):
+            AISetupFailedView(message: msg)
+        case .notSetup where !aiServerManager.isServerRunning,
+             .unknown where !aiServerManager.isServerRunning:
+            AISetupRequiredView()
+        default:
+            if aiService.serverStatus.isReady {
+                panelContent
+            } else if aiServerManager.isServerRunning || aiService.serverStatus == .starting {
+                AIModelLoadingView()
+            } else {
+                AIServerStoppedView()
             }
         }
     }
 
-    // MARK: - Panel Content (when server is running)
+    // MARK: - Panel Content
 
     @ViewBuilder
     private var panelContent: some View {
@@ -2207,6 +2303,14 @@ struct AIInspectorView: View {
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .onReceive(timer) { _ in dotCount = (dotCount % 3) + 1 }
+                    if engine == .gemmaPlugin
+                        && !pluginRuntime.runtimeState(AIAnalysisEngine.pluginID).isReady {
+                        Text("Starting the Gemma plugin — loading the model takes a little while the first time.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let error = panel.aiError {
@@ -2218,9 +2322,10 @@ struct AIInspectorView: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                         .multilineTextAlignment(.center)
+                        .textSelection(.enabled)
                     Button("Retry") {
                         panel.clearAIAnnotations()
-                        model.triggerAIAnalysis(for: panel)
+                        model.triggerPreferredAIAnalysis(for: panel)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -2228,18 +2333,13 @@ struct AIInspectorView: View {
                 .padding()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if aiAnnotations.isEmpty && panel.visibleAIDescription == nil {
-                // Server is starting/loading — may be downloading model on first run
-                if aiService.serverStatus == .starting || aiServerManager.isFirstRun {
-                    AIModelLoadingView()
-                } else {
-                    ContentUnavailableView {
-                        Label("No Analysis", systemImage: "brain")
-                    } description: {
-                        if offSliceAIAnnotationCount > 0 {
-                            Text("AI results on this panel belong to other slices. Press G or ⌘G to analyze this one.")
-                        } else {
-                            Text("Press G or ⌘G to analyze the current image")
-                        }
+                ContentUnavailableView {
+                    Label("No Analysis", systemImage: "brain")
+                } description: {
+                    if offSliceAIAnnotationCount > 0 {
+                        Text("AI results on this panel belong to other slices. Press G or ⌘G to analyze this one.")
+                    } else {
+                        Text("Press G or ⌘G to analyze the current image")
                     }
                 }
             } else {
@@ -2249,6 +2349,7 @@ struct AIInspectorView: View {
                             Text(desc)
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(.white)
+                                .textSelection(.enabled)
                                 .padding(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color.white.opacity(0.05))
@@ -2286,61 +2387,58 @@ struct AIInspectorView: View {
 
 // MARK: - Setup State Sub-Views
 
-/// Shown when the Python venv has never been created.
-/// Auto-triggers setup on appear; the manual button is a fallback.
+/// Shown when local AI has not been enabled or set up. Nothing starts until
+/// the user asks: the setup is a 6–7 GB download.
 private struct AISetupRequiredView: View {
     @ObservedObject private var manager = AIServerManager.shared
 
     var body: some View {
         VStack(spacing: 16) {
-            ProgressView()
-                .tint(.yellow)
-                .scaleEffect(1.2)
+            Image(systemName: "brain")
+                .font(.system(size: 30))
+                .foregroundStyle(.yellow)
 
             VStack(spacing: 6) {
-                Text("Setting Up AI Engine…")
+                Text("Local AI Is Not Set Up")
                     .font(.headline)
-                Text("Installing Python packages and preparing the model environment. This runs once.")
+                Text("Gemma 4 runs entirely on this Mac. Setting it up downloads about 6–7 GB once and takes roughly 10–30 minutes; you can keep working meanwhile.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
 
-            VStack(spacing: 4) {
-                Label("~500 MB Python packages (mlx, mlx-vlm…)", systemImage: "arrow.down.circle")
+            VStack(alignment: .leading, spacing: 4) {
+                Label("~1.5 GB Python packages (mlx, mlx-vlm…)", systemImage: "arrow.down.circle")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Label("~4.5 GB model download on first launch", systemImage: "arrow.down.circle")
+                Label(manager.isModelCached
+                      ? "Model already downloaded"
+                      : "~5.2 GB model download (Hugging Face)", systemImage: "arrow.down.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Label("Needs about 8 GB of free disk space", systemImage: "internaldrive")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 4)
 
-            Button(action: { manager.setupEnvironment() }) {
-                Label("Set Up AI Engine", systemImage: "arrow.down.circle")
+            Button(action: { manager.enableAndStart() }) {
+                Label("Enable Local AI", systemImage: "arrow.down.circle")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)
             .tint(.yellow)
-            .opacity(0)  // Hidden — auto-setup already triggered on launch
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear {
-            // Belt-and-suspenders: trigger setup if it hasn't started yet
-            if manager.setupState == .notSetup || manager.setupState == .unknown {
-                manager.setupEnvironment()
-            }
-        }
     }
 }
 
 /// Shown while pip install is running
 private struct AIInstallingView: View {
     let log: String
-    @State private var scrollProxy: ScrollViewProxy? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2355,41 +2453,60 @@ private struct AIInstallingView: View {
             .padding(.horizontal)
             .padding(.top, 12)
 
-            Text("This runs once. Do not quit the app.")
+            Text("This runs once and takes several minutes. The model downloads next. Keep the app open.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal)
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(log.isEmpty ? " " : log)
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.green.opacity(0.85))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                        .id("logBottom")
-                }
-                .background(Color.black.opacity(0.4))
-                .cornerRadius(6)
+            AILogView(log: log)
                 .padding(.horizontal)
                 .frame(maxHeight: .infinity)
-                .onChange(of: log) {
-                    withAnimation { proxy.scrollTo("logBottom", anchor: .bottom) }
-                }
-            }
-            .padding(.bottom, 12)
+                .padding(.bottom, 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-/// Shown when setup failed
+/// Scrolling monospaced log that follows its tail.
+private struct AILogView: View {
+    let log: String
+    var maxLines: Int = 200
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                Text(tail.isEmpty ? " " : tail)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.green.opacity(0.85))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .id("logBottom")
+            }
+            .background(Color.black.opacity(0.4))
+            .cornerRadius(6)
+            .onAppear { proxy.scrollTo("logBottom", anchor: .bottom) }
+            .onChange(of: log) {
+                withAnimation { proxy.scrollTo("logBottom", anchor: .bottom) }
+            }
+        }
+    }
+
+    private var tail: String {
+        log.split(separator: "\n", omittingEmptySubsequences: false)
+            .suffix(maxLines).joined(separator: "\n")
+    }
+}
+
+/// Shown when setup failed or the server could not start: the reason, and
+/// the end of the log it came from.
 private struct AISetupFailedView: View {
     let message: String
     @ObservedObject private var manager = AIServerManager.shared
 
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 30))
                 .foregroundStyle(.red)
@@ -2397,15 +2514,24 @@ private struct AISetupFailedView: View {
             Text(manager.isSetupComplete ? "AI Server Failed" : "Setup Failed")
                 .font(.headline)
 
-            ScrollView {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 8)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 8)
+
+            let log = manager.isSetupComplete ? manager.serverLog : manager.setupLog
+            if !log.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Last log lines")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    AILogView(log: log, maxLines: 25)
+                        .frame(maxHeight: 180)
+                }
             }
-            .frame(maxHeight: 160)
 
             HStack {
                 Button(action: { manager.retrySetup() }) {
@@ -2424,16 +2550,16 @@ private struct AISetupFailedView: View {
                 }
             }
         }
-        .padding(20)
+        .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-/// Shown when the venv is ready but the server process is not running.
-/// Deliberately does not auto-start: launch and setup already start the
-/// server, and restarting from here would loop on a server that keeps dying.
+/// Shown when the environment is ready but the server is not running. The
+/// server starts on the first analysis; this offers to start it now.
+/// Deliberately does not auto-start: restarting from here would loop on a
+/// server that keeps dying.
 private struct AIServerStoppedView: View {
-    let isFirstRun: Bool
     @ObservedObject private var manager = AIServerManager.shared
     @ObservedObject private var aiService = AIService.shared
 
@@ -2443,7 +2569,7 @@ private struct AIServerStoppedView: View {
                 .font(.system(size: 30))
                 .foregroundStyle(.secondary)
 
-            Text("AI Server Stopped")
+            Text("Local AI Not Running")
                 .font(.headline)
 
             if case .error(let message) = aiService.serverStatus {
@@ -2452,8 +2578,14 @@ private struct AIServerStoppedView: View {
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 8)
-            } else if isFirstRun {
-                Text("First launch downloads Gemma 4 (~4.5 GB) from Hugging Face.\nKeep the app open — this takes 10–30 minutes.")
+            } else if !manager.isModelCached {
+                Text("The first start downloads Gemma 4 (~5.2 GB) from Hugging Face. Keep the app open — this takes 10–30 minutes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 8)
+            } else {
+                Text("It starts by itself when you analyze an image (G). Loading the model takes a few seconds.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -2461,7 +2593,7 @@ private struct AIServerStoppedView: View {
             }
 
             Button(action: { manager.startServer() }) {
-                Label("Start AI Server", systemImage: "play.fill")
+                Label("Start AI Now", systemImage: "play.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -2473,34 +2605,94 @@ private struct AIServerStoppedView: View {
     }
 }
 
-/// Shown while the server process is starting / loading the model
-private struct AIModelLoadingView: View {
+/// One line of download / load progress, for both the full loading view and
+/// the banner above existing results.
+private struct AILoadProgressLine: View {
     @ObservedObject private var manager = AIServerManager.shared
-    @State private var dotCount = 0
-    private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+    @ObservedObject private var aiService = AIService.shared
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(alignment: .leading, spacing: 4) {
+            if manager.setupState == .installingDeps {
+                Text("Installing Python packages…")
+                    .font(.caption)
+            } else if let progress = aiService.loadProgress, progress.phase == .downloading {
+                Text("Downloading Gemma 4 E4B" + (progress.bytesText.map { " — \($0)" } ?? ""))
+                    .font(.caption)
+                if let fraction = progress.fraction {
+                    ProgressView(value: fraction)
+                        .tint(.yellow)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .tint(.yellow)
+                }
+            } else if aiService.loadProgress?.phase == .loading {
+                Text("Loading the model into memory…")
+                    .font(.caption)
+            } else {
+                Text("Starting the AI server…")
+                    .font(.caption)
+            }
+        }
+    }
+}
+
+/// Compact status shown above existing results while the built-in engine
+/// installs or loads.
+private struct AIBusyBanner: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(.yellow)
+            AILoadProgressLine()
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(Color.yellow.opacity(0.08))
+    }
+}
+
+/// Shown while the server process is starting, downloading or loading the model
+private struct AIModelLoadingView: View {
+    @ObservedObject private var manager = AIServerManager.shared
+    @ObservedObject private var aiService = AIService.shared
+    @State private var showLog = false
+
+    var body: some View {
+        VStack(spacing: 14) {
             ProgressView()
                 .tint(.yellow)
                 .scaleEffect(1.2)
 
-            VStack(spacing: 6) {
-                Text("Loading AI Model" + String(repeating: ".", count: dotCount))
-                    .font(.subheadline)
-                    .onReceive(timer) { _ in dotCount = (dotCount % 3) + 1 }
+            AILoadProgressLine()
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                if manager.isFirstRun {
-                    Text("First launch: downloading Gemma 4 E4B (~4.5 GB).\nThis may take 10–30 minutes.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                } else {
-                    Text("Model is loading into memory…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            if aiService.loadProgress?.phase == .downloading || !manager.isModelCached {
+                Text("First run: Gemma 4 E4B (~5.2 GB) downloads once to ~/.cache/huggingface. This may take 10–30 minutes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            if manager.hasPendingRun {
+                Text("Your analysis will run as soon as the model is ready.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            DisclosureGroup("Server log", isExpanded: $showLog) {
+                AILogView(log: manager.serverLog, maxLines: 80)
+                    .frame(height: 160)
+            }
+            .font(.caption)
+
+            Button("Cancel") { manager.stopServer() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
