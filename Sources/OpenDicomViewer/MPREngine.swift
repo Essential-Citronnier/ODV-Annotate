@@ -832,17 +832,6 @@ enum ProjectionMode: String, CaseIterable, Identifiable {
 }
 
 extension MPREngine {
-    /// Generate an axial slab MIP/MinIP/Average by projecting consecutive axial slices.
-    /// This is the clinical slab-MIP workflow used in CTA/MRA angiography:
-    /// take N slices centered at `slabCenter`, max-project them into one 2D image.
-    /// Output has the same width×height as a native axial slice.
-    /// Axial slice range a slab covers (clamped to the volume), or nil.
-    func slabRange(center: Int, thickness: Int) -> ClosedRange<Int>? {
-        let halfSlab = thickness / 2
-        let zStart = max(0, center - halfSlab)
-        let zEnd = min(volume.depth - 1, center + halfSlab)
-        return zStart <= zEnd ? zStart...zEnd : nil
-    }
 
     /// Modality value an axial slab projection shows at voxel column `x`,
     /// row `y`: the maximum (MIP), minimum (MinIP) or mean (Average) voxel
@@ -870,6 +859,33 @@ extension MPREngine {
         return result * volume.rescaleSlope + volume.rescaleIntercept
     }
 
+    /// Axial slice range a slab covers (clamped to the volume), or nil.
+    /// The one slab definition shared by the CPU projection, the GPU
+    /// projection (through `gpuSlab`) and the cursor readout.
+    func slabRange(center: Int, thickness: Int) -> ClosedRange<Int>? {
+        let halfSlab = thickness / 2
+        let zStart = max(0, center - halfSlab)
+        let zEnd = min(volume.depth - 1, center + halfSlab)
+        return zStart <= zEnd ? zStart...zEnd : nil
+    }
+
+    /// Slab parameters for `MetalVolumeRenderer.renderProjection` that make
+    /// the GPU sample exactly the slices of `slabRange(center:thickness:)`:
+    /// the slab spans [first − ½, last + ½] voxels along z (each slice's
+    /// nearest-neighbour footprint), centred between the first and last
+    /// slice, with its thickness in mm.
+    func gpuSlab(center: Int, thickness: Int) -> (thicknessMM: Float, centerVoxel: SIMD3<Float>)? {
+        guard let range = slabRange(center: center, thickness: thickness) else { return nil }
+        let slices = Float(range.count)
+        let midZ = Float(range.lowerBound + range.upperBound) / 2
+        return (slices * Float(volume.spacingZ),
+                SIMD3<Float>(Float(volume.width) / 2, Float(volume.height) / 2, midZ))
+    }
+
+    /// Generate an axial slab MIP/MinIP/Average by projecting consecutive axial slices.
+    /// This is the clinical slab-MIP workflow used in CTA/MRA angiography:
+    /// take N slices centered at `slabCenter`, max-project them into one 2D image.
+    /// Output has the same width×height as a native axial slice.
     func axialSlabProjection(
         mode: ProjectionMode,
         slabCenter: Int,

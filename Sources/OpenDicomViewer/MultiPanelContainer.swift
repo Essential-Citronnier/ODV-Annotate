@@ -2999,10 +2999,11 @@ struct AnnotationOverlay: View {
                     .position(x: screenRect.midX, y: screenRect.midY)
 
                 // Stats label below the rectangle
+                let unit = panel.valueUnit
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Mean: \(PixelValues.format(mean))")
-                    Text("SD: \(PixelValues.format(stdDev))")
-                    Text("Min: \(PixelValues.format(minV))  Max: \(PixelValues.format(maxV))")
+                    Text("Mean: \(PixelValueUnit.format(mean, unit: unit))")
+                    Text("SD: \(PixelValueUnit.format(stdDev, unit: unit))")
+                    Text("Min: \(PixelValues.format(minV))  Max: \(PixelValueUnit.format(maxV, unit: unit))")
                     Text("N: \(count)")
                 }
                 .font(.system(.caption2, design: .monospaced))
@@ -3281,7 +3282,7 @@ struct ToolPalette: View {
     }
 }
 
-// MARK: - Cursor Info Overlay (HU Readout)
+// MARK: - Cursor Info Overlay (Value Readout)
 
 struct CursorInfoOverlay: View {
     @ObservedObject var panel: PanelState
@@ -3295,7 +3296,7 @@ struct CursorInfoOverlay: View {
                         Text(String(format: "x: %.1f  y: %.1f  z: %.1f",
                              panel.cursorPatientX, panel.cursorPatientY, panel.cursorPatientZ))
                     }
-                    Text("HU: \(PixelValues.format(panel.cursorHU))  [\(panel.cursorPixelX), \(panel.cursorPixelY)]")
+                    Text("Value: \(PixelValueUnit.format(panel.cursorHU, unit: panel.valueUnit))  [\(panel.cursorPixelX), \(panel.cursorPixelY)]")
                 }
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.white)

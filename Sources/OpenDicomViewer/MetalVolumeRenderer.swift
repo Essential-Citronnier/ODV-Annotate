@@ -123,6 +123,31 @@ final class MetalVolumeRenderer {
         thresholdMin: Float = -Float.greatestFiniteMagnitude,
         thresholdMax: Float = Float.greatestFiniteMagnitude
     ) -> NSImage? {
+        guard var pixels = renderProjectionRGBA(
+            volume: volume, mode: mode, viewMatrix: viewMatrix,
+            outputWidth: outputWidth, outputHeight: outputHeight,
+            windowWidth: windowWidth, windowCenter: windowCenter,
+            slabThickness: slabThickness, slabCenterVoxel: slabCenterVoxel, invert: invert,
+            thresholdMin: thresholdMin, thresholdMax: thresholdMax) else { return nil }
+        return Self.makeImage(&pixels, width: outputWidth, height: outputHeight)
+    }
+
+    /// Same as `renderProjection`, returning the output as RGBA8 bytes
+    /// (row 0 = top row of the image).
+    func renderProjectionRGBA(
+        volume: VolumeData,
+        mode: ProjectionMode,
+        viewMatrix: simd_float4x4,
+        outputWidth: Int,
+        outputHeight: Int,
+        windowWidth: Float,
+        windowCenter: Float,
+        slabThickness: Float,
+        slabCenterVoxel: SIMD3<Float> = SIMD3<Float>(0, 0, 0),
+        invert: Bool = false,
+        thresholdMin: Float = -Float.greatestFiniteMagnitude,
+        thresholdMax: Float = Float.greatestFiniteMagnitude
+    ) -> [UInt8]? {
         uploadVolume(volume)
         guard let volumeTex = volumeTexture, let pipeline = mipPipeline else { return nil }
 
@@ -185,7 +210,7 @@ final class MetalVolumeRenderer {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
-        return textureToNSImage(outputTex, width: outputWidth, height: outputHeight)
+        return textureBytes(outputTex, width: outputWidth, height: outputHeight)
     }
 
     // MARK: - Helpers
@@ -198,7 +223,7 @@ final class MetalVolumeRenderer {
         }
     }
 
-    private func textureToNSImage(_ texture: MTLTexture, width: Int, height: Int) -> NSImage? {
+    private func textureBytes(_ texture: MTLTexture, width: Int, height: Int) -> [UInt8] {
         let bytesPerRow = width * 4
         var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
 
@@ -209,7 +234,11 @@ final class MetalVolumeRenderer {
                             size: MTLSize(width: width, height: height, depth: 1)),
             mipmapLevel: 0
         )
+        return pixels
+    }
 
+    private static func makeImage(_ pixels: inout [UInt8], width: Int, height: Int) -> NSImage? {
+        let bytesPerRow = width * 4
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         guard let context = CGContext(
             data: &pixels,
@@ -288,38 +317,40 @@ extension MetalVolumeRenderer {
     ) {
         if (gid.x >= uint(uniforms.outputSize.x) || gid.y >= uint(uniforms.outputSize.y)) return;
 
-        // Normalized device coordinates [-1, 1]
-        float2 ndc = float2(gid) / uniforms.outputSize * 2.0 - 1.0;
-
-        // Volume extent in voxel coordinates [0, dims]
+        // Voxel k's nearest-neighbour footprint is [k - 0.5, k + 0.5), so the
+        // volume spans [-0.5, dims - 0.5] and rotation is about its centre.
         float3 dims = uniforms.volumeDims;
-        float3 center = dims * 0.5;
+        float3 boxMin = float3(-0.5);
+        float3 boxMax = dims - 0.5;
+        float3 center = (boxMin + boxMax) * 0.5;
 
-        // Ray in view space: orthographic projection along -Z, centered at origin
-        // After inverse view matrix transform, offset by volume center so rays
-        // cover the full volume bounding box [0, dims]
+        // Output pixel centre in voxel units. Rows run top-down like the
+        // volume's, so with the identity view pixel (x, y) is the ray
+        // through voxel column x, row y (the CPU slab projection's layout).
+        float2 pix = (float2(gid) + 0.5) / uniforms.outputSize * dims.xy - 0.5;
+
+        // Orthographic ray along -Z in view space, rotated about the centre
         float diag = length(dims);
-        float3 viewOrigin = float3(ndc.x * dims.x * 0.5, -ndc.y * dims.y * 0.5, diag);
+        float3 viewOrigin = float3(pix - center.xy, diag);
         float3 viewDir = float3(0, 0, -1);
 
-        // Transform ray by inverse view matrix (rotation around origin)
         float4 worldOrigin = uniforms.invViewMatrix * float4(viewOrigin, 1.0);
         float4 worldDir = uniforms.invViewMatrix * float4(viewDir, 0.0);
 
-        // Offset to volume center so rotation is around the volume center
         float3 rayOrigin = worldOrigin.xyz + center;
         float3 rayDir = normalize(worldDir.xyz);
 
-        // Intersect with volume bounding box [0, dims]
         float tNear, tFar;
-        if (!intersectBox(rayOrigin, rayDir, float3(0), dims, tNear, tFar)) {
+        if (!intersectBox(rayOrigin, rayDir, boxMin, boxMax, tNear, tFar)) {
             output.write(float4(0, 0, 0, 1), gid);
             return;
         }
 
         tNear = max(tNear, 0.0);
 
-        // Slab thickness clipping (slabThickness is in mm, convert to voxel-space t units)
+        // Slab thickness clipping (slabThickness is in mm, convert to voxel-space t units).
+        // For axial slabs the caller passes MPREngine.gpuSlab, whose bounds
+        // are the footprint edges of the first and last slice.
         if (uniforms.slabThickness > 0) {
             // Convert mm to voxel-t: one unit of t along rayDir covers this many mm
             float3 rayMM = rayDir * uniforms.voxelSpacing;
@@ -336,7 +367,9 @@ extension MetalVolumeRenderer {
 
         // Step size: 0.5 voxels for quality
         float stepSize = 0.5;
-        int numSteps = int(ceil((tFar - tNear) / stepSize));
+        // (the small bias keeps float error from adding a sample past the
+        // far edge, which would reach into the next slice)
+        int numSteps = int(ceil((tFar - tNear) / stepSize - 1e-3));
         numSteps = min(numSteps, 2048);
 
         float result;
@@ -350,14 +383,9 @@ extension MetalVolumeRenderer {
             float t = tNear + (float(i) + 0.5) * stepSize;
             float3 pos = rayOrigin + t * rayDir;
 
-            // Clamp to volume bounds
-            if (pos.x < 0 || pos.x >= dims.x - 1 ||
-                pos.y < 0 || pos.y >= dims.y - 1 ||
-                pos.z < 0 || pos.z >= dims.z - 1) continue;
-
-            // Nearest-neighbor sampling (fast)
-            int3 coord = int3(pos + 0.5);
-            coord = clamp(coord, int3(0), int3(dims) - 1);
+            // Nearest-neighbor sampling (fast); skip samples outside the volume
+            int3 coord = int3(floor(pos + 0.5));
+            if (any(coord < int3(0)) || any(coord >= int3(dims))) continue;
 
             short rawVal = volume.read(ushort3(coord)).r;
             float val = float(rawVal);
