@@ -31,12 +31,22 @@ struct CrossReferenceOverlay: View {
                 CrossRefLineView(
                     displayPanel: panel,
                     sourcePanel: otherPanel,
+                    displayFrameOfReference: frameOfReference(for: panel),
+                    sourceFrameOfReference: frameOfReference(for: otherPanel),
                     color: panelColor(for: otherPanel),
                     viewSize: geo.size
                 )
             }
         }
         .allowsHitTesting(false)
+    }
+
+    /// FrameOfReferenceUID of the image a panel shows (series-level).
+    private func frameOfReference(for p: PanelState) -> String? {
+        guard p.seriesIndex >= 0, p.seriesIndex < model.allSeries.count else { return nil }
+        let images = model.allSeries[p.seriesIndex].images
+        let ctx = images.indices.contains(p.imageIndex) ? images[p.imageIndex] : images.first
+        return ctx?.frameOfReferenceUID?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func panelColor(for targetPanel: PanelState) -> Color {
@@ -53,12 +63,16 @@ struct CrossReferenceOverlay: View {
 private struct CrossRefLineView: View {
     @ObservedObject var displayPanel: PanelState
     @ObservedObject var sourcePanel: PanelState
+    let displayFrameOfReference: String?
+    let sourceFrameOfReference: String?
     let color: Color
     let viewSize: CGSize
 
     var body: some View {
         if let line = CrossReferenceOverlay.computeCrossReference(
-            displayPanel: displayPanel, sourcePanel: sourcePanel
+            displayPanel: displayPanel, sourcePanel: sourcePanel,
+            displayFrameOfReference: displayFrameOfReference,
+            sourceFrameOfReference: sourceFrameOfReference
         ) {
             let p0 = pixelToScreen(line.startPixel)
             let p1 = pixelToScreen(line.endPixel)
@@ -135,12 +149,20 @@ extension CrossReferenceOverlay {
     }
 
     /// Compute where `sourcePanel`'s slice plane intersects `displayPanel`'s image plane.
-    /// Returns pixel coordinates in the display panel's image space, or nil if planes are parallel
-    /// or spatial metadata is missing.
+    /// Returns coordinates in the display panel's displayed-image space (the
+    /// space `pixelToScreen` and annotations use), or nil if the planes are
+    /// parallel, spatial metadata is missing, or the panels are in different
+    /// frames of reference.
     static func computeCrossReference(
         displayPanel: PanelState,
-        sourcePanel: PanelState
+        sourcePanel: PanelState,
+        displayFrameOfReference: String? = nil,
+        sourceFrameOfReference: String? = nil
     ) -> CrossReferenceLine? {
+        // Positions in different frames of reference aren't comparable.
+        if let a = displayFrameOfReference, let b = sourceFrameOfReference, !a.isEmpty, !b.isEmpty, a != b {
+            return nil
+        }
         guard let posA = displayPanel.imagePositionPatient,
               let oriA = displayPanel.imageOrientationPatient, oriA.count == 6,
               let spacingA = displayPanel.pixelSpacing,
@@ -148,101 +170,89 @@ extension CrossReferenceOverlay {
               let oriB = sourcePanel.imageOrientationPatient, oriB.count == 6
         else { return nil }
 
-        // Display panel basis vectors
-        let rowA = SIMD3<Double>(oriA[0], oriA[1], oriA[2])
-        let colA = SIMD3<Double>(oriA[3], oriA[4], oriA[5])
-        let normalA = cross(rowA, colA)
+        guard let raw = intersectionInPixels(
+            originA: SIMD3(posA.0, posA.1, posA.2),
+            rowA: SIMD3(oriA[0], oriA[1], oriA[2]),
+            colA: SIMD3(oriA[3], oriA[4], oriA[5]),
+            pixelSpacingA: spacingA,
+            widthA: displayPanel.imageWidth,
+            heightA: displayPanel.imageHeight,
+            originB: SIMD3(posB.0, posB.1, posB.2),
+            rowB: SIMD3(oriB[0], oriB[1], oriB[2]),
+            colB: SIMD3(oriB[3], oriB[4], oriB[5])
+        ) else { return nil }
 
-        // Source panel normal
-        let rowB = SIMD3<Double>(oriB[0], oriB[1], oriB[2])
-        let colB = SIMD3<Double>(oriB[3], oriB[4], oriB[5])
-        let normalB = cross(rowB, colB)
-
-        // Intersection line direction (cross product of normals)
-        let lineDir = cross(normalA, normalB)
-        let lineDirLen = length(lineDir)
-        if lineDirLen < 1e-6 { return nil } // Parallel planes
-
-        // Find a point on the intersection line
-        // Project source origin onto display plane
-        let originA = SIMD3<Double>(posA.0, posA.1, posA.2)
-        let originB = SIMD3<Double>(posB.0, posB.1, posB.2)
-
-        let diff = originB - originA
-
-        // Project intersection onto display panel's 2D coordinate system
-        // The intersection of plane B with plane A forms a line.
-        // We need to find where this line is in A's image coordinates.
-
-        // For the common orthogonal case (axial/sagittal/coronal),
-        // the intersection is a straight line at a constant position along one axis.
-
-        // Project source origin onto display panel axes (in mm)
-        let u0 = dot(diff, rowA)  // mm along row direction
-        let v0 = dot(diff, colA)  // mm along column direction
-
-        // Project line direction onto display panel axes
-        let du = dot(lineDir, rowA)
-        let dv = dot(lineDir, colA)
-
-        // Convert from mm to pixels
-        // DICOM PixelSpacing: (row_spacing, col_spacing)
-        //   row_spacing = distance between rows = mm per Y pixel step
-        //   col_spacing = distance between columns = mm per X pixel step
-        let rowSpacing = spacingA.0  // mm per pixel along column direction (Y)
-        let colSpacing = spacingA.1  // mm per pixel along row direction (X)
-
-        guard colSpacing > 0 && rowSpacing > 0 else { return nil }
-
-        let u0px = u0 / colSpacing
-        let v0px = v0 / rowSpacing
-        let dupx = du / colSpacing
-        let dvpx = dv / rowSpacing
-
-        // Parameterize line: P(t) = (u0px + t*dupx, v0px + t*dvpx)
-        // Clip to image bounds [0, width] x [0, height]
-        let w = Double(displayPanel.imageWidth)
-        let h = Double(displayPanel.imageHeight)
-
-        guard w > 0 && h > 0 else { return nil }
-
-        // Find t range where line is within bounds
-        var tMin = -1e10
-        var tMax = 1e10
-
-        if abs(dupx) > 1e-10 {
-            let t1 = (0 - u0px) / dupx
-            let t2 = (w - u0px) / dupx
-            let tLo = min(t1, t2)
-            let tHi = max(t1, t2)
-            tMin = max(tMin, tLo)
-            tMax = min(tMax, tHi)
-        } else if u0px < 0 || u0px > w {
-            return nil // Line outside horizontal bounds
-        }
-
-        if abs(dvpx) > 1e-10 {
-            let t1 = (0 - v0px) / dvpx
-            let t2 = (h - v0px) / dvpx
-            let tLo = min(t1, t2)
-            let tHi = max(t1, t2)
-            tMin = max(tMin, tLo)
-            tMax = min(tMax, tHi)
-        } else if v0px < 0 || v0px > h {
-            return nil // Line outside vertical bounds
-        }
-
-        if tMin >= tMax { return nil }
-
-        let startX = u0px + tMin * dupx
-        let startY = v0px + tMin * dvpx
-        let endX = u0px + tMax * dupx
-        let endY = v0px + tMax * dvpx
-
+        // Raw rows/columns → displayed image space (differs for aspect-corrected MPR/MIP)
+        let mapping = displayPanel.pixelDisplayMapping
         return CrossReferenceLine(
-            startPixel: CGPoint(x: startX, y: startY),
-            endPixel: CGPoint(x: endX, y: endY)
+            startPixel: mapping.rawToDisplay(raw.startPixel),
+            endPixel: mapping.rawToDisplay(raw.endPixel)
         )
+    }
+
+    /// Intersection of plane B with image plane A, clipped to A's bounds, in
+    /// A's raw pixel coordinates (x = column, y = row).
+    ///
+    /// A point on plane A is P = O_A + u·row_A + v·col_A (u, v in mm). It lies
+    /// on plane B when n_B·(P − O_B) = 0, i.e. a·u + b·v = c with
+    /// a = n_B·row_A, b = n_B·col_A, c = n_B·(O_B − O_A). This holds for any
+    /// (oblique) orientation; with u = x·colSpacing, v = y·rowSpacing it is a
+    /// line in pixel space that we clip to the image rectangle.
+    static func intersectionInPixels(
+        originA: SIMD3<Double>, rowA: SIMD3<Double>, colA: SIMD3<Double>,
+        pixelSpacingA: (Double, Double), widthA: Int, heightA: Int,
+        originB: SIMD3<Double>, rowB: SIMD3<Double>, colB: SIMD3<Double>
+    ) -> CrossReferenceLine? {
+        let rowSpacing = pixelSpacingA.0  // mm per row step (Y)
+        let colSpacing = pixelSpacingA.1  // mm per column step (X)
+        guard colSpacing > 0, rowSpacing > 0, widthA > 0, heightA > 0 else { return nil }
+
+        let nB = cross(rowB, colB)
+        let nBLen = length(nB)
+        guard nBLen > 1e-9 else { return nil }
+        let normalB = nB / nBLen
+
+        // Line in pixel space: A·x + B·y = C
+        let A = dot(normalB, rowA) * colSpacing
+        let B = dot(normalB, colA) * rowSpacing
+        let C = dot(normalB, originB - originA)
+
+        // Parallel planes: plane B's normal is (anti)parallel to A's normal
+        let nA = cross(rowA, colA)
+        if length(cross(nA, normalB)) < 1e-6 * max(1, length(nA)) { return nil }
+        guard abs(A) > 1e-12 || abs(B) > 1e-12 else { return nil }
+
+        let w = Double(widthA), h = Double(heightA)
+        var points: [CGPoint] = []
+        func add(_ x: Double, _ y: Double) {
+            let eps = 1e-9
+            guard x >= -eps, x <= w + eps, y >= -eps, y <= h + eps, x.isFinite, y.isFinite else { return }
+            let p = CGPoint(x: min(max(x, 0), w), y: min(max(y, 0), h))
+            if !points.contains(where: { abs($0.x - p.x) < 1e-6 && abs($0.y - p.y) < 1e-6 }) {
+                points.append(p)
+            }
+        }
+        if abs(B) > 1e-12 {
+            add(0, C / B)                 // left edge
+            add(w, (C - A * w) / B)       // right edge
+        }
+        if abs(A) > 1e-12 {
+            add(C / A, 0)                 // top edge
+            add((C - B * h) / A, h)       // bottom edge
+        }
+        guard points.count >= 2 else { return nil }
+        // Choose the two farthest-apart points (corner hits can add duplicates)
+        var best = (points[0], points[1])
+        var bestD = -1.0
+        for i in 0..<points.count {
+            for j in (i + 1)..<points.count {
+                let dx = Double(points[i].x - points[j].x), dy = Double(points[i].y - points[j].y)
+                let d = dx * dx + dy * dy
+                if d > bestD { bestD = d; best = (points[i], points[j]) }
+            }
+        }
+        guard bestD > 1e-12 else { return nil }
+        return CrossReferenceLine(startPixel: best.0, endPixel: best.1)
     }
 
     private static func cross(_ a: SIMD3<Double>, _ b: SIMD3<Double>) -> SIMD3<Double> {

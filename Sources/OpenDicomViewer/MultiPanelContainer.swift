@@ -839,15 +839,10 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                         panel.rulerPreviewEnd = px
                     } else {
                         // Second click: finalize ruler
+                        // Points are in display-image space; measure in raw pixels × spacing
+                        // (they differ for aspect-corrected MPR/MIP images).
                         let start = rulerStartPixel!
-                        let dx = Double(px.x - start.x)
-                        let dy = Double(px.y - start.y)
-                        var distance: Double
-                        if let ps = panel.pixelSpacing {
-                            distance = sqrt(pow(dx * ps.1, 2) + pow(dy * ps.0, 2))
-                        } else {
-                            distance = sqrt(dx * dx + dy * dy)
-                        }
+                        let distance = panel.pixelDisplayMapping.distance(from: start, to: px, pixelSpacing: panel.pixelSpacing)
                         let annotation = Annotation(type: .ruler(start: start, end: px, distanceMM: distance))
                         panel.annotations.append(annotation)
                         // Clear preview
@@ -866,16 +861,8 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                         let vertex = anglePoints[1]
                         let arm1 = anglePoints[0]
                         let arm2 = anglePoints[2]
-                        let v1 = CGPoint(x: arm1.x - vertex.x, y: arm1.y - vertex.y)
-                        let v2 = CGPoint(x: arm2.x - vertex.x, y: arm2.y - vertex.y)
-                        let dot = Double(v1.x * v2.x + v1.y * v2.y)
-                        let mag1 = sqrt(Double(v1.x * v1.x + v1.y * v1.y))
-                        let mag2 = sqrt(Double(v2.x * v2.x + v2.y * v2.y))
-                        var degrees = 0.0
-                        if mag1 > 0 && mag2 > 0 {
-                            let cosAngle = max(-1, min(1, dot / (mag1 * mag2)))
-                            degrees = acos(cosAngle) * 180.0 / .pi
-                        }
+                        let degrees = panel.pixelDisplayMapping.angle(vertex: vertex, arm1: arm1, arm2: arm2,
+                                                                      pixelSpacing: panel.pixelSpacing)
                         let annotation = Annotation(type: .angle(vertex: vertex, arm1: arm1, arm2: arm2, degrees: degrees))
                         panel.annotations.append(annotation)
                         // Clear preview
@@ -1334,45 +1321,25 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 panel.showCursorInfo = false
                 return
             }
-            let pixelX = pixelPoint.x
-            let pixelY = pixelPoint.y
-
-            // Safe Double→Int conversion (pixelX/Y can be NaN/Inf with degenerate transforms)
-            guard pixelX.isFinite, pixelY.isFinite else {
+            // screenToPixel yields display-image coordinates; convert to raw
+            // rows/columns (they differ for aspect-corrected MPR/MIP images).
+            guard let rawIndex = panel.pixelDisplayMapping.rawPixelIndex(pixelPoint),
+                  rawIndex.x < panel.imageWidth, rawIndex.y < panel.imageHeight else {
                 panel.showCursorInfo = false
                 return
             }
-            let px = Int(max(-1, min(Double(Int.max / 2), pixelX)))
-            let py = Int(max(-1, min(Double(Int.max / 2), pixelY)))
-
-            guard px >= 0, px < panel.imageWidth, py >= 0, py < panel.imageHeight else {
-                panel.showCursorInfo = false
-                return
-            }
+            let px = rawIndex.x
+            let py = rawIndex.y
 
             // Only update if position changed (throttle view updates)
             guard px != panel.cursorPixelX || py != panel.cursorPixelY else { return }
 
-            // Look up raw pixel value
+            // Look up the pixel value (modality units; 8/16/32-bit, RGB mean)
             var huValue: Double = 0
-            if let data = panel.rawPixelData {
-                let index = py * panel.imageWidth + px
-                if panel.bitDepth > 8 {
-                    let byteIndex = index * 2
-                    if byteIndex + 1 < data.count {
-                        data.withUnsafeBytes { raw in
-                            if let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt16.self) {
-                                if panel.isSigned {
-                                    huValue = Double(Int16(bitPattern: ptr[index]))
-                                } else {
-                                    huValue = Double(ptr[index])
-                                }
-                            }
-                        }
-                    }
-                } else if index < data.count {
-                    huValue = Double(data[index])
-                }
+            if let data = panel.rawPixelData,
+               let v = PixelValues.value(in: data, index: py * panel.imageWidth + px,
+                                         bits: panel.bitDepth, isSigned: panel.isSigned, samples: panel.samples) {
+                huValue = v
             }
 
             panel.cursorPixelX = px
