@@ -478,7 +478,7 @@ extension Array where Element == DICOMTreeElement {
     }
 }
 
-private final class DICOMElementTreeParser {
+final class DICOMElementTreeParser {
     private let data: Data
     private var offset: Int
     private var isExplicitVR: Bool
@@ -611,6 +611,19 @@ private final class DICOMElementTreeParser {
         }
 
         if length == UInt32.max {
+            // Undefined length on a non-SQ: encapsulated pixel data, an implicit
+            // VR sequence we don't know by tag, or UN (content is implicit VR LE).
+            let isPixelData = tag == DicomTag(group: 0x7FE0, element: 0x0010)
+            if !isPixelData {
+                let saved = (offset, isExplicitVR, isLittleEndian)
+                if explicit && vr == .UN { isExplicitVR = false; isLittleEndian = true }
+                if let items = try? parseSequenceItems(length: length) {
+                    isExplicitVR = saved.1
+                    isLittleEndian = saved.2
+                    return DICOMTreeElement(tag: tag, vr: .SQ, data: Data(), items: items)
+                }
+                (offset, isExplicitVR, isLittleEndian) = saved
+            }
             let valueStart = offset
             skipUndefinedLengthValue()
             let safeRange = valueStart..<min(offset, data.count)
@@ -636,6 +649,7 @@ private final class DICOMElementTreeParser {
                 break
             }
             guard tag.group == 0xFFFE && tag.element == 0xE000 else {
+                if length == UInt32.max { throw DicomError.invalidFile }
                 break
             }
 
@@ -683,7 +697,16 @@ private final class DICOMElementTreeParser {
         }
     }
 
+    /// Skip an undefined-length value. Walks items structurally (tracking
+    /// nesting) so an inner Sequence Delimitation Item doesn't end the outer
+    /// value; falls back to a byte scan for malformed content.
     private func skipUndefinedLengthValue() {
+        let start = offset
+        if let end = try? skipItems(depth: 0) {
+            offset = end
+            return
+        }
+        offset = start
         while offset + 8 <= data.count {
             if data[offset] == 0xFE,
                data[offset + 1] == 0xFF,
@@ -695,6 +718,30 @@ private final class DICOMElementTreeParser {
             offset += 1
         }
         offset = data.count
+    }
+
+    private func skipItems(depth: Int) throws -> Int {
+        guard depth < 64 else { throw DicomError.invalidFile }
+        while true {
+            let tag = try readTag()
+            let length = try readUInt32()
+            guard tag.group == 0xFFFE else { throw DicomError.invalidFile }
+            if tag.element == 0xE0DD { return offset }
+            guard tag.element == 0xE000 else { throw DicomError.invalidFile }
+            if length == UInt32.max {
+                let itemParser = DICOMElementTreeParser(
+                    data: data,
+                    offset: offset,
+                    isExplicitVR: isExplicitVR,
+                    isLittleEndian: isLittleEndian
+                )
+                _ = try itemParser.parseDataSet(stopAtItemDelimiter: true)
+                offset = itemParser.offset
+            } else {
+                guard offset + Int(length) <= data.count else { throw DicomError.endOfFile }
+                offset += Int(length)
+            }
+        }
     }
 
     private func peekTag() throws -> DicomTag {

@@ -704,8 +704,11 @@ class DICOMModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
+        // DICOM files often have no or arbitrary extensions (UID names, .IMA),
+        // so accept any data file and detect DICOM by content.
         panel.allowedContentTypes = [
             .init(filenameExtension: "dcm")!,
+            .data,
             .folder
         ]
         if panel.runModal() == .OK, let url = panel.url {
@@ -1997,9 +2000,9 @@ class DICOMModel: ObservableObject {
                 // Skip DICOMDIR files (directory index, not images)
                 if fileURL.lastPathComponent.uppercased() == "DICOMDIR" { continue }
 
-                // Check Extension
-                let ext = fileURL.pathExtension.lowercased()
-                if ext != "dcm" && ext != "" { continue }
+                // Detect DICOM by content, not extension: UID-named files
+                // (1.2.840...), .IMA, .dicom etc. are all common.
+                if !DicomFileSniffer.isCandidate(fileURL) { continue }
                 
                 // Process File
                 if let context = self.quickParse(fileURL) { 
