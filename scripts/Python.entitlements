@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <!-- Entitlements for the bundled Python interpreter only (Resources/python/bin).
+         Plugin venvs symlink to this interpreter, so they run under it as well.
+         Never apply these to the main app executable: see OpenDicomViewer.entitlements. -->
+
+    <!-- ctypes/cffi (libffi closures) and MLX need writable+executable memory -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- pip-installed wheels (numpy, torch, mlx, ...) ship extension modules and
+         dylibs that are not signed by us, so library validation must be off -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

@@ -1,4 +1,4 @@
-prefix=/Volumes/eDrive/LocalDev/macomviewer/libs/openjpeg
+prefix=/Users/daeseongkim/ODV-Annotate/.claude/worktrees/packaging-fixes-4a2225/libs/openjpeg
 bindir=${prefix}/bin
 mandir=${prefix}/
 docdir=${prefix}/

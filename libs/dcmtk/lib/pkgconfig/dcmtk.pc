@@ -1,6 +1,6 @@
-prefix="/Volumes/eDrive/LocalDev/macomviewer/libs/dcmtk"
+prefix="/Users/daeseongkim/ODV-Annotate/.claude/worktrees/packaging-fixes-4a2225/libs/dcmtk"
 exec_prefix="${prefix}"
-libdir="/Volumes/eDrive/LocalDev/macomviewer/libs/dcmtk/lib"
+libdir="/Users/daeseongkim/ODV-Annotate/.claude/worktrees/packaging-fixes-4a2225/libs/dcmtk/lib"
 includedir="${prefix}/include/"
 
 Name: DCMTK
