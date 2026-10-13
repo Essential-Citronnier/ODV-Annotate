@@ -25,6 +25,7 @@ enum VolumeBuilderError: Error, CustomStringConvertible {
     case inconsistentOrientation
     case nonUniformSpacing(maxDeviation: Double)
     case memoryLimitExceeded(requiredMB: Int)
+    case duplicateSlicePositions(positions: Int, images: Int)
 
     var description: String {
         switch self {
@@ -35,26 +36,47 @@ enum VolumeBuilderError: Error, CustomStringConvertible {
         case .inconsistentOrientation: return "Images have different orientations"
         case .nonUniformSpacing(let dev): return "Non-uniform slice spacing (max deviation: \(String(format: "%.1f", dev))%)"
         case .memoryLimitExceeded(let mb): return "Volume exceeds memory limit (\(mb) MB)"
+        case .duplicateSlicePositions(let positions, let images):
+            return "\(images) images share \(positions) slice positions unevenly (mixed phases/acquisitions); cannot form one volume"
         }
     }
+}
+
+/// Slice geometry derived from a series before any pixel data is read.
+struct VolumeGeometry {
+    /// Images in stacking order (one per position; first phase when the
+    /// series repeats positions)
+    let images: [DicomImageContext]
+    let rowDirection: SIMD3<Double>
+    let colDirection: SIMD3<Double>
+    /// Actual stacking direction (first → last position), unit length.
+    /// Differs from row × col when the acquisition has gantry tilt.
+    let stackDirection: SIMD3<Double>
+    /// Distance between voxel planes along `stackDirection` (mm)
+    let sliceSpacing: Double
+    let pixelSpacing: SIMD2<Double>
+    let origin: SIMD3<Double>
+    let warnings: [String]
 }
 
 struct VolumeBuilder {
     /// Maximum volume memory in bytes (default 1 GB)
     static let maxMemoryBytes = 1_073_741_824
+    /// Two positions closer than this (mm, along the normal) are the same slice
+    static let duplicatePositionTolerance = 0.01
+    /// Spacing deviation (percent of median) above which we warn / refuse
+    static let spacingWarnPercent = 5.0
+    static let spacingFailPercent = 50.0
+    /// Gantry tilt (degrees) above which we warn
+    static let tiltWarnDegrees = 0.5
 
-    /// Build a VolumeData from a DICOM series.
-    /// Reads raw pixel data from the provided cache or loads from disk via DCMTK.
-    static func build(
-        series: DicomSeries,
-        rawDataCache: NSCache<NSURL, NSData>,
-        dcmtkCache: NSCache<NSURL, DCMTKImageObject>,
-        progress: ((Double) -> Void)? = nil
-    ) throws -> VolumeData {
+    /// Validate and order a series' slices: consistent orientation, duplicate
+    /// positions (multi-phase CT, DWI → first phase, or refuse when uneven),
+    /// spacing uniformity, and gantry tilt.
+    static func geometry(for series: DicomSeries) throws -> VolumeGeometry {
         let images = series.images
         guard !images.isEmpty else { throw VolumeBuilderError.noImages }
 
-        // Find first image with complete spatial metadata
         var firstOrient: [Double]?
         var firstSpacing: SIMD2<Double>?
         for img in images {
@@ -62,46 +84,203 @@ struct VolumeBuilder {
             if firstSpacing == nil, let s = img.pixelSpacing { firstSpacing = s }
             if firstOrient != nil && firstSpacing != nil { break }
         }
-
-        guard let orient = firstOrient, orient.count == 6,
-              let spacing = firstSpacing
+        guard let orient = firstOrient, let spacing = firstSpacing, spacing.x > 0, spacing.y > 0
         else { throw VolumeBuilderError.missingSpatialMetadata }
+
+        for img in images {
+            if let o = img.imageOrientation, o.count == 6,
+               zip(o, orient).contains(where: { abs($0 - $1) > 0.01 }) {
+                throw VolumeBuilderError.inconsistentOrientation
+            }
+        }
 
         let rowDir = simd_normalize(SIMD3<Double>(orient[0], orient[1], orient[2]))
         let colDir = simd_normalize(SIMD3<Double>(orient[3], orient[4], orient[5]))
-        let sliceNormal = simd_normalize(simd_cross(rowDir, colDir))
+        let normal = simd_normalize(simd_cross(rowDir, colDir))
 
-        // Sort images by projection along slice normal
-        let sorted = images.compactMap { img -> (DicomImageContext, Double)? in
+        // Sort by projection onto the slice normal
+        let projected = images.compactMap { img -> (DicomImageContext, Double)? in
             guard let pos = img.imagePosition else { return nil }
-            let proj = simd_dot(pos, sliceNormal)
-            return (img, proj)
-        }.sorted(by: { $0.1 < $1.1 })
+            return (img, simd_dot(pos, normal))
+        }.sorted { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0.instanceNumber < $1.0.instanceNumber }
+
+        // Group images that share a position
+        var groups: [[(DicomImageContext, Double)]] = []
+        for entry in projected {
+            if let last = groups.last?.first, abs(entry.1 - last.1) < duplicatePositionTolerance {
+                groups[groups.count - 1].append(entry)
+            } else {
+                groups.append([entry])
+            }
+        }
+        var warnings: [String] = []
+        let maxGroup = groups.map(\.count).max() ?? 0
+        if maxGroup > 1 {
+            let counts = Set(groups.map(\.count))
+            guard counts.count == 1 else {
+                throw VolumeBuilderError.duplicateSlicePositions(positions: groups.count, images: projected.count)
+            }
+            warnings.append("Series repeats each slice position \(maxGroup)× (multi-phase or diffusion); using the first of each.")
+        }
+        let sorted = groups.map { group in
+            group.min(by: { $0.0.instanceNumber < $1.0.instanceNumber })!
+        }
 
         guard sorted.count >= 2 else { throw VolumeBuilderError.missingSpatialMetadata }
 
-        // Determine consistent dimensions — try multiple images if the first fails
-        var firstW = 0, firstH = 0
-        var dimsFound = false
-        for (img, _) in sorted {
-            if let (w, h, _, _) = try? loadImageDimensions(img, rawDataCache: rawDataCache, dcmtkCache: dcmtkCache) {
-                firstW = w; firstH = h; dimsFound = true; break
+        // Slice spacing (median gap along the normal) and uniformity
+        var gaps: [Double] = []
+        for i in 1..<sorted.count { gaps.append(sorted[i].1 - sorted[i - 1].1) }
+        let medianGap = gaps.sorted()[gaps.count / 2]
+        guard medianGap > 1e-6 else { throw VolumeBuilderError.missingSpatialMetadata }
+        let maxDeviation = gaps.map { abs($0 - medianGap) / medianGap * 100 }.max() ?? 0
+        if maxDeviation > spacingFailPercent {
+            throw VolumeBuilderError.nonUniformSpacing(maxDeviation: maxDeviation)
+        } else if maxDeviation > spacingWarnPercent {
+            warnings.append(String(format: "Slice spacing varies by up to %.1f%%; volume uses the median spacing.", maxDeviation))
+        }
+
+        // Gantry tilt: stacking direction vs. slice normal. Geometry follows
+        // the real stacking vector so world coordinates stay correct.
+        guard let firstPos = sorted.first?.0.imagePosition, let lastPos = sorted.last?.0.imagePosition
+        else { throw VolumeBuilderError.missingSpatialMetadata }
+        var stackDir = normal
+        let span = lastPos - firstPos
+        if simd_length(span) > 1e-6 {
+            stackDir = simd_normalize(span)
+            if simd_dot(stackDir, normal) < 0 { stackDir = -stackDir }
+        }
+        let cosTilt = min(1, max(-1, simd_dot(stackDir, normal)))
+        let tiltDegrees = acos(cosTilt) * 180 / .pi
+        if tiltDegrees > tiltWarnDegrees {
+            warnings.append(String(format: "Gantry tilt of %.1f° detected; reformats are sheared along the stacking direction.", tiltDegrees))
+        }
+        let sliceSpacing = medianGap / max(cosTilt, 1e-3)
+
+        return VolumeGeometry(
+            images: sorted.map(\.0),
+            rowDirection: rowDir,
+            colDirection: colDir,
+            stackDirection: stackDir,
+            sliceSpacing: sliceSpacing,
+            pixelSpacing: spacing,
+            origin: firstPos,
+            warnings: warnings
+        )
+    }
+
+    /// Decoded slice handed to `assemble`.
+    struct SliceRaw {
+        let data: Data
+        let width: Int
+        let height: Int
+        let bits: Int
+        let isSigned: Bool
+    }
+
+    /// Fill an Int16 voxel buffer from decoded slices (modality units).
+    /// 8/16-bit slices are stored as-is. When 32-bit slices hold values that
+    /// don't fit Int16, the whole volume is stored with a linear encoding
+    /// (stored = (value − intercept) / slope) instead of clamping.
+    /// Missing slices (nil) are zero-filled.
+    static func assemble(
+        width: Int, height: Int, depth: Int,
+        slice: (Int) throws -> SliceRaw?
+    ) throws -> (voxels: UnsafeMutableBufferPointer<Int16>, slope: Double, intercept: Double) {
+        let stride = width * height
+        let buffer = UnsafeMutableBufferPointer<Int16>.allocate(capacity: stride * depth)
+        buffer.initialize(repeating: 0)
+        var success = false
+        defer { if !success { buffer.deallocate() } }
+
+        var wide: [(index: Int, values: [Int32])] = []
+        var lo = Int64(Int16.max), hi = Int64(Int16.min)
+        var any = false
+
+        for z in 0..<depth {
+            guard let s = try slice(z) else { continue }
+            guard s.width == width, s.height == height else { throw VolumeBuilderError.inconsistentDimensions }
+            let bps = PixelValues.bytesPerSample(bits: s.bits)
+            guard s.data.count >= stride * bps else { continue }
+            let offset = z * stride
+            if bps == 4 {
+                var values = [Int32](repeating: 0, count: stride)
+                s.data.withUnsafeBytes { raw in
+                    for i in 0..<stride {
+                        let u = raw.loadUnaligned(fromByteOffset: i * 4, as: UInt32.self)
+                        let v = s.isSigned ? Int64(Int32(bitPattern: u)) : Int64(u)
+                        let c = Int32(clamping: v)
+                        values[i] = c
+                        lo = min(lo, Int64(c)); hi = max(hi, Int64(c))
+                    }
+                }
+                any = true
+                wide.append((z, values))
+            } else {
+                s.data.withUnsafeBytes { raw in
+                    for i in 0..<stride {
+                        let v = Int64(PixelValues.value(in: raw, index: i, bits: s.bits, isSigned: s.isSigned) ?? 0)
+                        let c = Int16(clamping: v)
+                        buffer[offset + i] = c
+                        lo = min(lo, Int64(c)); hi = max(hi, Int64(c))
+                    }
+                }
+                any = true
             }
         }
-        guard dimsFound, firstW > 0, firstH > 0 else {
-            throw VolumeBuilderError.missingPixelData(url: sorted[0].0.url)
-        }
 
-        // Compute slice spacing using median (robust to outliers)
-        var spacings: [Double] = []
-        for i in 1..<sorted.count {
-            spacings.append(sorted[i].1 - sorted[i - 1].1)
+        var slope = 1.0, intercept = 0.0
+        if any && (lo < Int64(Int16.min) || hi > Int64(Int16.max)) {
+            // Map [lo, hi] onto the full Int16 range
+            slope = max(1.0, Double(hi - lo) / 65535.0)
+            intercept = Double(lo) + 32768.0 * slope
+            // Re-encode slices already stored as identity
+            let wideIndices = Set(wide.map(\.index))
+            for z in 0..<depth where !wideIndices.contains(z) {
+                for i in (z * stride)..<((z + 1) * stride) {
+                    buffer[i] = encode(Double(buffer[i]), slope: slope, intercept: intercept)
+                }
+            }
         }
-        let sortedSpacings = spacings.sorted()
-        let medianSpacing = sortedSpacings[sortedSpacings.count / 2]
+        for (z, values) in wide {
+            let offset = z * stride
+            for i in 0..<stride {
+                buffer[offset + i] = encode(Double(values[i]), slope: slope, intercept: intercept)
+            }
+        }
+        success = true
+        return (buffer, slope, intercept)
+    }
 
+    @inline(__always)
+    private static func encode(_ v: Double, slope: Double, intercept: Double) -> Int16 {
+        Int16(clamping: Int(((v - intercept) / slope).rounded()))
+    }
+
+    /// Build a VolumeData from a DICOM series.
+    /// Reads modality-unit pixel data via DCMTK (or the JPEG 2000 fallback).
+    /// `volumeID` identifies this build (series + file set) for GPU texture caching.
+    static func build(
+        series: DicomSeries,
+        volumeID: String? = nil,
+        rawDataCache: NSCache<NSURL, NSData>,
+        dcmtkCache: NSCache<NSURL, DCMTKImageObject>,
+        progress: ((Double) -> Void)? = nil
+    ) throws -> VolumeData {
+        let geo = try geometry(for: series)
+        let sorted = geo.images
         let depth = sorted.count
-        let sliceSpacing = abs(medianSpacing) > 1e-6 ? abs(medianSpacing) : (series.images.first?.sliceThickness ?? 1.0)
+
+        // Determine consistent dimensions — try multiple images if the first fails
+        var firstW = 0, firstH = 0
+        for img in sorted {
+            if let (w, h, _, _) = try? loadImageDimensions(img, rawDataCache: rawDataCache, dcmtkCache: dcmtkCache) {
+                firstW = w; firstH = h; break
+            }
+        }
+        guard firstW > 0, firstH > 0 else {
+            throw VolumeBuilderError.missingPixelData(url: sorted[0].url)
+        }
 
         // Memory check
         let requiredBytes = firstW * firstH * depth * MemoryLayout<Int16>.stride
@@ -109,64 +288,41 @@ struct VolumeBuilder {
             throw VolumeBuilderError.memoryLimitExceeded(requiredMB: requiredBytes / (1024 * 1024))
         }
 
-        // Allocate contiguous buffer
-        let buffer = UnsafeMutableBufferPointer<Int16>.allocate(capacity: firstW * firstH * depth)
-        buffer.initialize(repeating: 0)
-
-        let sliceStride = firstW * firstH
-
-        // Extract RescaleSlope/Intercept from first image tags
-        let (slope, intercept) = extractRescaleParams(sorted[0].0, rawDataCache: rawDataCache, dcmtkCache: dcmtkCache)
-
-        // Clear caches for this series to ensure consistent per-slice processing.
-        // Without this, some slices may return DCMTK post-Modality-LUT values
-        // (with RescaleSlope applied) from cache while others return raw values,
-        // causing intensity discontinuities in the volume (visible as slab boundaries
-        // in 3D TOF MRA reconstructions).
-        for (img, _) in sorted {
+        // Clear caches for this series so every slice is decoded the same way
+        // (all paths now yield modality units; this keeps stale entries from
+        // older decodes out of the volume).
+        for img in sorted {
             rawDataCache.removeObject(forKey: img.url as NSURL)
             dcmtkCache.removeObject(forKey: img.url as NSURL)
         }
 
-        // Fill volume slice by slice (using per-slice bit depth/signedness)
-        for (sliceIdx, (img, _)) in sorted.enumerated() {
-            progress?(Double(sliceIdx) / Double(depth))
-
-            guard let info = loadRawDataWithInfo(img, rawDataCache: rawDataCache, dcmtkCache: dcmtkCache) else {
-                // Zero-fill this slice (already initialized to 0)
-                continue
-            }
-
-            let offset = sliceIdx * sliceStride
-            fillSlice(
-                buffer: buffer,
-                offset: offset,
-                rawData: info.data,
-                width: firstW,
-                height: firstH,
-                bits: info.bits,
-                isSigned: info.isSigned
-            )
+        let (buffer, slope, intercept) = try assemble(width: firstW, height: firstH, depth: depth) { z in
+            progress?(Double(z) / Double(depth))
+            guard let info = loadRawDataWithInfo(sorted[z], rawDataCache: rawDataCache, dcmtkCache: dcmtkCache),
+                  info.samples == 1 else { return nil }
+            return SliceRaw(data: info.data, width: info.width, height: info.height, bits: info.bits, isSigned: info.isSigned)
         }
 
         progress?(1.0)
 
-        guard let origin = sorted[0].0.imagePosition else { throw VolumeBuilderError.missingSpatialMetadata }
+        for w in geo.warnings { print("Volume build warning (\(series.seriesDescription)): \(w)") }
 
         return VolumeData(
             voxels: buffer,
             width: firstW,
             height: firstH,
             depth: depth,
-            spacingX: spacing.x,
-            spacingY: spacing.y,
-            spacingZ: sliceSpacing,
-            origin: origin,
-            rowDirection: rowDir,
-            colDirection: colDir,
+            spacingX: geo.pixelSpacing.y,   // column spacing: mm between columns (along row direction)
+            spacingY: geo.pixelSpacing.x,   // row spacing: mm between rows (along column direction)
+            spacingZ: geo.sliceSpacing,
+            origin: geo.origin,
+            rowDirection: geo.rowDirection,
+            colDirection: geo.colDirection,
+            sliceDirection: geo.stackDirection,
             rescaleSlope: slope,
             rescaleIntercept: intercept,
-            seriesUID: series.id
+            seriesUID: volumeID ?? series.id,
+            warnings: geo.warnings
         )
     }
 
@@ -188,30 +344,18 @@ struct VolumeBuilder {
         // JPEG 2000 fallback via OpenJPEG
         var w: Int = 0, h: Int = 0, d: Int = 0, s: Int = 0
         var signed: ObjCBool = false
-        if let raw = DCMTKHelper.decodeJPEG2000DICOM(img.url.path, width: &w, height: &h, bitDepth: &d, samples: &s, isSigned: &signed) {
-            rawDataCache.setObject(raw as NSData, forKey: img.url as NSURL)
+        if DCMTKHelper.decodeJPEG2000DICOM(img.url.path, width: &w, height: &h, bitDepth: &d, samples: &s, isSigned: &signed) != nil {
             return (w, h, d, signed.boolValue)
         }
         throw VolumeBuilderError.missingPixelData(url: img.url)
     }
 
-    /// Load raw pixel data along with per-slice representation info
+    /// Load modality-unit pixel data along with per-slice representation info
     private static func loadRawDataWithInfo(
         _ img: DicomImageContext,
         rawDataCache: NSCache<NSURL, NSData>,
         dcmtkCache: NSCache<NSURL, DCMTKImageObject>
-    ) -> (data: Data, bits: Int, isSigned: Bool)? {
-        // Try cached raw data first
-        if let cached = rawDataCache.object(forKey: img.url as NSURL) {
-            // Need dimensions — try DCMTK or JPEG 2000
-            if let dcmObj = dcmtkCache.object(forKey: img.url as NSURL) ?? DCMTKImageObject(path: img.url.path) {
-                var w: Int = 0, h: Int = 0, d: Int = 0, s: Int = 0
-                var signed: ObjCBool = false
-                if dcmObj.getRawDataWidth(&w, height: &h, bitDepth: &d, samples: &s, isSigned: &signed) != nil {
-                    return (cached as Data, d, signed.boolValue)
-                }
-            }
-        }
+    ) -> (data: Data, width: Int, height: Int, bits: Int, samples: Int, isSigned: Bool)? {
         // Try DCMTK
         if let dcmObj = dcmtkCache.object(forKey: img.url as NSURL) ?? DCMTKImageObject(path: img.url.path) {
             var w: Int = 0, h: Int = 0, d: Int = 0, s: Int = 0
@@ -219,98 +363,17 @@ struct VolumeBuilder {
             if let raw = dcmObj.getRawDataWidth(&w, height: &h, bitDepth: &d, samples: &s, isSigned: &signed) {
                 rawDataCache.setObject(raw as NSData, forKey: img.url as NSURL)
                 dcmtkCache.setObject(dcmObj, forKey: img.url as NSURL)
-                return (raw as Data, d, signed.boolValue)
+                return (raw as Data, w, h, d, s, signed.boolValue)
             }
         }
-        // JPEG 2000 fallback via OpenJPEG
+        // JPEG 2000 fallback via OpenJPEG (rescale applied in the wrapper)
         var w: Int = 0, h: Int = 0, d: Int = 0, s: Int = 0
         var signed: ObjCBool = false
         if let raw = DCMTKHelper.decodeJPEG2000DICOM(img.url.path, width: &w, height: &h, bitDepth: &d, samples: &s, isSigned: &signed) {
             rawDataCache.setObject(raw as NSData, forKey: img.url as NSURL)
-            return (raw as Data, d, signed.boolValue)
+            return (raw as Data, w, h, d, s, signed.boolValue)
         }
         return nil
-    }
-
-    private static func fillSlice(
-        buffer: UnsafeMutableBufferPointer<Int16>,
-        offset: Int,
-        rawData: Data,
-        width: Int,
-        height: Int,
-        bits: Int,
-        isSigned: Bool
-    ) {
-        let pixelCount = width * height
-
-        rawData.withUnsafeBytes { rawBuf in
-            if bits >= 32 {
-                // 32-bit data (DCMTK can return this after Modality LUT on some series)
-                if isSigned {
-                    guard rawData.count >= pixelCount * 4 else { return }
-                    let src = rawBuf.baseAddress!.assumingMemoryBound(to: Int32.self)
-                    for i in 0..<pixelCount {
-                        buffer[offset + i] = Int16(clamping: src[i])
-                    }
-                } else {
-                    guard rawData.count >= pixelCount * 4 else { return }
-                    let src = rawBuf.baseAddress!.assumingMemoryBound(to: UInt32.self)
-                    for i in 0..<pixelCount {
-                        buffer[offset + i] = Int16(clamping: Int32(min(UInt32(Int32.max), src[i])))
-                    }
-                }
-            } else if bits > 8 {
-                // 16-bit data
-                guard rawData.count >= pixelCount * 2 else { return }
-                if isSigned {
-                    let src = rawBuf.baseAddress!.assumingMemoryBound(to: Int16.self)
-                    for i in 0..<pixelCount {
-                        buffer[offset + i] = src[i]
-                    }
-                } else {
-                    let src = rawBuf.baseAddress!.assumingMemoryBound(to: UInt16.self)
-                    for i in 0..<pixelCount {
-                        buffer[offset + i] = Int16(clamping: Int32(src[i]))
-                    }
-                }
-            } else {
-                // 8-bit data — upcast to Int16
-                guard rawData.count >= pixelCount else { return }
-                let src = rawBuf.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                for i in 0..<pixelCount {
-                    buffer[offset + i] = Int16(src[i])
-                }
-            }
-        }
-    }
-
-    private static func extractRescaleParams(
-        _ img: DicomImageContext,
-        rawDataCache: NSCache<NSURL, NSData>,
-        dcmtkCache: NSCache<NSURL, DCMTKImageObject>
-    ) -> (slope: Double, intercept: Double) {
-        // Try parsing DICOM tags for RescaleSlope (0028,1053) and RescaleIntercept (0028,1052)
-        guard let data = try? Data(contentsOf: img.url, options: .mappedIfSafe) else {
-            return (1.0, 0.0)
-        }
-        let parser = SimpleDicomParser(data: data)
-        guard let (elements, _, _) = try? parser.parse(stopAtPixelData: true) else {
-            return (1.0, 0.0)
-        }
-
-        var slope = 1.0
-        var intercept = 0.0
-
-        if let slopeStr = elements.first(where: { $0.tag == DicomTag(group: 0x0028, element: 0x1053) })?.stringValue,
-           let s = Double(slopeStr.trimmingCharacters(in: .whitespacesAndNewlines)) {
-            slope = s
-        }
-        if let interceptStr = elements.first(where: { $0.tag == DicomTag(group: 0x0028, element: 0x1052) })?.stringValue,
-           let i = Double(interceptStr.trimmingCharacters(in: .whitespacesAndNewlines)) {
-            intercept = i
-        }
-
-        return (slope, intercept)
     }
 }
 
@@ -318,14 +381,50 @@ struct VolumeBuilder {
 
 /// Result of an MPR slice generation
 struct MPRSlice {
-    let pixelData: Data     // Raw Int16 values
+    let pixelData: Data     // Stored Int16 values (see rescaleSlope/Intercept)
     let width: Int
     let height: Int
+    /// World position of the centre of pixel (0, 0) — DICOM ImagePositionPatient
     let planeOrigin: SIMD3<Double>
+    /// Direction of increasing column index (DICOM IOP row cosines)
     let planeRowDir: SIMD3<Double>
+    /// Direction of increasing row index (DICOM IOP column cosines)
     let planeColDir: SIMD3<Double>
+    /// mm between columns
     let pixelSpacingX: Double
+    /// mm between rows
     let pixelSpacingY: Double
+    /// value = stored × slope + intercept (from the volume's encoding)
+    var rescaleSlope: Double = 1
+    var rescaleIntercept: Double = 0
+
+    /// DICOM-order PixelSpacing: (row spacing, column spacing)
+    var dicomPixelSpacing: (Double, Double) { (pixelSpacingY, pixelSpacingX) }
+
+    /// DICOM ImageOrientationPatient for this plane
+    var imageOrientationPatient: [Double] {
+        [planeRowDir.x, planeRowDir.y, planeRowDir.z, planeColDir.x, planeColDir.y, planeColDir.z]
+    }
+
+    /// Pixel data in modality units for consumers that read raw values
+    /// (HU readout, ROI stats): Int16 when the volume stores modality values
+    /// directly, otherwise decoded to Int32.
+    var modalityPixels: (data: Data, bits: Int, isSigned: Bool) {
+        if rescaleSlope == 1 && rescaleIntercept == 0 { return (pixelData, 16, true) }
+        return (PixelValues.int16ToModalityInt32(pixelData, slope: rescaleSlope, intercept: rescaleIntercept), 32, true)
+    }
+}
+
+/// Geometry of an orthogonal MPR plane, independent of pixel extraction so
+/// panels can update spatial metadata before rendering.
+struct MPRPlaneGeometry {
+    let origin: SIMD3<Double>
+    let rowDir: SIMD3<Double>
+    let colDir: SIMD3<Double>
+    let spacingX: Double
+    let spacingY: Double
+    let width: Int
+    let height: Int
 }
 
 class MPREngine {
@@ -353,17 +452,62 @@ class MPREngine {
             }
         }
 
-        let origin = volume.voxelToWorld(SIMD3<Double>(0, 0, Double(zIndex)))
+        return makeSlice(data, axialGeometry(at: zIndex))
+    }
 
-        return MPRSlice(
-            pixelData: data,
-            width: w,
-            height: h,
-            planeOrigin: origin,
-            planeRowDir: volume.rowDirection,
-            planeColDir: volume.colDirection,
-            pixelSpacingX: volume.spacingX,
-            pixelSpacingY: volume.spacingY
+    /// Whether sagittal/coronal reformats put the last slice on the top row
+    /// (so superior is up when slices advance toward superior).
+    var flipsZ: Bool { volume.sliceDirection.z >= 0 }
+
+    /// Plane geometry of the sagittal reformat at X index `xIndex`.
+    /// Row 0 is the last slice when `flipsZ`, so the origin and column
+    /// direction follow the flip.
+    func sagittalGeometry(at xIndex: Int) -> MPRPlaneGeometry {
+        let zTop = flipsZ ? Double(volume.depth - 1) : 0
+        return MPRPlaneGeometry(
+            origin: volume.voxelToWorld(SIMD3<Double>(Double(xIndex), 0, zTop)),
+            rowDir: volume.colDirection,
+            colDir: flipsZ ? -volume.sliceDirection : volume.sliceDirection,
+            spacingX: volume.spacingY,
+            spacingY: volume.spacingZ,
+            width: volume.height,
+            height: volume.depth
+        )
+    }
+
+    /// Plane geometry of the coronal reformat at Y index `yIndex`.
+    func coronalGeometry(at yIndex: Int) -> MPRPlaneGeometry {
+        let zTop = flipsZ ? Double(volume.depth - 1) : 0
+        return MPRPlaneGeometry(
+            origin: volume.voxelToWorld(SIMD3<Double>(0, Double(yIndex), zTop)),
+            rowDir: volume.rowDirection,
+            colDir: flipsZ ? -volume.sliceDirection : volume.sliceDirection,
+            spacingX: volume.spacingX,
+            spacingY: volume.spacingZ,
+            width: volume.width,
+            height: volume.depth
+        )
+    }
+
+    /// Plane geometry of the axial slice (or slab centre) at Z index `zIndex`.
+    func axialGeometry(at zIndex: Int) -> MPRPlaneGeometry {
+        MPRPlaneGeometry(
+            origin: volume.voxelToWorld(SIMD3<Double>(0, 0, Double(zIndex))),
+            rowDir: volume.rowDirection,
+            colDir: volume.colDirection,
+            spacingX: volume.spacingX,
+            spacingY: volume.spacingY,
+            width: volume.width,
+            height: volume.height
+        )
+    }
+
+    private func makeSlice(_ data: Data, _ g: MPRPlaneGeometry) -> MPRSlice {
+        MPRSlice(
+            pixelData: data, width: g.width, height: g.height,
+            planeOrigin: g.origin, planeRowDir: g.rowDir, planeColDir: g.colDir,
+            pixelSpacingX: g.spacingX, pixelSpacingY: g.spacingY,
+            rescaleSlope: volume.rescaleSlope, rescaleIntercept: volume.rescaleIntercept
         )
     }
 
@@ -374,7 +518,7 @@ class MPREngine {
         // Flip Z so superior is at top: only when sliceDirection.z >= 0 (z increases toward superior)
         let w = volume.height   // output width = Y dimension
         let h = volume.depth    // output height = Z dimension
-        let flipZ = volume.sliceDirection.z >= 0
+        let flipZ = flipsZ
 
         var data = Data(count: w * h * MemoryLayout<Int16>.stride)
         data.withUnsafeMutableBytes { buf in
@@ -387,18 +531,7 @@ class MPREngine {
             }
         }
 
-        let origin = volume.voxelToWorld(SIMD3<Double>(Double(xIndex), 0, 0))
-
-        return MPRSlice(
-            pixelData: data,
-            width: w,
-            height: h,
-            planeOrigin: origin,
-            planeRowDir: volume.colDirection,              // Y direction
-            planeColDir: volume.sliceDirection,             // Z direction
-            pixelSpacingX: volume.spacingY,
-            pixelSpacingY: volume.spacingZ
-        )
+        return makeSlice(data, sagittalGeometry(at: xIndex))
     }
 
     /// Generate a coronal slice at a given Y voxel index
@@ -408,7 +541,7 @@ class MPREngine {
         // Flip Z so superior is at top: only when sliceDirection.z >= 0 (z increases toward superior)
         let w = volume.width    // output width = X dimension
         let h = volume.depth    // output height = Z dimension
-        let flipZ = volume.sliceDirection.z >= 0
+        let flipZ = flipsZ
 
         var data = Data(count: w * h * MemoryLayout<Int16>.stride)
         data.withUnsafeMutableBytes { buf in
@@ -421,18 +554,7 @@ class MPREngine {
             }
         }
 
-        let origin = volume.voxelToWorld(SIMD3<Double>(0, Double(yIndex), 0))
-
-        return MPRSlice(
-            pixelData: data,
-            width: w,
-            height: h,
-            planeOrigin: origin,
-            planeRowDir: volume.rowDirection,               // X direction
-            planeColDir: volume.sliceDirection,              // Z direction
-            pixelSpacingX: volume.spacingX,
-            pixelSpacingY: volume.spacingZ
-        )
+        return makeSlice(data, coronalGeometry(at: yIndex))
     }
 
     // MARK: - Arbitrary Oblique Slice
@@ -471,7 +593,9 @@ class MPREngine {
             planeRowDir: rowDir,
             planeColDir: colDir,
             pixelSpacingX: spacing,
-            pixelSpacingY: spacing
+            pixelSpacingY: spacing,
+            rescaleSlope: volume.rescaleSlope,
+            rescaleIntercept: volume.rescaleIntercept
         )
     }
 
@@ -497,7 +621,10 @@ class MPREngine {
         guard let destData = context.data else { return nil }
         let destBuffer = destData.bindMemory(to: UInt8.self, capacity: totalPixels)
 
-        let windowBottom = wc - (ww / 2.0)
+        // W/L is in modality units; voxels may be stored with an encoding
+        let slope = slice.rescaleSlope == 0 ? 1 : slice.rescaleSlope
+        let storedWW = ww / slope
+        let windowBottom = (wc - slice.rescaleIntercept) / slope - (storedWW / 2.0)
 
         slice.pixelData.withUnsafeBytes { rawBuf in
             guard let src = rawBuf.baseAddress?.assumingMemoryBound(to: Int16.self),
@@ -505,7 +632,7 @@ class MPREngine {
 
             for i in 0..<totalPixels {
                 let val = Double(src[i])
-                var norm = (val - windowBottom) / ww * 255.0
+                var norm = (val - windowBottom) / storedWW * 255.0
                 if invert { norm = 255.0 - norm }
                 destBuffer[i] = UInt8(max(0, min(255, norm)))
             }
@@ -561,51 +688,34 @@ extension MPREngine {
         data.withUnsafeMutableBytes { buf in
             guard let dst = buf.baseAddress?.assumingMemoryBound(to: Int16.self) else { return }
 
-            // Initialize based on projection mode
-            for i in 0..<pixelCount {
-                switch mode {
-                case .mip:     dst[i] = Int16.min
-                case .minip:   dst[i] = Int16.max
-                case .average: dst[i] = 0
-                }
-            }
-
-            // Project slices through the slab
-            for z in zStart...zEnd {
-                let sliceOffset = z * pixelCount
-                for i in 0..<pixelCount {
-                    let val = volume.voxels[sliceOffset + i]
-                    switch mode {
-                    case .mip:     if val > dst[i] { dst[i] = val }
-                    case .minip:   if val < dst[i] { dst[i] = val }
-                    case .average: dst[i] = Int16(clamping: Int32(dst[i]) + Int32(val))
-                    }
-                }
-            }
-
-            // Finalize average
-            if mode == .average {
-                let count = Int32(zEnd - zStart + 1)
-                if count > 1 {
+            switch mode {
+            case .mip, .minip:
+                for i in 0..<pixelCount { dst[i] = mode == .mip ? Int16.min : Int16.max }
+                for z in zStart...zEnd {
+                    let sliceOffset = z * pixelCount
                     for i in 0..<pixelCount {
-                        dst[i] = Int16(clamping: Int32(dst[i]) / count)
+                        let val = volume.voxels[sliceOffset + i]
+                        if mode == .mip { if val > dst[i] { dst[i] = val } }
+                        else if val < dst[i] { dst[i] = val }
                     }
+                }
+            case .average:
+                // Accumulate in Int32: summing even a few Int16 slices overflows Int16
+                var sum = [Int32](repeating: 0, count: pixelCount)
+                for z in zStart...zEnd {
+                    let sliceOffset = z * pixelCount
+                    for i in 0..<pixelCount {
+                        sum[i] &+= Int32(volume.voxels[sliceOffset + i])
+                    }
+                }
+                let count = Double(zEnd - zStart + 1)
+                for i in 0..<pixelCount {
+                    dst[i] = Int16(clamping: Int((Double(sum[i]) / count).rounded()))
                 }
             }
         }
 
-        let origin = volume.voxelToWorld(SIMD3<Double>(0, 0, Double(slabCenter)))
-
-        return MPRSlice(
-            pixelData: data,
-            width: w,
-            height: h,
-            planeOrigin: origin,
-            planeRowDir: volume.rowDirection,
-            planeColDir: volume.colDirection,
-            pixelSpacingX: volume.spacingX,
-            pixelSpacingY: volume.spacingY
-        )
+        return makeSlice(data, axialGeometry(at: slabCenter))
     }
 }
 
@@ -699,7 +809,9 @@ extension MPREngine {
             planeRowDir: right,
             planeColDir: up,
             pixelSpacingX: spacing,
-            pixelSpacingY: spacing
+            pixelSpacingY: spacing,
+            rescaleSlope: volume.rescaleSlope,
+            rescaleIntercept: volume.rescaleIntercept
         )
     }
 }

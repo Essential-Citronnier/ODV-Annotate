@@ -47,6 +47,8 @@ struct DICOMPatientContour {
     let label: String
     let points: [SIMD3<Double>]
     let closed: Bool
+    /// ROI's Referenced Frame of Reference UID (3006,0024)
+    var frameOfReferenceUID: String? = nil
 }
 
 struct DICOMSegmentationFrame {
@@ -56,6 +58,10 @@ struct DICOMSegmentationFrame {
     let width: Int
     let height: Int
     let bitmap: Data
+    /// Plane Position (Patient) of the frame, from the per-frame functional groups
+    var imagePosition: SIMD3<Double>? = nil
+    /// Plane Orientation (Patient), per-frame or shared
+    var imageOrientation: [Double]? = nil
 }
 
 struct DICOMAnnotationObject {
@@ -84,10 +90,7 @@ struct DICOMAnnotationObject {
             ))
         }
 
-        for frame in segmentFrames {
-            if let ref = frame.referencedSOPInstanceUID, !ref.isEmpty, ref != imageContext.sopInstanceUID {
-                continue
-            }
+        for frame in segmentFrames where segmentFrameApplies(frame, to: imageContext) {
             guard frame.width > 0, frame.height > 0, frame.bitmap.count == frame.width * frame.height else {
                 continue
             }
@@ -126,6 +129,12 @@ struct DICOMAnnotationObject {
             if let ref = contour.referencedSOPInstanceUID, !ref.isEmpty, ref != imageContext.sopInstanceUID {
                 continue
             }
+            // Per-ROI frame of reference must match the image's when both are known
+            if let roiFOR = contour.frameOfReferenceUID, !roiFOR.isEmpty,
+               let imageFOR = imageContext.frameOfReferenceUID, !imageFOR.isEmpty,
+               roiFOR != imageFOR {
+                continue
+            }
 
             var pixelPoints: [CGPoint] = []
             var maxPlaneDistance = 0.0
@@ -158,6 +167,33 @@ struct DICOMAnnotationObject {
         }
 
         return overlays
+    }
+
+    /// A SEG frame applies to an image when it references the image's SOP
+    /// Instance, or — lacking derivation references — when it lies in the
+    /// image's plane within the same frame of reference. Frames that can be
+    /// placed neither way are not drawn (they used to appear on every image
+    /// of every series).
+    private func segmentFrameApplies(_ frame: DICOMSegmentationFrame, to imageContext: DicomImageContext) -> Bool {
+        if let ref = frame.referencedSOPInstanceUID, !ref.isEmpty {
+            return ref == imageContext.sopInstanceUID
+        }
+        guard let objectFOR = frameOfReferenceUID, !objectFOR.isEmpty,
+              let imageFOR = imageContext.frameOfReferenceUID, objectFOR == imageFOR,
+              let framePos = frame.imagePosition,
+              let ipp = imageContext.imagePosition,
+              let iop = imageContext.imageOrientation, iop.count == 6 else {
+            return false
+        }
+        if let frameIOP = frame.imageOrientation, frameIOP.count == 6,
+           zip(frameIOP, iop).contains(where: { abs($0 - $1) > 0.01 }) {
+            return false
+        }
+        let normal = simd_normalize(simd_cross(SIMD3(iop[0], iop[1], iop[2]), SIMD3(iop[3], iop[4], iop[5])))
+        let tolerance = max(imageContext.sliceThickness ?? imageContext.spacingBetweenSlices ?? 1.0, 1.0) / 2.0
+        // Same plane, and the frame's origin coincides with the image's
+        let delta = framePos - ipp
+        return abs(simd_dot(delta, normal)) <= tolerance && simd_length(delta) <= tolerance + 0.5
     }
 }
 
@@ -267,11 +303,20 @@ enum DICOMAnnotationObjectParser {
     private static func parseRTStructureSet(url: URL, elements: [DICOMTreeElement]) -> DICOMAnnotationObject? {
         let label = elements.string(0x3006, 0x0002) ?? elements.string(0x0008, 0x103E) ?? DICOMDerivedObjectKind.rtStructureSet.rawValue
         var roiNames: [Int: String] = [:]
+        var roiFrames: [Int: String] = [:]
 
         for roiItem in elements.sequenceItems(0x3006, 0x0020) {
             guard let number = roiItem.int(0x3006, 0x0022) else { continue }
             roiNames[number] = roiItem.string(0x3006, 0x0026) ?? "ROI \(number)"
+            // Referenced Frame of Reference UID (3006,0024)
+            if let frame = roiItem.string(0x3006, 0x0024), !frame.isEmpty {
+                roiFrames[number] = frame
+            }
         }
+        // RTSTRUCT rarely carries (0020,0052) itself; the frame of reference
+        // lives in Referenced Frame of Reference Sequence (3006,0010).
+        let referencedFrame = elements.sequenceItems(0x3006, 0x0010)
+            .compactMap { $0.string(0x0020, 0x0052) }.first(where: { !$0.isEmpty })
 
         var contours: [DICOMPatientContour] = []
         for roiContourItem in elements.sequenceItems(0x3006, 0x0039) {
@@ -291,7 +336,8 @@ enum DICOMAnnotationObjectParser {
                     roiNumber: roiNumber,
                     label: roiLabel,
                     points: points,
-                    closed: geometricType.contains("CLOSED")
+                    closed: geometricType.contains("CLOSED"),
+                    frameOfReferenceUID: roiNumber.flatMap { roiFrames[$0] } ?? referencedFrame
                 ))
             }
         }
@@ -301,7 +347,7 @@ enum DICOMAnnotationObjectParser {
             url: url,
             kind: .rtStructureSet,
             label: label,
-            frameOfReferenceUID: elements.string(0x0020, 0x0052),
+            frameOfReferenceUID: elements.string(0x0020, 0x0052) ?? referencedFrame ?? roiFrames.values.first,
             graphics: [],
             contours: contours,
             segmentFrames: []
@@ -334,6 +380,8 @@ enum DICOMAnnotationObjectParser {
 
         let label = elements.string(0x0008, 0x103E) ?? DICOMDerivedObjectKind.dicomSegmentation.rawValue
         let frameItems = elements.sequenceItems(0x5200, 0x9230)
+        let sharedOrientation = elements.sequenceItems(0x5200, 0x9229).first?
+            .sequenceItems(0x0020, 0x9116).first?.doubleValues(0x0020, 0x0037)
         let frameCount = min(numberOfFrames, frameItems.isEmpty ? numberOfFrames : frameItems.count)
         let pixelsPerFrame = rows * columns
         var frames: [DICOMSegmentationFrame] = []
@@ -351,6 +399,11 @@ enum DICOMAnnotationObjectParser {
             let segmentNumber = frameItem.sequenceItems(0x0062, 0x000A).first?.int(0x0062, 0x000B)
             let segmentLabel = segmentNumber.flatMap { segmentLabels[$0] } ?? label
             let referencedSOP = referencedSOPInstanceUID(fromSegmentationFrame: frameItem)
+            // Plane Position Sequence (0020,9113) → ImagePositionPatient
+            let position = frameItem.sequenceItems(0x0020, 0x9113).first?.doubleValues(0x0020, 0x0032)
+            // Plane Orientation Sequence (0020,9116), per-frame or shared (5200,9229)
+            let orientation = frameItem.sequenceItems(0x0020, 0x9116).first?.doubleValues(0x0020, 0x0037)
+                ?? sharedOrientation
 
             frames.append(DICOMSegmentationFrame(
                 referencedSOPInstanceUID: referencedSOP,
@@ -358,7 +411,9 @@ enum DICOMAnnotationObjectParser {
                 label: segmentLabel,
                 width: columns,
                 height: rows,
-                bitmap: bitmap
+                bitmap: bitmap,
+                imagePosition: position.flatMap { $0.count == 3 ? SIMD3($0[0], $0[1], $0[2]) : nil },
+                imageOrientation: orientation.flatMap { $0.count == 6 ? $0 : nil }
             ))
         }
 
@@ -478,7 +533,7 @@ extension Array where Element == DICOMTreeElement {
     }
 }
 
-private final class DICOMElementTreeParser {
+final class DICOMElementTreeParser {
     private let data: Data
     private var offset: Int
     private var isExplicitVR: Bool
@@ -611,6 +666,19 @@ private final class DICOMElementTreeParser {
         }
 
         if length == UInt32.max {
+            // Undefined length on a non-SQ: encapsulated pixel data, an implicit
+            // VR sequence we don't know by tag, or UN (content is implicit VR LE).
+            let isPixelData = tag == DicomTag(group: 0x7FE0, element: 0x0010)
+            if !isPixelData {
+                let saved = (offset, isExplicitVR, isLittleEndian)
+                if explicit && vr == .UN { isExplicitVR = false; isLittleEndian = true }
+                if let items = try? parseSequenceItems(length: length) {
+                    isExplicitVR = saved.1
+                    isLittleEndian = saved.2
+                    return DICOMTreeElement(tag: tag, vr: .SQ, data: Data(), items: items)
+                }
+                (offset, isExplicitVR, isLittleEndian) = saved
+            }
             let valueStart = offset
             skipUndefinedLengthValue()
             let safeRange = valueStart..<min(offset, data.count)
@@ -636,6 +704,7 @@ private final class DICOMElementTreeParser {
                 break
             }
             guard tag.group == 0xFFFE && tag.element == 0xE000 else {
+                if length == UInt32.max { throw DicomError.invalidFile }
                 break
             }
 
@@ -683,7 +752,16 @@ private final class DICOMElementTreeParser {
         }
     }
 
+    /// Skip an undefined-length value. Walks items structurally (tracking
+    /// nesting) so an inner Sequence Delimitation Item doesn't end the outer
+    /// value; falls back to a byte scan for malformed content.
     private func skipUndefinedLengthValue() {
+        let start = offset
+        if let end = try? skipItems(depth: 0) {
+            offset = end
+            return
+        }
+        offset = start
         while offset + 8 <= data.count {
             if data[offset] == 0xFE,
                data[offset + 1] == 0xFF,
@@ -695,6 +773,30 @@ private final class DICOMElementTreeParser {
             offset += 1
         }
         offset = data.count
+    }
+
+    private func skipItems(depth: Int) throws -> Int {
+        guard depth < 64 else { throw DicomError.invalidFile }
+        while true {
+            let tag = try readTag()
+            let length = try readUInt32()
+            guard tag.group == 0xFFFE else { throw DicomError.invalidFile }
+            if tag.element == 0xE0DD { return offset }
+            guard tag.element == 0xE000 else { throw DicomError.invalidFile }
+            if length == UInt32.max {
+                let itemParser = DICOMElementTreeParser(
+                    data: data,
+                    offset: offset,
+                    isExplicitVR: isExplicitVR,
+                    isLittleEndian: isLittleEndian
+                )
+                _ = try itemParser.parseDataSet(stopAtItemDelimiter: true)
+                offset = itemParser.offset
+            } else {
+                guard offset + Int(length) <= data.count else { throw DicomError.endOfFile }
+                offset += Int(length)
+            }
+        }
     }
 
     private func peekTag() throws -> DicomTag {

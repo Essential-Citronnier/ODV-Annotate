@@ -31,10 +31,18 @@ final class VolumeData {
     let origin: SIMD3<Double>          // ImagePositionPatient of first slice
     let rowDirection: SIMD3<Double>    // Normalized row direction cosine
     let colDirection: SIMD3<Double>    // Normalized column direction cosine
-    let sliceDirection: SIMD3<Double>  // cross(row, col), normalized — slice stacking direction
+    /// Slice stacking direction, normalized. Normally cross(row, col); with
+    /// gantry tilt it is the actual first→last position direction.
+    let sliceDirection: SIMD3<Double>
 
+    /// Linear encoding of the stored Int16 voxels: value = stored × slope + intercept.
+    /// Voxels hold modality units (e.g. HU) directly, so this is identity unless
+    /// 32-bit source data didn't fit Int16.
     let rescaleSlope: Double
     let rescaleIntercept: Double
+
+    /// Non-fatal geometry issues found while building (multi-phase, spacing, tilt)
+    let warnings: [String]
 
     /// 4×4 affine: voxel (i,j,k) → world (x,y,z) in mm
     let voxelToWorldMatrix: simd_double4x4
@@ -53,9 +61,11 @@ final class VolumeData {
         origin: SIMD3<Double>,
         rowDirection: SIMD3<Double>,
         colDirection: SIMD3<Double>,
+        sliceDirection: SIMD3<Double>? = nil,
         rescaleSlope: Double,
         rescaleIntercept: Double,
-        seriesUID: String
+        seriesUID: String,
+        warnings: [String] = []
     ) {
         self.voxels = voxels
         self.width = width
@@ -67,7 +77,8 @@ final class VolumeData {
         self.origin = origin
         self.rowDirection = rowDirection
         self.colDirection = colDirection
-        self.sliceDirection = simd_normalize(simd_cross(rowDirection, colDirection))
+        self.sliceDirection = simd_normalize(sliceDirection ?? simd_cross(rowDirection, colDirection))
+        self.warnings = warnings
         self.rescaleSlope = rescaleSlope
         self.rescaleIntercept = rescaleIntercept
         self.seriesUID = seriesUID
@@ -105,6 +116,16 @@ final class VolumeData {
     @inline(__always)
     func calibratedValue(x: Int, y: Int, z: Int) -> Double {
         Double(voxelAt(x: x, y: y, z: z)) * rescaleSlope + rescaleIntercept
+    }
+
+    /// True when stored voxels are not directly in modality units
+    var hasNonIdentityEncoding: Bool { rescaleSlope != 1 || rescaleIntercept != 0 }
+
+    /// Convert a window given in modality units to stored-voxel units
+    /// (for renderers that sample the raw Int16 voxels).
+    func storedWindow(width: Double, center: Double) -> (width: Double, center: Double) {
+        guard hasNonIdentityEncoding, rescaleSlope != 0 else { return (width, center) }
+        return (width / rescaleSlope, (center - rescaleIntercept) / rescaleSlope)
     }
 
     // MARK: - Coordinate Transforms

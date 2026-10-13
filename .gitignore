@@ -59,3 +59,7 @@ plugins/.venv/
 # Packaged app bundle and disk image
 *.app/
 *.dmg
+
+# Scratch renders and DMG staging (not source)
+/_view_*.png
+/dmg_tmp/

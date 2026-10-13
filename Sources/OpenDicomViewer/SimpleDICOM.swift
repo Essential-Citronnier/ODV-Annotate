@@ -94,19 +94,64 @@ class SimpleDicomParser {
     var isExplicitVR: Bool = true 
     var debugMode: Bool = false
     
+    /// Byte offset where the dataset (or file meta group) begins: 132 for
+    /// Part 10 files, 0 for preamble-less raw datasets.
+    private(set) var datasetStart: Int = 132
+    /// Encoding used for the dataset when there is no File Meta transfer syntax.
+    private var rawDatasetExplicitVR: Bool = false
+
     init(data: Data) {
         self.data = data
     }
-    
+
+    /// Cheap DICOM sniff over the first bytes of a file: either the "DICM"
+    /// magic at offset 128, or a preamble-less dataset that starts with a
+    /// plausible group 0002/0008 element (implicit or explicit VR little endian).
+    static func isLikelyDICOM(header: Data) -> Bool {
+        if hasPart10Preamble(header) { return true }
+        return rawDatasetEncoding(header) != nil
+    }
+
+    private static func hasPart10Preamble(_ d: Data) -> Bool {
+        guard d.count >= 132 else { return false }
+        let base = d.startIndex
+        return d[base + 128] == 0x44 && d[base + 129] == 0x49 && d[base + 130] == 0x43 && d[base + 131] == 0x4D
+    }
+
+    /// For a preamble-less dataset, returns whether it is explicit VR (true) or
+    /// implicit VR (false), or nil if the leading bytes don't look like DICOM.
+    static func rawDatasetEncoding(_ d: Data) -> Bool? {
+        guard d.count >= 12 else { return nil }
+        let b = [UInt8](d.prefix(12))
+        let group = UInt16(b[0]) | UInt16(b[1]) << 8
+        let element = UInt16(b[2]) | UInt16(b[3]) << 8
+        // Datasets almost always open with group 0008 (or a stray meta group);
+        // the first element number is small (e.g. 0005, 0008, 0016).
+        guard group == 0x0008 || group == 0x0002, element < 0x0100 else { return nil }
+        // Explicit VR: bytes 4-5 are two uppercase letters forming a known VR.
+        if b[4] >= 0x41, b[4] <= 0x5A, b[5] >= 0x41, b[5] <= 0x5A,
+           let vrStr = String(bytes: b[4...5], encoding: .ascii), VR(rawValue: vrStr) != nil {
+            return true
+        }
+        // Implicit VR: 32-bit little-endian length that is even-ish and sane.
+        let len = UInt32(b[4]) | UInt32(b[5]) << 8 | UInt32(b[6]) << 16 | UInt32(b[7]) << 24
+        if len < 0x10000 { return false }
+        return nil
+    }
+
     func parse(stopAtPixelData: Bool = false) throws -> ([DicomElement], Data?, String?) {
-        guard data.count >= 132 else { throw DicomError.invalidFile }
-        
-        offset = 128
-        let magic = data.subdata(in: offset..<offset+4)
-        guard let magicStr = String(data: magic, encoding: .ascii), magicStr == "DICM" else {
+        if Self.hasPart10Preamble(data) {
+            offset = 132
+        } else if let explicit = Self.rawDatasetEncoding(data) {
+            // Preamble-less dataset (common for older .IMA / UID-named files)
+            offset = 0
+            rawDatasetExplicitVR = explicit
+        } else if data.count < 132 {
+            throw DicomError.invalidFile
+        } else {
             throw DicomError.notDicom
         }
-        offset += 4
+        datasetStart = offset
         
         if debugMode { print("DICM Header found. File size: \(data.count)") }
         
@@ -135,7 +180,7 @@ class SimpleDicomParser {
                  if let syntax = transferSyntaxUID {
                      applyTransferSyntax(syntax)
                  } else {
-                     isExplicitVR = false
+                     isExplicitVR = rawDatasetExplicitVR
                      isLittleEndian = true
                  }
              }
@@ -215,7 +260,10 @@ class SimpleDicomParser {
         }
         
         if length == -1 || length == 0xFFFFFFFF {
-             let d = try readUntitledSequence()
+             // Undefined length: SQ, encapsulated pixel data, or UN (whose
+             // content is always implicit VR little endian).
+             let contentIsImplicit = isActuallyExplicit && vr == .UN
+             let d = readUndefinedLengthValue(contentIsImplicit: contentIsImplicit)
              return DicomElement(tag: tag, vr: vr, length: d.count, data: d)
         }
         
@@ -265,20 +313,106 @@ class SimpleDicomParser {
         return d.robustString() ?? ""
     }
     
-    private func readUntitledSequence() throws -> Data {
+    /// Read the value of an undefined-length element, returning its content
+    /// (without the trailing Sequence Delimitation Item). Walks items and
+    /// nested datasets structurally so a nested undefined-length sequence's
+    /// delimiter isn't mistaken for the outer one; falls back to a byte scan
+    /// when the content isn't well-formed.
+    private func readUndefinedLengthValue(contentIsImplicit: Bool) -> Data {
+        let startIndex = offset
+        let savedExplicit = isExplicitVR
+        let savedLE = isLittleEndian
+        if contentIsImplicit { isExplicitVR = false; isLittleEndian = true }
+        defer { isExplicitVR = savedExplicit; isLittleEndian = savedLE }
+
+        if let end = try? skipItems(depth: 0) {
+            offset = end
+            return data.subdata(in: startIndex..<max(startIndex, end - 8))
+        }
+        offset = startIndex
+        return readUntitledSequenceByScanning()
+    }
+
+    /// Skip a sequence of items up to and including its Sequence Delimitation
+    /// Item. Returns the offset just past the delimiter.
+    private func skipItems(depth: Int) throws -> Int {
+        guard depth < 64 else { throw DicomError.invalidFile }
+        while true {
+            let g = try readUInt16()
+            let e = try readUInt16()
+            let len = try readUInt32()
+            guard g == 0xFFFE else { throw DicomError.invalidFile }
+            switch e {
+            case 0xE0DD:  // Sequence Delimitation Item
+                return offset
+            case 0xE000:  // Item (or encapsulated fragment)
+                if len == 0xFFFFFFFF {
+                    try skipItemDataset(depth: depth + 1)
+                } else {
+                    guard offset + Int(len) <= data.count else { throw DicomError.endOfFile }
+                    offset += Int(len)
+                }
+            default:
+                throw DicomError.invalidFile
+            }
+        }
+    }
+
+    /// Skip the elements of an undefined-length item up to and including its
+    /// Item Delimitation Item.
+    private func skipItemDataset(depth: Int) throws {
+        while true {
+            let g = try readUInt16()
+            let e = try readUInt16()
+            if g == 0xFFFE {
+                _ = try readUInt32()
+                if e == 0xE00D { return }
+                throw DicomError.invalidFile
+            }
+            var vrStr = ""
+            var len: UInt32
+            if isExplicitVR {
+                vrStr = try readString(length: 2)
+                guard VR(rawValue: vrStr) != nil else { throw DicomError.invalidFile }
+                if ["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"].contains(vrStr) {
+                    offset += 2
+                    len = try readUInt32()
+                } else {
+                    len = UInt32(try readUInt16())
+                }
+            } else {
+                len = try readUInt32()
+            }
+            if len == 0xFFFFFFFF {
+                if isExplicitVR && vrStr == "UN" {
+                    let savedExplicit = isExplicitVR
+                    isExplicitVR = false
+                    defer { isExplicitVR = savedExplicit }
+                    _ = try skipItems(depth: depth + 1)
+                } else {
+                    _ = try skipItems(depth: depth + 1)
+                }
+            } else {
+                guard offset + Int(len) <= data.count else { throw DicomError.endOfFile }
+                offset += Int(len)
+            }
+        }
+    }
+
+    /// Legacy fallback: scan for the first Sequence Delimitation Item.
+    private func readUntitledSequenceByScanning() -> Data {
         let startIndex = offset
         while offset + 4 <= data.count {
              let b1 = data[offset]
              let b2 = data[offset+1]
              let b3 = data[offset+2]
              let b4 = data[offset+3]
-             
+
              let isLE = (b1 == 0xFE && b2 == 0xFF && b3 == 0xDD && b4 == 0xE0)
              let isBE = (b1 == 0xFF && b2 == 0xFE && b3 == 0xE0 && b4 == 0xDD)
-             
+
              if isLE || isBE {
-                 offset += 4 
-                 offset += 4 
+                 offset += 8
                  return data.subdata(in: startIndex..<offset-8)
              }
              offset += 1
@@ -335,7 +469,7 @@ class SimpleDicomParser {
         
         // Naive search
         // Optimization: Start searching after meta header (132 + 128?)
-        var searchIdx = 132
+        var searchIdx = datasetStart
         
         while searchIdx < min(data.count, 65_536) - 8 {
             if data[searchIdx] == targetBytes[0] &&

@@ -316,21 +316,30 @@ class DICOMModel: ObservableObject {
     var isRawDataAvailable: Bool { rawPixelData != nil }
 
     // MARK: - Volume / MPR
-    /// Cached volumes keyed by series UID
-    private var _volumeCache: [String: VolumeData] = [:]
+    /// Built volumes keyed by `VolumeCacheKey` (series + exact file set), LRU-bounded.
+    private var _volumeCache = VolumeLRUCache(maxEntries: 3, maxBytes: 2 * 1_073_741_824)
+    /// Completion handlers of builds in progress, keyed by volume key, so
+    /// concurrent requests for the same volume share one build.
+    private var volumeBuildsInFlight: [String: [(VolumeData?, String?) -> Void]] = [:]
+    /// Bumped on every new load(); builds from an older generation aren't cached.
+    private var volumeCacheGeneration = 0
     /// Lock protecting volumeCache
     private let volumeCacheLock = NSLock()
-    /// Thread-safe read access to volumeCache
-    private func volumeCacheGet(_ key: String) -> VolumeData? {
+    /// Thread-safe read access to the volume of a series (by series id),
+    /// valid only if it was built from the series' current file set.
+    private func volumeCacheGet(_ seriesID: String) -> VolumeData? {
+        guard let series = allSeries.first(where: { $0.id == seriesID }) else { return nil }
+        let key = VolumeCacheKey.make(for: series)
         volumeCacheLock.lock()
-        let val = _volumeCache[key]
+        let val = _volumeCache.get(key)
         volumeCacheLock.unlock()
         return val
     }
-    /// Thread-safe write access to volumeCache
-    private func volumeCacheSet(_ key: String, _ value: VolumeData) {
+    /// Drop all cached volumes (new study loaded)
+    private func volumeCacheClear() {
         volumeCacheLock.lock()
-        _volumeCache[key] = value
+        _volumeCache.removeAll()
+        volumeCacheGeneration += 1
         volumeCacheLock.unlock()
     }
     /// Background queue for volume building
@@ -350,6 +359,8 @@ class DICOMModel: ObservableObject {
     private var multiFrameDecoders: [URL: MultiFrameDecoder] = [:]
     /// URLs currently being decoded (prevents duplicate decoder creation)
     private var decodersInFlight: Set<URL> = []
+    /// Panels waiting for an in-flight decoder, keyed by file URL
+    private var decoderWaitingPanels: [URL: [UUID]] = [:]
     /// Lock protecting multiFrameDecoders and decodersInFlight
     private let decoderLock = NSLock()
     /// Active playback timers keyed by panel ID
@@ -704,8 +715,11 @@ class DICOMModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
+        // DICOM files often have no or arbitrary extensions (UID names, .IMA),
+        // so accept any data file and detect DICOM by content.
         panel.allowedContentTypes = [
             .init(filenameExtension: "dcm")!,
+            .data,
             .folder
         ]
         if panel.runModal() == .OK, let url = panel.url {
@@ -734,6 +748,7 @@ class DICOMModel: ObservableObject {
             self.annotationObjects = []
             self.selectedDerivedObjectID = nil
             self.panels.forEach { $0.importedOverlays = [] }
+            self.volumeCacheClear()
             self.currentSeriesIndex = -1
             self.currentImageIndex = -1
             self.tags = []
@@ -944,16 +959,10 @@ class DICOMModel: ObservableObject {
                     ww = sw
                     wc = sc
                 } else {
-                    // Try File Defaults
-                    ww = dcmObj.getWindowWidth()
-                    wc = dcmObj.getWindowCenter()
-                    
-                    // If invalid/missing, Auto-Calculate from Min/Max
-                    if ww <= 0 {
-                        let (minVal, maxVal) = self.computeMinMax(data: rawData as Data, isSigned: isSigned.boolValue, bits: depth)
-                        ww = maxVal - minVal
-                        wc = minVal + (ww / 2.0)
-                    }
+                    // File's stored window, else the data range
+                    (ww, wc) = PixelValues.defaultWindow(
+                        storedWidth: dcmObj.getWindowWidth(), storedCenter: dcmObj.getWindowCenter(),
+                        data: rawData, bits: depth, isSigned: isSigned.boolValue, samples: samples)
                 }
                 
                 // 6. Render
@@ -962,7 +971,7 @@ class DICOMModel: ObservableObject {
                     self.dcmtkCache.setObject(dcmObj, forKey: url as NSURL)
                     self.imageCacheParamsLock.lock()
                     self.imageCacheParams[url as NSURL] = (ww, wc)
-                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: width, height: height, bitDepth: depth, samples: samples, isSigned: isSigned.boolValue, isMonochrome1: false)
+                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: width, height: height, bitDepth: depth, samples: samples, isSigned: isSigned.boolValue, isMonochrome1: dcmObj.isMonochrome1())
                     self.imageCacheParamsLock.unlock()
                     self.rawDataCache.setObject(rawData as NSData, forKey: url as NSURL)
 
@@ -975,6 +984,7 @@ class DICOMModel: ObservableObject {
                         self.bitDepth = depth
                         self.samples = samples
                         self.isSigned = isSigned.boolValue
+                        self.isMonochrome1 = dcmObj.isMonochrome1()
                         
                         // Update W/L State
                         self.windowWidth = ww
@@ -1014,20 +1024,27 @@ class DICOMModel: ObservableObject {
                     samples: &j2kSamples,
                     isSigned: &j2kSigned
                 ) {
-                    // Successfully decoded JPEG2000 — render using raw data path
-                    let (minVal, maxVal) = self.computeMinMax(data: j2kData, isSigned: j2kSigned.boolValue, bits: j2kDepth)
-                    let autoWW = maxVal - minVal
-                    let autoWC = minVal + (autoWW / 2.0)
+                    // Successfully decoded JPEG2000 (modality units) — render using raw data path
+                    let attrs = DicomPixelAttributes.read(url: url) ?? DicomPixelAttributes()
+                    let j2kMono1 = j2kSamples == 1 && attrs.isMonochrome1
+                    let (autoWW, autoWC) = PixelValues.defaultWindow(
+                        storedWidth: attrs.windowWidth, storedCenter: attrs.windowCenter,
+                        data: j2kData, bits: j2kDepth, isSigned: j2kSigned.boolValue, samples: j2kSamples)
 
                     self.rawDataCache.setObject(j2kData as NSData, forKey: url as NSURL)
+                    self.imageCacheParamsLock.lock()
+                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: j2kWidth, height: j2kHeight, bitDepth: j2kDepth, samples: j2kSamples, isSigned: j2kSigned.boolValue, isMonochrome1: j2kMono1)
+                    self.imageCacheParamsLock.unlock()
 
                     DispatchQueue.main.async {
+                        self.dcmtkImage = nil
                         self.rawPixelData = j2kData
                         self.imageWidth = j2kWidth
                         self.imageHeight = j2kHeight
                         self.bitDepth = j2kDepth
                         self.samples = j2kSamples
                         self.isSigned = j2kSigned.boolValue
+                        self.isMonochrome1 = j2kMono1
                         self.windowWidth = autoWW
                         self.windowCenter = autoWC
 
@@ -1054,9 +1071,9 @@ class DICOMModel: ObservableObject {
                         let rawMono1 = rawResult.isMonochrome1
                         let rawData = rawResult.pixelData
 
-                        let (minVal, maxVal) = self.computeMinMax(data: rawData, isSigned: rawSigned, bits: rawD)
-                        let autoWW = maxVal - minVal
-                        let autoWC = minVal + (autoWW / 2.0)
+                        let (autoWW, autoWC) = PixelValues.defaultWindow(
+                            storedWidth: rawResult.windowWidth, storedCenter: rawResult.windowCenter,
+                            data: rawData, bits: rawD, isSigned: rawSigned, samples: rawS)
 
                         self.rawDataCache.setObject(rawData as NSData, forKey: url as NSURL)
                         self.imageCacheParamsLock.lock()
@@ -1167,15 +1184,24 @@ class DICOMModel: ObservableObject {
                 
                 // Load DCMTK Object
                 if let dcmObj = DCMTKImageObject(path: imageFile.url.path) {
-                    // Use Target W/L if set, otherwise file defaults
+                    // Same window choice as the direct load path: series W/L if
+                    // set, else the file's stored window, else the data range.
+                    var w: Int = 0, h: Int = 0, d: Int = 0, s: Int = 0
+                    var isSigned: ObjCBool = false
+                    let raw = dcmObj.getRawDataWidth(&w, height: &h, bitDepth: &d, samples: &s, isSigned: &isSigned)
                     var renderWW = targetWW
                     var renderWC = targetWC
-                    
-                    if renderWW == 0 {
-                        renderWW = dcmObj.getWindowWidth()
-                        renderWC = dcmObj.getWindowCenter()
+                    if renderWW <= 0 {
+                        if let raw = raw {
+                            (renderWW, renderWC) = PixelValues.defaultWindow(
+                                storedWidth: dcmObj.getWindowWidth(), storedCenter: dcmObj.getWindowCenter(),
+                                data: raw, bits: d, isSigned: isSigned.boolValue, samples: s)
+                        } else {
+                            renderWW = dcmObj.getWindowWidth()
+                            renderWC = dcmObj.getWindowCenter()
+                        }
                     }
-                    
+
                     // Render
                     if let nsImage = dcmObj.renderImage(withWidth: 0, height: 0, ww: renderWW, wc: renderWC) {
                         self.imageCache.setObject(nsImage, forKey: imageFile.url as NSURL)
@@ -1184,16 +1210,10 @@ class DICOMModel: ObservableObject {
                         self.imageCacheParams[imageFile.url as NSURL] = (renderWW, renderWC)
                         self.imageCacheParamsLock.unlock()
 
-                        // Also cache raw data? Maybe too heavy.
-                        // Let's stick to image + dcmtk object for now.
-                        // If user needs histogram, we can load raw data on demand.
-                        // Or we can load it here too.
-                        var w: Int = 0, h: Int = 0, d: Int = 0, s: Int = 0
-                        var isSigned: ObjCBool = false
-                        if let raw = dcmObj.getRawDataWidth(&w, height: &h, bitDepth: &d, samples: &s, isSigned: &isSigned) {
+                        if let raw = raw {
                             self.rawDataCache.setObject(raw as NSData, forKey: imageFile.url as NSURL)
                             self.imageCacheParamsLock.lock()
-                            self.imagePixelMeta[imageFile.url as NSURL] = PixelMeta(width: w, height: h, bitDepth: d, samples: s, isSigned: isSigned.boolValue, isMonochrome1: false)
+                            self.imagePixelMeta[imageFile.url as NSURL] = PixelMeta(width: w, height: h, bitDepth: d, samples: s, isSigned: isSigned.boolValue, isMonochrome1: dcmObj.isMonochrome1())
                             self.imageCacheParamsLock.unlock()
                         }
                     }
@@ -1208,9 +1228,9 @@ class DICOMModel: ObservableObject {
                         let rawMono1 = rawResult.isMonochrome1
                         let rawData = rawResult.pixelData
 
-                        let (minVal, maxVal) = self.computeMinMax(data: rawData, isSigned: rawSigned, bits: rawD)
-                        let autoWW = maxVal - minVal
-                        let autoWC = minVal + (autoWW / 2.0)
+                        let (autoWW, autoWC) = PixelValues.defaultWindow(
+                            storedWidth: rawResult.windowWidth, storedCenter: rawResult.windowCenter,
+                            data: rawData, bits: rawD, isSigned: rawSigned, samples: rawS)
                         let useWW = targetWW > 0 ? targetWW : autoWW
                         let useWC = targetWW > 0 ? targetWC : autoWC
 
@@ -1485,6 +1505,9 @@ class DICOMModel: ObservableObject {
         let samples: Int
         let isSigned: Bool
         let isMonochrome1: Bool
+        /// File's stored window (modality units), if any
+        let windowWidth: Double?
+        let windowCenter: Double?
     }
 
     private func extractRawPixelData(from url: URL) -> RawPixelResult? {
@@ -1502,101 +1525,31 @@ class DICOMModel: ObservableObject {
         let ts = (transferSyntax ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard ts.isEmpty || uncompressedTS.contains(ts) else { return nil }
 
-        func getStr(g: UInt16, e: UInt16) -> String? {
-            return elements.first(where: { $0.tag == DicomTag(group: g, element: e) })?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Decode by BitsAllocated (not BitsStored), honouring byte order,
+        // PlanarConfiguration and the Modality LUT so values are in the same
+        // units as the DCMTK path.
+        let bigEndian = ts == "1.2.840.10008.1.2.2"
+        let attributes = DicomPixelAttributes(elements: elements, bigEndian: bigEndian)
+        guard let decoded = PlainPixelDecoder.decode(pixelData: pixelData, attributes: attributes, bigEndian: bigEndian) else {
+            return nil
         }
-        func getInt(g: UInt16, e: UInt16) -> Int? {
-            if let str = getStr(g: g, e: e), let val = Int(str) { return val }
-            return elements.first(where: { $0.tag == DicomTag(group: g, element: e) })?.intValue
-        }
-
-        guard let width = getInt(g: 0x0028, e: 0x0011),   // Columns
-              let height = getInt(g: 0x0028, e: 0x0010),   // Rows
-              width > 0, height > 0 else { return nil }
-
-        let bitsAllocated = getInt(g: 0x0028, e: 0x0100) ?? 16   // BitsAllocated
-        let bitsStored = getInt(g: 0x0028, e: 0x0101) ?? bitsAllocated  // BitsStored
-        // TODO: Apply HighBit-based masking when BitsStored < BitsAllocated.
-        // For non-standard HighBit values, pixel data should be right-shifted by
-        // (highBit + 1 - bitsStored) and masked to bitsStored width. Deferred to
-        // avoid breaking existing images that render correctly without it.
-        let _ = getInt(g: 0x0028, e: 0x0102) ?? (bitsStored - 1)  // HighBit
-        let samplesPerPixel = getInt(g: 0x0028, e: 0x0002) ?? 1  // SamplesPerPixel
-        let pixelRepresentation = getInt(g: 0x0028, e: 0x0103) ?? 0  // 0=unsigned, 1=signed
-        let photometric = getStr(g: 0x0028, e: 0x0004) ?? "MONOCHROME2"
-
-        let isSigned = pixelRepresentation == 1
-        let isMonochrome1 = photometric.uppercased().contains("MONOCHROME1")
-
-        // Validate pixel data size
-        let bytesPerPixel = (bitsAllocated / 8) * samplesPerPixel
-        let expectedSize = width * height * bytesPerPixel
-        guard pixelData.count >= expectedSize else { return nil }
 
         return RawPixelResult(
-            pixelData: pixelData,
-            width: width,
-            height: height,
-            bitDepth: bitsStored,
-            samples: samplesPerPixel,
-            isSigned: isSigned,
-            isMonochrome1: isMonochrome1
+            pixelData: decoded.data,
+            width: decoded.width,
+            height: decoded.height,
+            bitDepth: decoded.bitDepth,
+            samples: decoded.samples,
+            isSigned: decoded.isSigned,
+            isMonochrome1: attributes.isMonochrome1,
+            windowWidth: attributes.windowWidth,
+            windowCenter: attributes.windowCenter
         )
     }
 
-    private func computeMinMax(data: Data, isSigned: Bool, bits: Int) -> (Double, Double) {
-        var minVal: Double = Double.greatestFiniteMagnitude
-        var maxVal: Double = -Double.greatestFiniteMagnitude
-        
-        if bits > 16 { // 32-bit
-             data.withUnsafeBytes { rawBuffer in
-                 if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt32.self) {
-                     let count = data.count / 4
-                     for i in 0..<count {
-                         var v: Double = 0
-                         if isSigned {
-                             v = Double(Int32(bitPattern: ptr[i]))
-                         } else {
-                             v = Double(ptr[i])
-                         }
-                         
-                         if v < minVal { minVal = v }
-                         if v > maxVal { maxVal = v }
-                     }
-                 }
-             }
-        } else if bits > 8 { // 16-bit
-             data.withUnsafeBytes { rawBuffer in
-                 if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt16.self) {
-                     let count = data.count / 2
-                     for i in 0..<count {
-                         var v: Double = 0
-                         if isSigned {
-                             v = Double(Int16(bitPattern: ptr[i]))
-                         } else {
-                             v = Double(ptr[i])
-                         }
-                         
-                         if v < minVal { minVal = v }
-                         if v > maxVal { maxVal = v }
-                     }
-                 }
-             }
-        } else {
-             data.withUnsafeBytes { rawBuffer in
-                 if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
-                     let count = data.count
-                     for i in 0..<count {
-                         let v = Double(ptr[i])
-                         if v < minVal { minVal = v }
-                         if v > maxVal { maxVal = v }
-                     }
-                 }
-             }
-        }
-        
-        if maxVal == minVal { maxVal = minVal + 1 }
-        return (minVal, maxVal)
+    private func computeMinMax(data: Data, isSigned: Bool, bits: Int, samples: Int = 1) -> (Double, Double) {
+        let r = PixelValues.minMax(data: data, bits: bits, isSigned: isSigned, samples: samples)
+        return (r.min, r.max)
     }
     
     /// Render raw pixel data to an NSImage with window/level tone mapping.
@@ -1806,8 +1759,15 @@ class DICOMModel: ObservableObject {
              
              var finalRaw: Data?
              
-             if isUncompressed, let pd = pixelData {
-                 finalRaw = pd
+             if isUncompressed, pixelData != nil {
+                 // Normalize (BitsAllocated, byte order, planar config, rescale)
+                 // so cached raw data has the same units as the DCMTK path.
+                 if let r = extractRawPixelData(from: url) {
+                     finalRaw = r.pixelData
+                     imageCacheParamsLock.lock()
+                     imagePixelMeta[url as NSURL] = PixelMeta(width: r.width, height: r.height, bitDepth: r.bitDepth, samples: r.samples, isSigned: r.isSigned, isMonochrome1: r.isMonochrome1)
+                     imageCacheParamsLock.unlock()
+                 }
              } 
              // Determine if we need to attempt JPEG encapsulated extraction
              else if let pd = pixelData, pd.count > 8, let fragments = extractEncapsulatedData(pd), !fragments.isEmpty {
@@ -1997,9 +1957,9 @@ class DICOMModel: ObservableObject {
                 // Skip DICOMDIR files (directory index, not images)
                 if fileURL.lastPathComponent.uppercased() == "DICOMDIR" { continue }
 
-                // Check Extension
-                let ext = fileURL.pathExtension.lowercased()
-                if ext != "dcm" && ext != "" { continue }
+                // Detect DICOM by content, not extension: UID-named files
+                // (1.2.840...), .IMA, .dicom etc. are all common.
+                if !DicomFileSniffer.isCandidate(fileURL) { continue }
                 
                 // Process File
                 if let context = self.quickParse(fileURL) { 
@@ -2059,8 +2019,9 @@ class DICOMModel: ObservableObject {
             BenchmarkLogger.shared.stop("load_total", dataset: benchDataset, detail: "Scan complete")
 
             // Auto-assign series to panels when in multi-panel mode
-            if self.panels.count > 1 {
-                DispatchQueue.main.async {
+            // (panels is main-thread state; check it there)
+            DispatchQueue.main.async {
+                if self.panels.count > 1 {
                     self.autoAssignSeriesToPanels()
                 }
             }
@@ -2860,16 +2821,26 @@ class DICOMModel: ObservableObject {
         guard source.seriesIndex >= 0, source.seriesIndex < allSeries.count else { return }
         let sourceSeries = allSeries[source.seriesIndex]
 
-        // Determine the source z-location for spatial matching
-        let sourceZ: Double? = {
-            switch source.panelMode {
-            case .slice2D:
+        // Source plane position in patient space (centre of the displayed plane),
+        // matched against targets along their own slice normals.
+        let sourcePoint: SIMD3<Double>? = {
+            var position: SIMD3<Double>?
+            var orientation: [Double]?
+            var spacing: (Double, Double)?
+            if source.panelMode == .slice2D {
                 guard source.imageIndex >= 0, source.imageIndex < sourceSeries.images.count else { return nil }
-                return sourceSeries.images[source.imageIndex].zLocation
-            case .mprSagittal, .mprCoronal, .mip:
-                // For MPR/MIP, use imagePositionPatient z if available
-                return source.imagePositionPatient?.2
+                let ctx = sourceSeries.images[source.imageIndex]
+                position = ctx.imagePosition
+                orientation = ctx.imageOrientation
+                spacing = ctx.pixelSpacing.map { ($0.x, $0.y) }
+            } else if let ipp = source.imagePositionPatient {
+                position = SIMD3(ipp.0, ipp.1, ipp.2)
+                orientation = source.imageOrientationPatient
+                spacing = source.pixelSpacing
             }
+            guard let pos = position else { return nil }
+            return SliceSync.planeCenter(position: pos, orientation: orientation, pixelSpacing: spacing,
+                                         columns: source.imageWidth, rows: source.imageHeight)
         }()
 
         for panel in panels where panel.id != source.id {
@@ -2879,7 +2850,7 @@ class DICOMModel: ObservableObject {
             switch panel.panelMode {
             case .slice2D:
                 guard !targetSeries.images.isEmpty else { continue }
-                let targetIndex = closestImageIndex(inSeries: targetSeries, toZ: sourceZ, fallbackSource: source, sourceSeries: sourceSeries)
+                let targetIndex = closestImageIndex(inSeries: targetSeries, to: sourcePoint, fallbackSource: source, sourceSeries: sourceSeries)
                 if targetIndex != panel.imageIndex {
                     panel.imageIndex = targetIndex
                     updateSpatialMetadataFromSeries(panel)
@@ -2887,7 +2858,7 @@ class DICOMModel: ObservableObject {
                 }
             case .mip:
                 if let vol = volumeCacheGet(targetSeries.id), vol.depth > 1 {
-                    let targetIdx = closestVolumeIndex(dimension: vol.depth, targetSeries: targetSeries, sourceZ: sourceZ, fallbackSource: source, sourceSeries: sourceSeries)
+                    let targetIdx = closestVolumeIndex(axis: 2, volume: vol, to: sourcePoint, fallbackSource: source, sourceSeries: sourceSeries)
                     if targetIdx != panel.mipSlabPosition {
                         panel.mipSlabPosition = targetIdx
                         loadMIPForPanel(panel)
@@ -2895,7 +2866,7 @@ class DICOMModel: ObservableObject {
                 }
             case .mprSagittal:
                 if let vol = volumeCacheGet(targetSeries.id), vol.width > 1 {
-                    let targetIdx = closestVolumeIndex(dimension: vol.width, targetSeries: targetSeries, sourceZ: sourceZ, fallbackSource: source, sourceSeries: sourceSeries)
+                    let targetIdx = closestVolumeIndex(axis: 0, volume: vol, to: sourcePoint, fallbackSource: source, sourceSeries: sourceSeries)
                     if targetIdx != panel.mprSliceIndex {
                         panel.mprSliceIndex = targetIdx
                         updateMPRSpatialMetadata(panel, volume: vol)
@@ -2904,7 +2875,7 @@ class DICOMModel: ObservableObject {
                 }
             case .mprCoronal:
                 if let vol = volumeCacheGet(targetSeries.id), vol.height > 1 {
-                    let targetIdx = closestVolumeIndex(dimension: vol.height, targetSeries: targetSeries, sourceZ: sourceZ, fallbackSource: source, sourceSeries: sourceSeries)
+                    let targetIdx = closestVolumeIndex(axis: 1, volume: vol, to: sourcePoint, fallbackSource: source, sourceSeries: sourceSeries)
                     if targetIdx != panel.mprSliceIndex {
                         panel.mprSliceIndex = targetIdx
                         updateMPRSpatialMetadata(panel, volume: vol)
@@ -2926,28 +2897,15 @@ class DICOMModel: ObservableObject {
         }
     }
 
-    /// Find the image index in a target series whose z-location is closest to the given z.
-    /// Falls back to proportional matching if z-location data is unavailable.
-    private func closestImageIndex(inSeries target: DicomSeries, toZ sourceZ: Double?, fallbackSource source: PanelState, sourceSeries: DicomSeries) -> Int {
+    /// Find the image in a target series whose plane is closest to the source
+    /// point (distance along each image's normal). Falls back to proportional
+    /// matching if spatial data is unavailable.
+    private func closestImageIndex(inSeries target: DicomSeries, to point: SIMD3<Double>?, fallbackSource source: PanelState, sourceSeries: DicomSeries) -> Int {
         let targetCount = target.images.count
         guard targetCount > 0 else { return 0 }
 
-        // Spatial matching: find closest z-location
-        if let z = sourceZ {
-            let zValues = target.images.map { $0.zLocation }
-            if zValues.compactMap({ $0 }).count == targetCount {
-                // All images have z-location — find the closest
-                var bestIdx = 0
-                var bestDist = Double.greatestFiniteMagnitude
-                for (i, imgZ) in zValues.enumerated() {
-                    let dist = abs((imgZ ?? 0) - z)
-                    if dist < bestDist {
-                        bestDist = dist
-                        bestIdx = i
-                    }
-                }
-                return bestIdx
-            }
+        if let p = point, let idx = SliceSync.closestImageIndex(to: p, in: target.images) {
+            return idx
         }
 
         // Fallback: proportional matching
@@ -2957,21 +2915,17 @@ class DICOMModel: ObservableObject {
         return max(0, min(targetCount - 1, Int(pct * Double(targetCount - 1))))
     }
 
-    /// Find the closest volume slice index for MPR/MIP targets using spatial or proportional matching.
-    private func closestVolumeIndex(dimension: Int, targetSeries: DicomSeries, sourceZ: Double?, fallbackSource source: PanelState, sourceSeries: DicomSeries) -> Int {
+    /// Volume index along `axis` (0 = x/sagittal, 1 = y/coronal, 2 = z/axial)
+    /// nearest the source point, via the volume's world→voxel transform.
+    private func closestVolumeIndex(axis: Int, volume: VolumeData, to point: SIMD3<Double>?, fallbackSource source: PanelState, sourceSeries: DicomSeries) -> Int {
+        let dimension = axis == 0 ? volume.width : (axis == 1 ? volume.height : volume.depth)
         guard dimension > 1 else { return 0 }
 
-        // Spatial matching using target series z-range
-        if let z = sourceZ {
-            let zValues = targetSeries.images.compactMap { $0.zLocation }
-            if zValues.count >= 2 {
-                let minZ = zValues.min()!
-                let maxZ = zValues.max()!
-                let range = maxZ - minZ
-                if range > 0 {
-                    let fraction = (z - minZ) / range
-                    return max(0, min(dimension - 1, Int(fraction * Double(dimension - 1))))
-                }
+        if let p = point {
+            let v = volume.worldToVoxel(p)
+            let c = axis == 0 ? v.x : (axis == 1 ? v.y : v.z)
+            if c.isFinite {
+                return max(0, min(dimension - 1, Int(c.rounded())))
             }
         }
 
@@ -3136,20 +3090,17 @@ class DICOMModel: ObservableObject {
                     return
                 }
 
-                var ww = dcmObj.getWindowWidth()
-                var wc = dcmObj.getWindowCenter()
-                if ww <= 0 {
-                    let (minVal, maxVal) = self.computeMinMax(data: rawData as Data, isSigned: isSigned.boolValue, bits: depth)
-                    ww = maxVal - minVal
-                    wc = minVal + (ww / 2.0)
-                }
+                let (ww, wc) = PixelValues.defaultWindow(
+                    storedWidth: dcmObj.getWindowWidth(), storedCenter: dcmObj.getWindowCenter(),
+                    data: rawData, bits: depth, isSigned: isSigned.boolValue, samples: samples)
+                let mono1 = dcmObj.isMonochrome1()
 
                 if let nsImage = dcmObj.renderImage(withWidth: 0, height: 0, ww: ww, wc: wc) {
                     self.imageCache.setObject(nsImage, forKey: url as NSURL)
                     self.dcmtkCache.setObject(dcmObj, forKey: url as NSURL)
                     self.imageCacheParamsLock.lock()
                     self.imageCacheParams[url as NSURL] = (ww, wc)
-                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: width, height: height, bitDepth: depth, samples: samples, isSigned: isSigned.boolValue, isMonochrome1: false)
+                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: width, height: height, bitDepth: depth, samples: samples, isSigned: isSigned.boolValue, isMonochrome1: mono1)
                     self.imageCacheParamsLock.unlock()
                     self.rawDataCache.setObject(rawData as NSData, forKey: url as NSURL)
 
@@ -3161,6 +3112,7 @@ class DICOMModel: ObservableObject {
                         panel.bitDepth = depth
                         panel.samples = samples
                         panel.isSigned = isSigned.boolValue
+                        panel.isMonochrome1 = mono1
 
                         // Preserve user W/L when scrolling within same series
                         if preservedWW > 0 {
@@ -3217,12 +3169,14 @@ class DICOMModel: ObservableObject {
                 var j2kW: Int = 0, j2kH: Int = 0, j2kD: Int = 0, j2kS: Int = 0
                 var j2kSigned: ObjCBool = false
                 if let j2kData = DCMTKHelper.decodeJPEG2000DICOM(url.path, width: &j2kW, height: &j2kH, bitDepth: &j2kD, samples: &j2kS, isSigned: &j2kSigned) {
-                    let (minVal, maxVal) = self.computeMinMax(data: j2kData, isSigned: j2kSigned.boolValue, bits: j2kD)
-                    let autoWW = maxVal - minVal
-                    let autoWC = minVal + (autoWW / 2.0)
+                    let attrs = DicomPixelAttributes.read(url: url) ?? DicomPixelAttributes()
+                    let j2kMono1 = j2kS == 1 && attrs.isMonochrome1
+                    let (autoWW, autoWC) = PixelValues.defaultWindow(
+                        storedWidth: attrs.windowWidth, storedCenter: attrs.windowCenter,
+                        data: j2kData, bits: j2kD, isSigned: j2kSigned.boolValue, samples: j2kS)
                     self.rawDataCache.setObject(j2kData as NSData, forKey: url as NSURL)
                     self.imageCacheParamsLock.lock()
-                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: j2kW, height: j2kH, bitDepth: j2kD, samples: j2kS, isSigned: j2kSigned.boolValue, isMonochrome1: false)
+                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: j2kW, height: j2kH, bitDepth: j2kD, samples: j2kS, isSigned: j2kSigned.boolValue, isMonochrome1: j2kMono1)
                     self.imageCacheParamsLock.unlock()
 
                     DispatchQueue.main.async {
@@ -3233,6 +3187,7 @@ class DICOMModel: ObservableObject {
                         panel.bitDepth = j2kD
                         panel.samples = j2kS
                         panel.isSigned = j2kSigned.boolValue
+                        panel.isMonochrome1 = j2kMono1
 
                         // Preserve user W/L when scrolling within same series
                         let renderWW = preservedWW > 0 ? preservedWW : autoWW
@@ -3241,7 +3196,7 @@ class DICOMModel: ObservableObject {
                         panel.windowCenter = renderWC
 
                         if let rendered = self.renderImage(width: j2kW, height: j2kH, pixelData: j2kData, ww: renderWW, wc: renderWC,
-                                                           bits: j2kD, spp: j2kS, signed: j2kSigned.boolValue, mono1: false) {
+                                                           bits: j2kD, spp: j2kS, signed: j2kSigned.boolValue, mono1: j2kMono1) {
                             panel.setDisplayImage(rendered)
                             if preservedWW <= 0 {
                                 self.imageCache.setObject(rendered, forKey: url as NSURL)
@@ -3285,9 +3240,9 @@ class DICOMModel: ObservableObject {
                         let rawMono1 = rawResult.isMonochrome1
                         let rawData = rawResult.pixelData
 
-                        let (minVal, maxVal) = self.computeMinMax(data: rawData, isSigned: rawSigned, bits: rawD)
-                        let autoWW = maxVal - minVal
-                        let autoWC = minVal + (autoWW / 2.0)
+                        let (autoWW, autoWC) = PixelValues.defaultWindow(
+                            storedWidth: rawResult.windowWidth, storedCenter: rawResult.windowCenter,
+                            data: rawData, bits: rawD, isSigned: rawSigned, samples: rawS)
                         self.rawDataCache.setObject(rawData as NSData, forKey: url as NSURL)
                         self.imageCacheParamsLock.lock()
                         self.imagePixelMeta[url as NSURL] = PixelMeta(width: rawW, height: rawH, bitDepth: rawD, samples: rawS, isSigned: rawSigned, isMonochrome1: rawMono1)
@@ -3393,7 +3348,8 @@ class DICOMModel: ObservableObject {
                     volume: volume, mode: .mip,
                     viewMatrix: matrix_identity_float4x4,
                     outputWidth: volume.width, outputHeight: volume.height,
-                    windowWidth: Float(panel.windowWidth), windowCenter: Float(panel.windowCenter),
+                    windowWidth: Float(volume.storedWindow(width: panel.windowWidth, center: panel.windowCenter).width),
+                    windowCenter: Float(volume.storedWindow(width: panel.windowWidth, center: panel.windowCenter).center),
                     slabThickness: slabMM, slabCenterVoxel: center, invert: panel.isInverted
                 ) {
                     let physW = Double(volume.width) * volume.spacingX
@@ -3402,18 +3358,14 @@ class DICOMModel: ObservableObject {
                     panel.setDisplayImage(newImg)
                 }
             } else if let data = panel.rawPixelData {
-                // CPU fallback: re-render from raw pixel data
-                // panel.pixelSpacing stores (row_spacing, col_spacing) per DICOM convention,
-                // but MPRSlice expects (horizontal=X, vertical=Y), so swap .0↔.1
-                let slice = MPRSlice(
-                    pixelData: data, width: panel.imageWidth, height: panel.imageHeight,
-                    planeOrigin: .zero,
-                    planeRowDir: SIMD3<Double>(1, 0, 0),
-                    planeColDir: SIMD3<Double>(0, 1, 0),
-                    pixelSpacingX: panel.pixelSpacing?.1 ?? 1,
-                    pixelSpacingY: panel.pixelSpacing?.0 ?? 1
-                )
-                if let newImg = MPREngine.renderSlice(slice, ww: panel.windowWidth, wc: panel.windowCenter, invert: panel.isInverted) {
+                // CPU fallback: re-render from the panel's modality-unit pixels
+                // (Int16, or Int32 for volumes with a wide-range encoding), keeping
+                // the aspect-corrected display size.
+                let displaySize = NSSize(width: panel.displayImageWidth, height: panel.displayImageHeight)
+                if let newImg = renderImage(width: panel.imageWidth, height: panel.imageHeight, pixelData: data,
+                                            ww: panel.windowWidth, wc: panel.windowCenter,
+                                            bits: panel.bitDepth, spp: 1, signed: panel.isSigned, mono1: panel.isInverted) {
+                    if displaySize.width > 0, displaySize.height > 0 { newImg.size = displaySize }
                     panel.setDisplayImage(newImg)
                 }
             }
@@ -3503,10 +3455,9 @@ class DICOMModel: ObservableObject {
     /// Auto W/L from a rectangular ROI in pixel coordinates
     func autoWindowLevelForPanelROI(_ panel: PanelState, rect: CGRect) {
         guard let data = panel.rawPixelData, panel.imageWidth > 0 else { return }
-        let scaleX = panel.displayImageWidth > 0 ? CGFloat(panel.imageWidth) / panel.displayImageWidth : 1.0
-        let scaleY = panel.displayImageHeight > 0 ? CGFloat(panel.imageHeight) / panel.displayImageHeight : 1.0
-        let rawRect = CGRect(x: rect.minX * scaleX, y: rect.minY * scaleY,
-                             width: rect.width * scaleX, height: rect.height * scaleY)
+        let rawRect = PixelDisplayMapping(rawWidth: panel.imageWidth, rawHeight: panel.imageHeight,
+                                          displayWidth: panel.displayImageWidth, displayHeight: panel.displayImageHeight)
+            .displayRectToRaw(rect)
         let (minVal, maxVal) = computeMinMaxInRect(data: data, width: panel.imageWidth, rect: rawRect, isSigned: panel.isSigned, bits: panel.bitDepth)
         let newWW = max(1.0, maxVal - minVal)
         let newWC = minVal + (newWW / 2.0)
@@ -3519,10 +3470,9 @@ class DICOMModel: ObservableObject {
         let w = panel.imageWidth
         let h = panel.imageHeight
         // Scale ROI rect from display-image space to raw-pixel space
-        let scaleX = panel.displayImageWidth > 0 ? CGFloat(panel.imageWidth) / panel.displayImageWidth : 1.0
-        let scaleY = panel.displayImageHeight > 0 ? CGFloat(panel.imageHeight) / panel.displayImageHeight : 1.0
-        let rawRect = CGRect(x: rect.minX * scaleX, y: rect.minY * scaleY,
-                             width: rect.width * scaleX, height: rect.height * scaleY)
+        let mapping = PixelDisplayMapping(rawWidth: w, rawHeight: h,
+                                          displayWidth: panel.displayImageWidth, displayHeight: panel.displayImageHeight)
+        let rawRect = mapping.displayRectToRaw(rect)
         let minX = max(0, Int(rawRect.minX))
         let minY = max(0, Int(rawRect.minY))
         let maxX = min(w - 1, Int(rawRect.maxX))
@@ -3530,28 +3480,15 @@ class DICOMModel: ObservableObject {
         guard maxX > minX, maxY > minY else { return nil }
 
         var values: [Double] = []
-        values.reserveCapacity((maxX - minX) * (maxY - minY))
+        values.reserveCapacity((maxX - minX + 1) * (maxY - minY + 1))
 
+        let bits = panel.bitDepth, signed = panel.isSigned, spp = panel.samples
         data.withUnsafeBytes { raw in
             for py in minY...maxY {
                 for px in minX...maxX {
-                    let index = py * w + px
-                    var val: Double = 0
-                    if panel.bitDepth > 8 {
-                        let byteIndex = index * 2
-                        if byteIndex + 1 < data.count {
-                            if let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt16.self) {
-                                if panel.isSigned {
-                                    val = Double(Int16(bitPattern: ptr[index]))
-                                } else {
-                                    val = Double(ptr[index])
-                                }
-                            }
-                        }
-                    } else if index < data.count {
-                        val = Double(raw[index])
+                    if let v = PixelValues.value(in: raw, index: py * w + px, bits: bits, isSigned: signed, samples: spp) {
+                        values.append(v)
                     }
-                    values.append(val)
                 }
             }
         }
@@ -3762,35 +3699,16 @@ class DICOMModel: ObservableObject {
             let range = maxVal - minVal
             if range <= 0 { return }
 
-            if bits > 8 {
-                data.withUnsafeBytes { rawBuffer in
-                    if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt16.self) {
-                        let count = data.count / 2
-                        let stride = max(1, count / 50000)
-                        var i = 0
-                        while i < count {
-                            var v: Double
-                            if isSigned { v = Double(Int16(bitPattern: ptr[i])) }
-                            else { v = Double(ptr[i]) }
-                            let bin = Int((v - minVal) / range * 255.0)
-                            if bin >= 0 && bin < 256 { bins[bin] += 1 }
-                            i += stride
-                        }
+            let count = data.count / PixelValues.bytesPerSample(bits: bits)
+            let stride = max(1, count / 50000)
+            data.withUnsafeBytes { raw in
+                var i = 0
+                while i < count {
+                    if let v = PixelValues.value(in: raw, index: i, bits: bits, isSigned: isSigned) {
+                        let bin = Int((v - minVal) / range * 255.0)
+                        if bin >= 0 && bin < 256 { bins[bin] += 1 }
                     }
-                }
-            } else {
-                data.withUnsafeBytes { rawBuffer in
-                    if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
-                        let count = data.count
-                        let stride = max(1, count / 50000)
-                        var i = 0
-                        while i < count {
-                            let v = Double(ptr[i])
-                            let bin = Int((v - minVal) / range * 255.0)
-                            if bin >= 0 && bin < 256 { bins[bin] += 1 }
-                            i += stride
-                        }
-                    }
+                    i += stride
                 }
             }
 
@@ -3812,28 +3730,9 @@ class DICOMModel: ObservableObject {
         guard seriesIndex >= 0, seriesIndex < allSeries.count else { return false }
         let series = allSeries[seriesIndex]
 
-        // Need at least 10 images
-        guard series.images.count >= 10 else { return false }
-
-        // All images must have consistent ImageOrientationPatient
-        guard let refOrientation = series.images.first?.imageOrientation,
-              refOrientation.count == 6 else { return false }
-
-        var zValues = Set<Double>()
-        for img in series.images {
-            guard let orient = img.imageOrientation, orient.count == 6 else { return false }
-            // Check orientation consistency (tolerance for floating point)
-            let orientMatch = zip(refOrientation, orient).allSatisfy { abs($0 - $1) < 0.01 }
-            if !orientMatch { return false }
-
-            if let pos = img.imagePosition {
-                // Round to 0.1mm to avoid floating-point duplicates
-                zValues.insert((pos.z * 10).rounded() / 10)
-            }
-        }
-
-        // Need varying Z positions (at least 10 distinct values)
-        return zValues.count >= 10
+        // ≥10 slices with consistent orientation at distinct positions along
+        // the slice normal (not IPP.z, which is constant for sagittal stacks)
+        return SliceSync.isVolumetric(series.images)
     }
 
     /// Total slice count of the cached volume (for slab thickness slider max)
@@ -3845,19 +3744,32 @@ class DICOMModel: ObservableObject {
 
     // MARK: - Volume Building & MPR
 
-    /// Get or build a volume for the given series (returns cached if available)
+    /// Get or build a volume for the given series (returns cached if available).
+    /// Concurrent requests for the same series/file set share one build.
+    /// Must be called on the main thread; completion runs on the main thread.
     func getVolume(for seriesIndex: Int, completion: @escaping (VolumeData?, String?) -> Void) {
         guard seriesIndex >= 0, seriesIndex < allSeries.count else {
             completion(nil, nil)
             return
         }
         let series = allSeries[seriesIndex]
+        let key = VolumeCacheKey.make(for: series)
 
-        // Return cached volume
-        if let cached = volumeCacheGet(series.id) {
+        volumeCacheLock.lock()
+        if let cached = _volumeCache.get(key) {
+            volumeCacheLock.unlock()
             completion(cached, nil)
             return
         }
+        if volumeBuildsInFlight[key] != nil {
+            // Same volume already building: wait for it instead of building again
+            volumeBuildsInFlight[key]?.append(completion)
+            volumeCacheLock.unlock()
+            return
+        }
+        volumeBuildsInFlight[key] = [completion]
+        let generation = volumeCacheGeneration
+        volumeCacheLock.unlock()
 
         // Build in background
         isVolumeBuildingInProgress = true
@@ -3868,9 +3780,12 @@ class DICOMModel: ObservableObject {
         volumeBuildQueue.addOperation { [weak self] in
             guard let self = self else { return }
 
+            var built: VolumeData?
+            var errorMessage: String?
             do {
-                let volume = try VolumeBuilder.build(
+                built = try VolumeBuilder.build(
                     series: series,
+                    volumeID: key,
                     rawDataCache: self.rawDataCache,
                     dcmtkCache: self.dcmtkCache,
                     progress: { pct in
@@ -3879,21 +3794,26 @@ class DICOMModel: ObservableObject {
                         }
                     }
                 )
-
-                DispatchQueue.main.async {
-                    self.volumeCacheSet(series.id, volume)
-                    self.isVolumeBuildingInProgress = false
-                    self.volumeBuildProgress = 1.0
-                    BenchmarkLogger.shared.stop("volume_build", dataset: volSeriesDesc, detail: "\(volume.width)x\(volume.height)x\(volume.depth) voxels")
-                    completion(volume, nil)
-                }
             } catch {
-                DispatchQueue.main.async {
-                    self.isVolumeBuildingInProgress = false
-                    let msg = "\(error)"
-                    print("Volume build error: \(msg)")
-                    completion(nil, msg)
+                errorMessage = "\(error)"
+                print("Volume build error: \(errorMessage ?? "")")
+            }
+
+            DispatchQueue.main.async {
+                self.volumeCacheLock.lock()
+                if let volume = built, generation == self.volumeCacheGeneration {
+                    self._volumeCache.set(key, volume)
                 }
+                let waiters = self.volumeBuildsInFlight.removeValue(forKey: key) ?? []
+                let stillBuilding = !self.volumeBuildsInFlight.isEmpty
+                self.volumeCacheLock.unlock()
+
+                self.isVolumeBuildingInProgress = stillBuilding
+                self.volumeBuildProgress = 1.0
+                if let volume = built {
+                    BenchmarkLogger.shared.stop("volume_build", dataset: volSeriesDesc, detail: "\(volume.width)x\(volume.height)x\(volume.depth) voxels")
+                }
+                for waiter in waiters { waiter(built, errorMessage) }
             }
         }
     }
@@ -3922,8 +3842,8 @@ class DICOMModel: ObservableObject {
 
             switch panel.panelMode {
             case .mprSagittal:
-                // Initialize slice index to center if not yet set
-                if panel.mprSliceIndex <= 0 || panel.mprSliceIndex >= volume.width {
+                // Initialize slice index to center if not yet set (-1 = unset; 0 is a valid slice)
+                if panel.mprSliceIndex < 0 || panel.mprSliceIndex >= volume.width {
                     panel.mprSliceIndex = volume.width / 2
                 }
                 let maxIndex = volume.width - 1
@@ -3931,8 +3851,8 @@ class DICOMModel: ObservableObject {
                 slice = engine.sagittalSlice(at: idx)
 
             case .mprCoronal:
-                // Initialize slice index to center if not yet set
-                if panel.mprSliceIndex <= 0 || panel.mprSliceIndex >= volume.height {
+                // Initialize slice index to center if not yet set (-1 = unset; 0 is a valid slice)
+                if panel.mprSliceIndex < 0 || panel.mprSliceIndex >= volume.height {
                     panel.mprSliceIndex = volume.height / 2
                 }
                 let maxIndex = volume.height - 1
@@ -3958,33 +3878,18 @@ class DICOMModel: ObservableObject {
                 panel.setDisplayImage(image)
                 panel.imageWidth = mprSlice.width
                 panel.imageHeight = mprSlice.height
-                panel.rawPixelData = mprSlice.pixelData
-                panel.bitDepth = 16
-                panel.isSigned = true
+                let px = mprSlice.modalityPixels
+                panel.rawPixelData = px.data
+                panel.bitDepth = px.bits
+                panel.isSigned = px.isSigned
                 panel.samples = 1
+                panel.isMonochrome1 = false
 
-                // Set spatial metadata for cross-reference lines.
-                // MPR slices flip Z (superior at top), so adjust origin and column direction.
-                switch panel.panelMode {
-                case .mprSagittal:
-                    let flippedOrigin = volume.voxelToWorld(SIMD3<Double>(Double(panel.mprSliceIndex), 0, Double(volume.depth - 1)))
-                    panel.imagePositionPatient = (flippedOrigin.x, flippedOrigin.y, flippedOrigin.z)
-                    panel.imageOrientationPatient = [
-                        volume.colDirection.x, volume.colDirection.y, volume.colDirection.z,
-                        -volume.sliceDirection.x, -volume.sliceDirection.y, -volume.sliceDirection.z
-                    ]
-                    panel.pixelSpacing = (volume.spacingZ, volume.spacingY)
-                case .mprCoronal:
-                    let flippedOrigin = volume.voxelToWorld(SIMD3<Double>(0, Double(panel.mprSliceIndex), Double(volume.depth - 1)))
-                    panel.imagePositionPatient = (flippedOrigin.x, flippedOrigin.y, flippedOrigin.z)
-                    panel.imageOrientationPatient = [
-                        volume.rowDirection.x, volume.rowDirection.y, volume.rowDirection.z,
-                        -volume.sliceDirection.x, -volume.sliceDirection.y, -volume.sliceDirection.z
-                    ]
-                    panel.pixelSpacing = (volume.spacingZ, volume.spacingX)
-                default:
-                    break
-                }
+                // Spatial metadata for cross-reference lines, taken from the
+                // slice itself so it always matches the rendered rows (incl. Z flip).
+                Self.applyPlaneMetadata(panel, origin: mprSlice.planeOrigin,
+                                        orientation: mprSlice.imageOrientationPatient,
+                                        spacing: mprSlice.dicomPixelSpacing)
 
                 panel.isLoading = false
                 // Trigger cross-reference overlay updates on all panels
@@ -4017,26 +3922,24 @@ class DICOMModel: ObservableObject {
     /// Update spatial metadata synchronously for MPR panels (for cross-reference lines).
     /// Called immediately when mprSliceIndex changes, before async MPR rendering.
     private func updateMPRSpatialMetadata(_ panel: PanelState, volume: VolumeData) {
+        let engine = MPREngine(volume: volume)
+        let g: MPRPlaneGeometry
         switch panel.panelMode {
-        case .mprSagittal:
-            let origin = volume.voxelToWorld(SIMD3<Double>(Double(panel.mprSliceIndex), 0, Double(volume.depth - 1)))
-            panel.imagePositionPatient = (origin.x, origin.y, origin.z)
-            panel.imageOrientationPatient = [
-                volume.colDirection.x, volume.colDirection.y, volume.colDirection.z,
-                -volume.sliceDirection.x, -volume.sliceDirection.y, -volume.sliceDirection.z
-            ]
-            panel.pixelSpacing = (volume.spacingZ, volume.spacingY)
-        case .mprCoronal:
-            let origin = volume.voxelToWorld(SIMD3<Double>(0, Double(panel.mprSliceIndex), Double(volume.depth - 1)))
-            panel.imagePositionPatient = (origin.x, origin.y, origin.z)
-            panel.imageOrientationPatient = [
-                volume.rowDirection.x, volume.rowDirection.y, volume.rowDirection.z,
-                -volume.sliceDirection.x, -volume.sliceDirection.y, -volume.sliceDirection.z
-            ]
-            panel.pixelSpacing = (volume.spacingZ, volume.spacingX)
-        default:
-            break
+        case .mprSagittal: g = engine.sagittalGeometry(at: panel.mprSliceIndex)
+        case .mprCoronal: g = engine.coronalGeometry(at: panel.mprSliceIndex)
+        default: return
         }
+        Self.applyPlaneMetadata(panel, origin: g.origin,
+                                orientation: [g.rowDir.x, g.rowDir.y, g.rowDir.z, g.colDir.x, g.colDir.y, g.colDir.z],
+                                spacing: (g.spacingY, g.spacingX))
+    }
+
+    /// Set a panel's DICOM-style plane metadata (IPP, IOP, PixelSpacing as
+    /// (row spacing, column spacing)).
+    private static func applyPlaneMetadata(_ panel: PanelState, origin: SIMD3<Double>, orientation: [Double], spacing: (Double, Double)) {
+        panel.imagePositionPatient = (origin.x, origin.y, origin.z)
+        panel.imageOrientationPatient = orientation
+        panel.pixelSpacing = spacing
     }
 
     /// Navigate MPR slice position for a panel
@@ -4081,11 +3984,11 @@ class DICOMModel: ObservableObject {
             }
 
         case .mprSagittal:
-            panel.mprSliceIndex = 0  // Reset; loadMPRSlice will center after volume is ready
+            panel.mprSliceIndex = -1  // Unset; loadMPRSlice will center after volume is ready
             loadMPRSlice(for: panel)
 
         case .mprCoronal:
-            panel.mprSliceIndex = 0  // Reset; loadMPRSlice will center after volume is ready
+            panel.mprSliceIndex = -1  // Unset; loadMPRSlice will center after volume is ready
             loadMPRSlice(for: panel)
 
         case .mip:
@@ -4093,6 +3996,8 @@ class DICOMModel: ObservableObject {
                let vol = volumeCacheGet(seriesID) {
                 panel.mipSlabPosition = vol.depth / 2
                 panel.mipSlabThickness = min(10, vol.depth)
+            } else {
+                panel.mipSlabPosition = -1  // Unset; loadMIPForPanel centers it
             }
             loadMIPForPanel(panel)
         }
@@ -4119,7 +4024,7 @@ class DICOMModel: ObservableObject {
             }
 
             // Initialize slab position to center if not set
-            if panel.mipSlabPosition <= 0 || panel.mipSlabPosition >= volume.depth {
+            if panel.mipSlabPosition < 0 || panel.mipSlabPosition >= volume.depth {
                 panel.mipSlabPosition = volume.depth / 2
             }
 
@@ -4143,14 +4048,16 @@ class DICOMModel: ObservableObject {
 
             var metalImage: NSImage? = nil
             if let renderer = self.metalRenderer {
+                // The GPU samples stored voxels; convert the modality-unit window
+                let storedWL = volume.storedWindow(width: ww, center: wc)
                 metalImage = renderer.renderProjection(
                     volume: volume,
                     mode: mode,
                     viewMatrix: matrix_identity_float4x4,
                     outputWidth: volume.width,
                     outputHeight: volume.height,
-                    windowWidth: Float(ww),
-                    windowCenter: Float(wc),
+                    windowWidth: Float(storedWL.width),
+                    windowCenter: Float(storedWL.center),
                     slabThickness: slabThicknessMM,
                     slabCenterVoxel: slabCenter,
                     invert: panel.isInverted
@@ -4174,15 +4081,11 @@ class DICOMModel: ObservableObject {
                 panel.bitDepth = 16
                 panel.isSigned = true
                 panel.samples = 1
-                panel.pixelSpacing = (volume.spacingY, volume.spacingX)
-
-                // Set spatial metadata for cross-reference (axial plane at slab center)
-                let origin = volume.voxelToWorld(SIMD3<Double>(0, 0, Double(panel.mipSlabPosition)))
-                panel.imagePositionPatient = (origin.x, origin.y, origin.z)
-                panel.imageOrientationPatient = [
-                    volume.rowDirection.x, volume.rowDirection.y, volume.rowDirection.z,
-                    volume.colDirection.x, volume.colDirection.y, volume.colDirection.z
-                ]
+                // Spatial metadata for cross-reference (axial plane at slab center)
+                let g = MPREngine(volume: volume).axialGeometry(at: panel.mipSlabPosition)
+                Self.applyPlaneMetadata(panel, origin: g.origin,
+                                        orientation: [g.rowDir.x, g.rowDir.y, g.rowDir.z, g.colDir.x, g.colDir.y, g.colDir.z],
+                                        spacing: (g.spacingY, g.spacingX))
             } else {
                 // CPU fallback
                 let engine = MPREngine(volume: volume)
@@ -4201,18 +4104,14 @@ class DICOMModel: ObservableObject {
                     panel.setDisplayImage(image)
                     panel.imageWidth = slice.width
                     panel.imageHeight = slice.height
-                    panel.rawPixelData = slice.pixelData
-                    panel.bitDepth = 16
-                    panel.isSigned = true
+                    let px = slice.modalityPixels
+                    panel.rawPixelData = px.data
+                    panel.bitDepth = px.bits
+                    panel.isSigned = px.isSigned
                     panel.samples = 1
-                    panel.pixelSpacing = (volume.spacingY, volume.spacingX)
-
-                    let origin = volume.voxelToWorld(SIMD3<Double>(0, 0, Double(panel.mipSlabPosition)))
-                    panel.imagePositionPatient = (origin.x, origin.y, origin.z)
-                    panel.imageOrientationPatient = [
-                        volume.rowDirection.x, volume.rowDirection.y, volume.rowDirection.z,
-                        volume.colDirection.x, volume.colDirection.y, volume.colDirection.z
-                    ]
+                    Self.applyPlaneMetadata(panel, origin: slice.planeOrigin,
+                                            orientation: slice.imageOrientationPatient,
+                                            spacing: slice.dicomPixelSpacing)
                 } else {
                     panel.errorMessage = "Slab MIP rendering failed"
                 }
@@ -4234,15 +4133,9 @@ class DICOMModel: ObservableObject {
             panel.isMultiFrame = false
             panel.numberOfFrames = 0
             panel.currentFrameIndex = 0
-            // Clear cached multi-frame decoders when switching to single-frame
-            decoderLock.lock()
-            let decodersSnapshot = multiFrameDecoders
-            multiFrameDecoders.removeAll()
-            decoderLock.unlock()
-            for (_, decoder) in decodersSnapshot {
-                decoder.stopRingBuffer()
-                decoder.clearCache()
-            }
+            // Drop decoders no other panel is still showing (per-panel eviction;
+            // previously this cleared every panel's decoder)
+            evictUnusedMultiFrameDecoders(excludingPanel: panel.id)
             loadSingleFileForPanel(imageContext.url, panel: panel)
         }
     }
@@ -4265,11 +4158,14 @@ class DICOMModel: ObservableObject {
             return
         }
 
-        // Prevent duplicate decoder creation (two code paths can race)
+        // Prevent duplicate decoder creation (two code paths can race); a panel
+        // asking for an in-flight decoder gets it when the build finishes.
         decoderLock.lock()
+        decoderWaitingPanels[url, default: []].append(panel.id)
         if decodersInFlight.contains(url) {
             decoderLock.unlock()
-            cineLog("Decoder already in-flight for \(url.lastPathComponent), skipping")
+            panel.isLoading = true
+            cineLog("Decoder already in-flight for \(url.lastPathComponent), waiting")
             return
         }
         decodersInFlight.insert(url)
@@ -4284,9 +4180,20 @@ class DICOMModel: ObservableObject {
             guard let decoder = MultiFrameDecoder(url: url) else {
                 cineLog("MultiFrameDecoder FAILED for \(url.lastPathComponent)")
                 DispatchQueue.main.async {
-                    // Fallback to single-file loading if decoder fails
-                    panel.isLoading = false
-                    self.loadSingleFileForPanel(url, panel: panel)
+                    // Clear the in-flight marker so a later attempt can retry
+                    self.decoderLock.lock()
+                    self.decodersInFlight.remove(url)
+                    let waiting = self.decoderWaitingPanels.removeValue(forKey: url) ?? []
+                    self.decoderLock.unlock()
+                    // Fallback to single-file loading for every panel that asked
+                    for p in self.panels where waiting.contains(p.id) && self.currentURL(of: p) == url {
+                        p.isLoading = false
+                        self.loadSingleFileForPanel(url, panel: p)
+                    }
+                    if !waiting.contains(panel.id) {
+                        panel.isLoading = false
+                        self.loadSingleFileForPanel(url, panel: panel)
+                    }
                 }
                 return
             }
@@ -4297,19 +4204,40 @@ class DICOMModel: ObservableObject {
             DispatchQueue.main.async {
                 let totalElapsed = CFAbsoluteTimeGetCurrent() - setupStart
                 cineLog("Total setup time: \(String(format: "%.3f", totalElapsed))s for \(url.lastPathComponent)")
-                // Evict other decoders to limit memory (keep only current file)
                 self.decoderLock.lock()
-                let oldDecoders = self.multiFrameDecoders.filter { $0.key != url }
-                self.multiFrameDecoders.removeAll()
                 self.multiFrameDecoders[url] = decoder
                 self.decodersInFlight.remove(url)
+                let waiting = self.decoderWaitingPanels.removeValue(forKey: url) ?? []
                 self.decoderLock.unlock()
-                for (_, oldDecoder) in oldDecoders {
-                    oldDecoder.stopRingBuffer()
-                    oldDecoder.clearCache()
+                // Evict decoders for files no panel shows any more (limits
+                // memory without taking decoders away from other panels)
+                self.evictUnusedMultiFrameDecoders()
+                for p in self.panels where (waiting.contains(p.id) || p === panel) && self.currentURL(of: p) == url {
+                    self.applyMultiFrameDecoder(decoder, to: p)
                 }
-                self.applyMultiFrameDecoder(decoder, to: panel)
             }
+        }
+    }
+
+    /// URL of the image a panel currently shows (main thread).
+    private func currentURL(of panel: PanelState) -> URL? {
+        guard panel.seriesIndex >= 0, panel.seriesIndex < allSeries.count else { return nil }
+        let images = allSeries[panel.seriesIndex].images
+        guard panel.imageIndex >= 0, panel.imageIndex < images.count else { return nil }
+        return images[panel.imageIndex].url
+    }
+
+    /// Stop and drop multi-frame decoders whose file isn't shown by any panel
+    /// (optionally ignoring one panel that is switching away). Main thread.
+    private func evictUnusedMultiFrameDecoders(excludingPanel excluded: UUID? = nil) {
+        let inUse = Set(panels.filter { $0.id != excluded }.compactMap { currentURL(of: $0) })
+        decoderLock.lock()
+        let unused = multiFrameDecoders.filter { !inUse.contains($0.key) && !decodersInFlight.contains($0.key) }
+        for key in unused.keys { multiFrameDecoders.removeValue(forKey: key) }
+        decoderLock.unlock()
+        for (_, decoder) in unused {
+            decoder.stopRingBuffer()
+            decoder.clearCache()
         }
     }
 
