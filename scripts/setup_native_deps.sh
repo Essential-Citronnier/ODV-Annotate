@@ -12,6 +12,12 @@ CMAKE_DIR="$TEMP_DIR/cmake"
 DCMTK_SRC_DIR="$TEMP_DIR/dcmtk-3.6.8"
 INSTALL_DIR="$LIBS_DIR/dcmtk"
 
+# Must match the platform minimum in Package.swift (.macOS(.v14)); otherwise
+# the objects default to the host SDK's version and the app may not run on
+# older macOS releases.
+DEPLOYMENT_TARGET="14.0"
+export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
+
 mkdir -p "$LIBS_DIR"
 mkdir -p "$TEMP_DIR"
 
@@ -45,6 +51,7 @@ cd "$TEMP_DIR/openjpeg-2.5.0/build"
     -DBUILD_SHARED_LIBS=OFF \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_OSX_ARCHITECTURES="arm64" \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
     -DBUILD_CODEC=OFF \
     -DCMAKE_DISABLE_FIND_PACKAGE_TIFF=ON \
     -DCMAKE_DISABLE_FIND_PACKAGE_PNG=ON \
@@ -82,6 +89,7 @@ cd "$DCMTK_SRC_DIR/build"
     -DDCMTK_WITH_ICONV=OFF \
     -DDCMTK_ENABLE_CXX11=ON \
     -DCMAKE_OSX_ARCHITECTURES="arm64" \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
     -DDCMTK_WITH_OPENJPEG=ON \
     -DCMAKE_PREFIX_PATH="$LIBS_DIR/openjpeg"
 

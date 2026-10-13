@@ -114,7 +114,7 @@ set(DCMTK_CMAKE_INSTALL_INCLUDEDIR include)
 set(DCMTK_CMAKE_INSTALL_LIBDIR lib)
 set(DCMTK_CMAKE_INSTALL_DATAROOTDIR share)
 
-set(DCMTK_CMAKE_INSTALL_PREFIX "/Volumes/eDrive/LocalDev/macomviewer/libs/dcmtk")
+set(DCMTK_CMAKE_INSTALL_PREFIX "/Users/daeseongkim/ODV-Annotate/.claude/worktrees/packaging-fixes-4a2225/libs/dcmtk")
 
 
 SET_AND_CHECK(DCMTK_TARGETS "${PACKAGE_PREFIX_DIR}/lib/cmake/dcmtk/DCMTKTargets.cmake")

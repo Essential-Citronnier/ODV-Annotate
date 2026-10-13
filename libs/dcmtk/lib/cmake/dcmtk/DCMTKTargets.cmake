@@ -110,7 +110,7 @@ add_library(DCMTK::dcmdata STATIC IMPORTED)
 
 set_target_properties(DCMTK::dcmdata PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
-  INTERFACE_LINK_LIBRARIES "DCMTK::ofstd;DCMTK::oflog;/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk/usr/lib/libz.tbd"
+  INTERFACE_LINK_LIBRARIES "DCMTK::ofstd;DCMTK::oflog;/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk/usr/lib/libz.tbd"
 )
 
 # Create imported target DCMTK::i2d
@@ -126,7 +126,7 @@ add_library(DCMTK::dcmxml STATIC IMPORTED)
 
 set_target_properties(DCMTK::dcmxml PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
-  INTERFACE_LINK_LIBRARIES "DCMTK::dcmdata;DCMTK::ofstd;DCMTK::oflog;/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk/usr/lib/libz.tbd"
+  INTERFACE_LINK_LIBRARIES "DCMTK::dcmdata;DCMTK::ofstd;DCMTK::oflog;/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk/usr/lib/libz.tbd"
 )
 
 # Create imported target DCMTK::dcm2xml

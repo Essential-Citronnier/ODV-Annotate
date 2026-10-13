@@ -179,7 +179,11 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 </plist>
 EOF
 
-ENTITLEMENTS="scripts/OpenDicomViewer.entitlements"
+# Two entitlement sets: the bundled Python needs hardened-runtime exceptions
+# (unsigned executable memory, no library validation) that the Swift executable
+# does not, and granting them to the app would weaken it for nothing.
+APP_ENTITLEMENTS="scripts/OpenDicomViewer.entitlements"
+PYTHON_ENTITLEMENTS="scripts/Python.entitlements"
 
 if $NOTARIZE; then
     echo "Code signing with Developer ID..."
@@ -190,17 +194,19 @@ if $NOTARIZE; then
         codesign --force --options runtime --sign "${SIGNING_IDENTITY}" "$lib"
     done
 
-    # 2) Sign Python executables with entitlements
+    # 2) Sign Python executables with the Python-only entitlements
     echo "  Signing bundled Python executables..."
     find "${RESOURCES_DIR}/python/bin" -type f -perm +111 ! -name "*.py" | while read -r bin; do
-        codesign --force --options runtime --entitlements "${ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "$bin"
+        codesign --force --options runtime --entitlements "${PYTHON_ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "$bin"
     done
 
-    # 3) Sign the main app executable with entitlements
-    codesign --force --options runtime --entitlements "${ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
+    # 3) Sign the main app executable with the app entitlements
+    codesign --force --options runtime --entitlements "${APP_ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
 
-    # 4) Sign the entire app bundle
-    codesign --force --options runtime --entitlements "${ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
+    # 4) Sign the entire app bundle. The bundle signature is written to the main
+    # executable, so this must use the app entitlements too, or it would replace
+    # the ones from step 3.
+    codesign --force --options runtime --entitlements "${APP_ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
     codesign --verify --deep --strict "${APP_BUNDLE}"
     echo "Signature OK"
 else
