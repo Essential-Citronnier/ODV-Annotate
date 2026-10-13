@@ -58,6 +58,39 @@ enum PluginSeriesStaging {
     }
 }
 
+/// Asks whether to start a plugin the arbiter refused for lack of free memory.
+///
+/// Offered only for `PluginError.insufficientLiveMemory`: the declared budget
+/// fits and the refusal rests on a live reading of a busy machine. A request
+/// larger than the plugin share of physical memory is `insufficientMemory`
+/// and never reaches the user as a choice.
+@MainActor
+enum LowMemoryStartPrompt {
+
+    /// Replaceable so tests can answer without a modal.
+    static var ask: (_ pluginName: String, _ message: String) -> Bool = { name, message in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "\(name) may not have enough memory"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Start Anyway")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// If `error` is an overridable memory refusal and the user agrees, arm a
+    /// one-time override on `runtime` and return true; the caller retries.
+    static func offerOverride(for error: Error, pluginID: String,
+                              runtime: PluginRuntime) -> Bool {
+        guard let pluginError = error as? PluginError,
+              case .insufficientLiveMemory = pluginError else { return false }
+        let name = runtime.manifest.plugin(id: pluginID)?.name ?? pluginID
+        guard ask(name, pluginError.localizedDescription) else { return false }
+        runtime.allowLowMemoryStart(pluginID)
+        return true
+    }
+}
+
 extension Notification.Name {
     /// Posted by the AI menu, which lives in a different view tree from the
     /// view that owns the store sheet.
@@ -129,7 +162,12 @@ extension DICOMModel {
                 case .success(let result):
                     self.apply(result, from: task, to: panel, slice: slice)
                 case .failure(let error):
-                    panel.aiError = error.localizedDescription
+                    if LowMemoryStartPrompt.offerOverride(for: error, pluginID: ref.pluginID,
+                                                          runtime: runtime) {
+                        self.runPluginTask(ref, for: panel)
+                    } else {
+                        panel.aiError = error.localizedDescription
+                    }
                 }
             }
         }

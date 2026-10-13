@@ -192,6 +192,11 @@ final class PromptSession: ObservableObject {
                 // our handle so the next prompt re-opens rather than prompting
                 // against a session the adapter has forgotten.
                 self.sessionID = nil
+                if LowMemoryStartPrompt.offerOverride(for: error, pluginID: self.pluginID,
+                                                      runtime: self.runtime) {
+                    self.submit(slicePNG: slicePNG, onMask: onMask)
+                    return
+                }
                 self.lastError = error.localizedDescription
             }
         }

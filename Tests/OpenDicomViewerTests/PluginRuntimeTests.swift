@@ -479,7 +479,8 @@ final class PluginRuntimeTests: XCTestCase {
         // A 64 GiB machine with almost nothing free: the declared budget says
         // yes, the machine says no, and the arbiter must side with the machine.
         let starved = ResourceArbiter(probe: MemoryProbe.fixed(physicalGB: 64, availableGB: 3.0))
-        guard case .refuse = starved.admit(gemma, residents: []) else {
+        // The refusal is the overridable kind: the user may start anyway.
+        guard case .refuseLiveHeadroom = starved.admit(gemma, residents: []) else {
             return XCTFail("3 GB available less a 2 GB margin cannot host a 5 GB model")
         }
     }

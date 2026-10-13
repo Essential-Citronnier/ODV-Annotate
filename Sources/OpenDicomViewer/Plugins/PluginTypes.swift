@@ -470,6 +470,10 @@ enum PluginError: LocalizedError, Equatable {
     case notReady(String)
     case licenseRequired(PluginTaskRef, message: String)
     case insufficientMemory(required: Double, available: Double)
+    /// The declared budget fits but the machine is busy right now. Unlike
+    /// `insufficientMemory`, the user may choose to start anyway
+    /// (`PluginRuntime.allowLowMemoryStart`).
+    case insufficientLiveMemory(required: Double, available: Double)
     case unsupportedInput(PluginInputKind)
     case adapter(code: PluginErrorCode, message: String)
     case transport(String)
@@ -492,6 +496,11 @@ enum PluginError: LocalizedError, Equatable {
             return message
         case .insufficientMemory(let required, let available):
             return String(format: "Not enough memory: %.1f GB required, %.1f GB available.",
+                          required, available)
+        case .insufficientLiveMemory(let required, let available):
+            return String(format: "Not enough free memory right now: %.1f GB required, "
+                          + "%.1f GB free. Quit other apps, or start anyway and accept "
+                          + "that the Mac may slow down while it pages.",
                           required, available)
         case .unsupportedInput(let kind):
             return "This task does not accept \(kind.rawValue) input."

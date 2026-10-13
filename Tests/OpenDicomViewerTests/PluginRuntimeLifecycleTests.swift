@@ -293,7 +293,7 @@ final class PluginRuntimeLifecycleTests: XCTestCase {
     /// A stand-in adapter that never answers /health, records each spawn,
     /// and takes a moment to exit on SIGTERM like a model mid-load.
     @MainActor
-    private func makeHungRuntime() throws -> (PluginRuntime, spawns: URL) {
+    private func makeHungRuntime(availableGB: Double = 48) throws -> (PluginRuntime, spawns: URL) {
         let paths = self.paths
         let spawns = temporaryRoot.appendingPathComponent("spawns.log")
         let python = paths.venvPython("gemma-4-e4b")
@@ -317,7 +317,7 @@ final class PluginRuntimeLifecycleTests: XCTestCase {
         let runtime = PluginRuntime(
             paths: paths,
             locator: PluginEnvironmentLocator(adaptersRoot: adapters, paths: paths),
-            arbiter: ResourceArbiter(probe: MemoryProbe.fixed(physicalGB: 64, availableGB: 48)),
+            arbiter: ResourceArbiter(probe: MemoryProbe.fixed(physicalGB: 64, availableGB: availableGB)),
             portProbe: { 1 })  // nothing listens on port 1: /health never answers
         runtime.load(manifestURL: try writeManifest())
         // After the load, whose re-verification would demote a record with no
@@ -368,6 +368,56 @@ final class PluginRuntimeLifecycleTests: XCTestCase {
                        "the adapter exits within the grace period and must be given it")
         XCTAssertEqual(try String(contentsOf: spawns).components(separatedBy: "\n")
                         .filter { !$0.isEmpty }.count, 1)
+    }
+
+    @MainActor
+    func testStartAnywayOverridesALiveHeadroomRefusalOnce() async throws {
+        // 64 GiB, but only 3 GiB free: the budget fits, the live reading does not.
+        let (runtime, spawns) = try makeHungRuntime(availableGB: 3)
+
+        do {
+            try await runtime.startPlugin("gemma-4-e4b")
+            XCTFail("a busy machine must refuse before the user agrees")
+        } catch let error as PluginError {
+            guard case .insufficientLiveMemory = error else {
+                return XCTFail("expected an overridable refusal, got \(error)")
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: spawns.path))
+
+        runtime.allowLowMemoryStart("gemma-4-e4b")
+        let start = Task { @MainActor in try await runtime.startPlugin("gemma-4-e4b") }
+        try await waitForSpawn(spawns)
+        await runtime.stop("gemma-4-e4b")
+        do { try await start.value } catch is CancellationError {}
+
+        // Consumed by that start: the next one is refused again.
+        do {
+            try await runtime.startPlugin("gemma-4-e4b")
+            XCTFail("an override must not stay armed")
+        } catch let error as PluginError {
+            guard case .insufficientLiveMemory = error else { return XCTFail("\(error)") }
+        }
+    }
+
+    @MainActor
+    func testStartAnywayPromptIsOfferedOnlyForLiveHeadroom() throws {
+        let runtime = PluginRuntime(paths: paths)
+        runtime.load(manifestURL: try writeManifest())
+        var asked = 0
+        let saved = LowMemoryStartPrompt.ask
+        LowMemoryStartPrompt.ask = { _, _ in asked += 1; return true }
+        defer { LowMemoryStartPrompt.ask = saved }
+
+        XCTAssertFalse(LowMemoryStartPrompt.offerOverride(
+            for: PluginError.insufficientMemory(required: 40, available: 8),
+            pluginID: "gemma-4-e4b", runtime: runtime),
+            "a request over the physical budget is never a choice")
+        XCTAssertEqual(asked, 0)
+        XCTAssertTrue(LowMemoryStartPrompt.offerOverride(
+            for: PluginError.insufficientLiveMemory(required: 5, available: 1),
+            pluginID: "gemma-4-e4b", runtime: runtime))
+        XCTAssertEqual(asked, 1)
     }
 
     @MainActor
