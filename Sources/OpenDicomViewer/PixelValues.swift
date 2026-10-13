@@ -1,7 +1,7 @@
 // PixelValues.swift
 // OpenDicomViewer
 //
-// Shared helpers for decoded pixel buffers so every consumer (HU readout,
+// Shared helpers for decoded pixel buffers so every consumer (value readout,
 // ROI stats, histogram, W/L, volume building) interprets them the same way:
 //
 //   PixelValues        — read 8/16/32-bit signed/unsigned and RGB samples,
@@ -10,6 +10,7 @@
 //                        Swift parser (BitsAllocated, endianness, planar
 //                        configuration, Modality LUT) into the same layout
 //                        and units the DCMTK path produces
+//   PixelValueUnit     — the unit modality values are in (HU, Bq/mL, …)
 //   PixelDisplayMapping — maps between raw pixel rows/columns and the
 //                        displayed NSImage's coordinate space (which differs
 //                        for aspect-corrected MPR/MIP images)
@@ -166,6 +167,77 @@ enum PixelValues {
     /// Values = stored × slope + intercept stay integers for integer stored values.
     static func isIntegralRescale(slope: Double, intercept: Double) -> Bool {
         isIntegral(slope) && isIntegral(intercept)
+    }
+}
+
+// MARK: - Units of modality values
+
+/// Unit label for modality values (what the readout and ROI stats show
+/// after the number). Values are stored × RescaleSlope + RescaleIntercept,
+/// so their unit is the modality's: Hounsfield Units for CT, the PET Units
+/// attribute (0054,1001) for PET, and otherwise RescaleType (0028,1054)
+/// when it names one. MR, US, NM, CR/DX and the rest have arbitrary units,
+/// so they get no label (nil).
+enum PixelValueUnit {
+    static let modalityTag = DicomTag(group: 0x0008, element: 0x0060)
+    static let rescaleTypeTag = DicomTag(group: 0x0028, element: 0x1054)
+    static let petUnitsTag = DicomTag(group: 0x0054, element: 0x1001)
+
+    /// Readable names for the PET Units code strings (C.8.9.1.1.3).
+    /// SUV codes (GML etc.) are shown as their unit: the file's values are
+    /// already in it, we don't compute SUV ourselves.
+    private static let petUnitNames: [String: String] = [
+        "BQML": "Bq/mL",
+        "CNTS": "counts",
+        "CPS": "counts/s",
+        "PCNT": "%",
+        "GML": "g/mL",
+        "CM2ML": "cm²/mL",
+        "CM2": "cm²",
+        "MGMINML": "mg/min/mL",
+        "UMOLMINML": "µmol/min/mL",
+        "UMOLML": "µmol/mL",
+        "MLMING": "mL/min/g",
+        "MLG": "mL/g",
+        "MLMINML": "mL/min/mL",
+        "MLML": "mL/mL",
+        "1CM": "1/cm",
+    ]
+
+    static func label(modality: String?, rescaleType: String?, petUnits: String?) -> String? {
+        func clean(_ s: String?) -> String? {
+            let t = s?.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
+                .uppercased() ?? ""
+            return t.isEmpty ? nil : t
+        }
+        let rescale = clean(rescaleType)
+        switch clean(modality) {
+        case "CT":
+            return "HU"
+        case "PT":
+            guard let units = clean(petUnits) else { return nil }
+            if units == "NONE" { return nil }
+            return petUnitNames[units] ?? units
+        default:
+            // "US" is RescaleType's "unspecified"
+            guard let rescale = rescale, rescale != "US" else { return nil }
+            return rescale
+        }
+    }
+
+    static func label(for tags: [DicomElement]) -> String? {
+        func string(_ tag: DicomTag) -> String? {
+            tags.first(where: { $0.tag == tag })?.stringValue
+        }
+        return label(modality: string(modalityTag), rescaleType: string(rescaleTypeTag),
+                     petUnits: string(petUnitsTag))
+    }
+
+    /// `value` followed by the unit, e.g. "40 HU", "1250 Bq/mL", "812".
+    static func format(_ value: Double, unit: String?) -> String {
+        let number = PixelValues.format(value)
+        guard let unit = unit else { return number }
+        return unit == "%" ? number + unit : "\(number) \(unit)"
     }
 }
 
@@ -456,6 +528,9 @@ struct PixelDisplayMapping: Equatable {
 }
 
 extension PanelState {
+    /// Unit of the panel's modality values (nil when they have none).
+    var valueUnit: String? { PixelValueUnit.label(for: tags) }
+
     /// Raw pixel ↔ displayed-image mapping for this panel's current image.
     var pixelDisplayMapping: PixelDisplayMapping {
         PixelDisplayMapping(rawWidth: imageWidth, rawHeight: imageHeight,

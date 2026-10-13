@@ -3378,15 +3378,16 @@ class DICOMModel: ObservableObject {
                let seriesID = allSeries[safe: panel.seriesIndex]?.id,
                let volume = volumeCacheGet(seriesID) {
                 // GPU re-render with updated W/L (volume already on GPU)
-                let slabMM = Float(panel.mipSlabThickness) * Float(volume.spacingZ)
-                let center = SIMD3<Float>(Float(volume.width) / 2.0, Float(volume.height) / 2.0, Float(panel.mipSlabPosition))
-                if let newImg = renderer.renderProjection(
+                // Same slices as the CPU projection and the cursor readout
+                if let slab = MPREngine(volume: volume).gpuSlab(center: panel.mipSlabPosition,
+                                                                thickness: panel.mipSlabThickness),
+                   let newImg = renderer.renderProjection(
                     volume: volume, mode: panel.projectionMode,
                     viewMatrix: matrix_identity_float4x4,
                     outputWidth: volume.width, outputHeight: volume.height,
                     windowWidth: Float(volume.storedWindow(width: panel.windowWidth, center: panel.windowCenter).width),
                     windowCenter: Float(volume.storedWindow(width: panel.windowWidth, center: panel.windowCenter).center),
-                    slabThickness: slabMM, slabCenterVoxel: center, invert: panel.isInverted
+                    slabThickness: slab.thicknessMM, slabCenterVoxel: slab.centerVoxel, invert: panel.isInverted
                 ) {
                     let physW = Double(volume.width) * volume.spacingX
                     let physH = Double(volume.height) * volume.spacingY
@@ -3625,10 +3626,13 @@ class DICOMModel: ObservableObject {
             }
         case .mip:
             if let vol = volumeCacheGet(s.id) {
-                let halfSlab = panel.mipSlabThickness / 2
-                let zStart = max(0, panel.mipSlabPosition - halfSlab) + 1
-                let zEnd = min(vol.depth, panel.mipSlabPosition + halfSlab)
-                panel.currentImageInfo = "MIP \(zStart)-\(zEnd)/\(vol.depth) (\(panel.mipSlabThickness) slices)"
+                // The slices actually projected (1-based), from the shared slab range
+                if let range = MPREngine(volume: vol).slabRange(center: panel.mipSlabPosition,
+                                                                thickness: panel.mipSlabThickness) {
+                    panel.currentImageInfo = "MIP \(range.lowerBound + 1)-\(range.upperBound + 1)/\(vol.depth) (\(range.count) slices)"
+                } else {
+                    panel.currentImageInfo = "MIP"
+                }
             } else {
                 panel.currentImageInfo = "MIP"
             }
@@ -4073,15 +4077,13 @@ class DICOMModel: ObservableObject {
             BenchmarkLogger.shared.start("mip_render")
 
             // Try GPU (Metal) path first, fall back to CPU
-            let slabThicknessMM = Float(panel.mipSlabThickness) * Float(volume.spacingZ)
-            let slabCenter = SIMD3<Float>(
-                Float(volume.width) / 2.0,
-                Float(volume.height) / 2.0,
-                Float(panel.mipSlabPosition)
-            )
+            // The GPU slab covers exactly the slices of MPREngine.slabRange,
+            // the range the CPU path and the cursor readout use.
+            let gpuSlab = MPREngine(volume: volume).gpuSlab(center: panel.mipSlabPosition,
+                                                            thickness: panel.mipSlabThickness)
 
             var metalImage: NSImage? = nil
-            if let renderer = self.metalRenderer {
+            if let renderer = self.metalRenderer, let gpuSlab = gpuSlab {
                 // The GPU samples stored voxels; convert the modality-unit window
                 let storedWL = volume.storedWindow(width: ww, center: wc)
                 metalImage = renderer.renderProjection(
@@ -4092,8 +4094,8 @@ class DICOMModel: ObservableObject {
                     outputHeight: volume.height,
                     windowWidth: Float(storedWL.width),
                     windowCenter: Float(storedWL.center),
-                    slabThickness: slabThicknessMM,
-                    slabCenterVoxel: slabCenter,
+                    slabThickness: gpuSlab.thicknessMM,
+                    slabCenterVoxel: gpuSlab.centerVoxel,
                     invert: panel.isInverted
                 )
             }

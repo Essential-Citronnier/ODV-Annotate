@@ -53,10 +53,23 @@ let package = Package(
                 .copy("Resources/plugins.json")
             ]
         ),
+        // Test-only JPEG 2000 encoder (OpenJPEG) for synthetic J2K DICOM
+        .target(
+            name: "J2KTestSupport",
+            path: "Tests/J2KTestSupport",
+            cSettings: [
+                .headerSearchPath("../../libs/openjpeg/include/openjpeg-2.5")
+            ],
+            linkerSettings: [
+                .unsafeFlags(["-Llibs/openjpeg/lib"]),
+                .linkedLibrary("openjp2")
+            ]
+        ),
         .testTarget(
             name: "OpenDicomViewerTests",
             dependencies: [
                 "OpenDicomViewer",
+                "J2KTestSupport",
                 .product(name: "Testing", package: "swift-testing")
             ]
         ),
