@@ -96,3 +96,31 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+---
+
+## Hugging Face Transformers — SAM 3 checkpoint key mapping
+
+- **Used in**: `plugins/sam3/checkpoint_convert.py` (the key-mapping tables and
+  the `adapt_internal_ckpt`, `replace_keys`, `convert_old_keys_to_new_keys`
+  and `split_qkv` functions are vendored from
+  `src/transformers/models/sam3_video/convert_sam3_video_to_hf.py`, which is
+  not shipped in the transformers wheel)
+- **Source**: https://github.com/huggingface/transformers
+- **License**: Apache License 2.0
+
+```
+Copyright 2025 The Meta AI Authors and The HuggingFace Inc. team. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```

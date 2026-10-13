@@ -217,6 +217,12 @@ python plugins/sam3/server.py --install-weights \
   --weight-id sam3-checkpoint --source manual --dest /tmp/w/sam3
 # {"ok": false, "error": {"code": "license_required", "message": "... place the
 #  checkpoint at /tmp/w/sam3/sam3.pt"}}
+# Either the single sam3.pt file or the Hugging Face folder form (config.json +
+# model.safetensors) satisfies it. A single file is converted once, on first
+# load, into hf-converted/ beside it (about 3.4 GB more on disk, ~7 GB of memory
+# for the conversion itself); text prompts need the folder form's tokenizer.
+# `ODV_SAM3_STRUCTURAL=1 pytest plugins/sam3/tests` checks the conversion
+# against Meta's model structure (needs torch, transformers and Meta's sam3).
 
 # A licence key goes in the environment, never on the command line:
 ODV_PLUGIN_LICENSE_KEY=aca_... python plugins/totalseg/run_segment.py \

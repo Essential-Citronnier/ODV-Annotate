@@ -10,7 +10,11 @@ torch>=2.2.0
 # The SAM image processors import torchvision at construction time; without it
 # the model loads and then fails on the first session.
 torchvision>=0.17.0
-transformers>=4.57.0
+# 5.19 is what the single-file conversion (checkpoint_convert.py) was checked
+# against: it relies on Sam3TrackerModel loading a sam3_video checkpoint
+# through transformers' load-time key renaming.
+transformers>=5.19.0,<6
+safetensors>=0.4.0
 
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
