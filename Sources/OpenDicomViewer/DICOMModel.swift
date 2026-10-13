@@ -359,6 +359,8 @@ class DICOMModel: ObservableObject {
     private var multiFrameDecoders: [URL: MultiFrameDecoder] = [:]
     /// URLs currently being decoded (prevents duplicate decoder creation)
     private var decodersInFlight: Set<URL> = []
+    /// Panels waiting for an in-flight decoder, keyed by file URL
+    private var decoderWaitingPanels: [URL: [UUID]] = [:]
     /// Lock protecting multiFrameDecoders and decodersInFlight
     private let decoderLock = NSLock()
     /// Active playback timers keyed by panel ID
@@ -2017,8 +2019,9 @@ class DICOMModel: ObservableObject {
             BenchmarkLogger.shared.stop("load_total", dataset: benchDataset, detail: "Scan complete")
 
             // Auto-assign series to panels when in multi-panel mode
-            if self.panels.count > 1 {
-                DispatchQueue.main.async {
+            // (panels is main-thread state; check it there)
+            DispatchQueue.main.async {
+                if self.panels.count > 1 {
                     self.autoAssignSeriesToPanels()
                 }
             }
@@ -4130,15 +4133,9 @@ class DICOMModel: ObservableObject {
             panel.isMultiFrame = false
             panel.numberOfFrames = 0
             panel.currentFrameIndex = 0
-            // Clear cached multi-frame decoders when switching to single-frame
-            decoderLock.lock()
-            let decodersSnapshot = multiFrameDecoders
-            multiFrameDecoders.removeAll()
-            decoderLock.unlock()
-            for (_, decoder) in decodersSnapshot {
-                decoder.stopRingBuffer()
-                decoder.clearCache()
-            }
+            // Drop decoders no other panel is still showing (per-panel eviction;
+            // previously this cleared every panel's decoder)
+            evictUnusedMultiFrameDecoders(excludingPanel: panel.id)
             loadSingleFileForPanel(imageContext.url, panel: panel)
         }
     }
@@ -4161,11 +4158,14 @@ class DICOMModel: ObservableObject {
             return
         }
 
-        // Prevent duplicate decoder creation (two code paths can race)
+        // Prevent duplicate decoder creation (two code paths can race); a panel
+        // asking for an in-flight decoder gets it when the build finishes.
         decoderLock.lock()
+        decoderWaitingPanels[url, default: []].append(panel.id)
         if decodersInFlight.contains(url) {
             decoderLock.unlock()
-            cineLog("Decoder already in-flight for \(url.lastPathComponent), skipping")
+            panel.isLoading = true
+            cineLog("Decoder already in-flight for \(url.lastPathComponent), waiting")
             return
         }
         decodersInFlight.insert(url)
@@ -4180,9 +4180,20 @@ class DICOMModel: ObservableObject {
             guard let decoder = MultiFrameDecoder(url: url) else {
                 cineLog("MultiFrameDecoder FAILED for \(url.lastPathComponent)")
                 DispatchQueue.main.async {
-                    // Fallback to single-file loading if decoder fails
-                    panel.isLoading = false
-                    self.loadSingleFileForPanel(url, panel: panel)
+                    // Clear the in-flight marker so a later attempt can retry
+                    self.decoderLock.lock()
+                    self.decodersInFlight.remove(url)
+                    let waiting = self.decoderWaitingPanels.removeValue(forKey: url) ?? []
+                    self.decoderLock.unlock()
+                    // Fallback to single-file loading for every panel that asked
+                    for p in self.panels where waiting.contains(p.id) && self.currentURL(of: p) == url {
+                        p.isLoading = false
+                        self.loadSingleFileForPanel(url, panel: p)
+                    }
+                    if !waiting.contains(panel.id) {
+                        panel.isLoading = false
+                        self.loadSingleFileForPanel(url, panel: panel)
+                    }
                 }
                 return
             }
@@ -4193,19 +4204,40 @@ class DICOMModel: ObservableObject {
             DispatchQueue.main.async {
                 let totalElapsed = CFAbsoluteTimeGetCurrent() - setupStart
                 cineLog("Total setup time: \(String(format: "%.3f", totalElapsed))s for \(url.lastPathComponent)")
-                // Evict other decoders to limit memory (keep only current file)
                 self.decoderLock.lock()
-                let oldDecoders = self.multiFrameDecoders.filter { $0.key != url }
-                self.multiFrameDecoders.removeAll()
                 self.multiFrameDecoders[url] = decoder
                 self.decodersInFlight.remove(url)
+                let waiting = self.decoderWaitingPanels.removeValue(forKey: url) ?? []
                 self.decoderLock.unlock()
-                for (_, oldDecoder) in oldDecoders {
-                    oldDecoder.stopRingBuffer()
-                    oldDecoder.clearCache()
+                // Evict decoders for files no panel shows any more (limits
+                // memory without taking decoders away from other panels)
+                self.evictUnusedMultiFrameDecoders()
+                for p in self.panels where (waiting.contains(p.id) || p === panel) && self.currentURL(of: p) == url {
+                    self.applyMultiFrameDecoder(decoder, to: p)
                 }
-                self.applyMultiFrameDecoder(decoder, to: panel)
             }
+        }
+    }
+
+    /// URL of the image a panel currently shows (main thread).
+    private func currentURL(of panel: PanelState) -> URL? {
+        guard panel.seriesIndex >= 0, panel.seriesIndex < allSeries.count else { return nil }
+        let images = allSeries[panel.seriesIndex].images
+        guard panel.imageIndex >= 0, panel.imageIndex < images.count else { return nil }
+        return images[panel.imageIndex].url
+    }
+
+    /// Stop and drop multi-frame decoders whose file isn't shown by any panel
+    /// (optionally ignoring one panel that is switching away). Main thread.
+    private func evictUnusedMultiFrameDecoders(excludingPanel excluded: UUID? = nil) {
+        let inUse = Set(panels.filter { $0.id != excluded }.compactMap { currentURL(of: $0) })
+        decoderLock.lock()
+        let unused = multiFrameDecoders.filter { !inUse.contains($0.key) && !decodersInFlight.contains($0.key) }
+        for key in unused.keys { multiFrameDecoders.removeValue(forKey: key) }
+        decoderLock.unlock()
+        for (_, decoder) in unused {
+            decoder.stopRingBuffer()
+            decoder.clearCache()
         }
     }
 
