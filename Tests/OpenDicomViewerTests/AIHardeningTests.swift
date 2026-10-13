@@ -147,7 +147,33 @@ final class AIHardeningTests: XCTestCase {
         panel.imageIndex = 7
         XCTAssertNil(panel.visibleAIDescription)
         panel.clearAIAnnotations()
+        XCTAssertNotNil(panel.aiDescriptionSlice, "clearing this slice keeps another slice's description")
+        panel.clearAIAnnotations(allSlices: true)
         XCTAssertNil(panel.aiDescriptionSlice)
+    }
+
+    func testClearRemovesOnlyTheCurrentSliceByDefault() {
+        let panel = makePanel()
+        let first = panel.currentSlice
+        let manual = Annotation(type: .ruler(start: .zero, end: CGPoint(x: 1, y: 1), distanceMM: 1))
+        panel.annotations = [aiBox(on: first), manual]
+        panel.imageIndex += 1
+        let second = panel.currentSlice
+        panel.annotations.append(aiBox(on: second))
+        panel.aiDescription = "here"
+        panel.aiDescriptionSlice = second
+        XCTAssertTrue(panel.hasAIResultsOnCurrentSlice)
+
+        panel.clearAIAnnotations()
+        XCTAssertFalse(panel.hasAIResultsOnCurrentSlice)
+        XCTAssertTrue(panel.hasAnyAIResults, "the first slice's result survives")
+        XCTAssertEqual(panel.annotations.filter(\.isAI).map(\.slice), [Optional(first)])
+        XCTAssertNil(panel.aiDescription)
+        XCTAssertTrue(panel.annotations.contains { !$0.isAI }, "manual measurements are untouched")
+
+        panel.clearAIAnnotations(allSlices: true)
+        XCTAssertFalse(panel.hasAnyAIResults)
+        XCTAssertEqual(panel.annotations.count, 1)
     }
 
     // MARK: - Setup marker

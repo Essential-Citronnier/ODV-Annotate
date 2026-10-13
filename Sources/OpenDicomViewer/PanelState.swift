@@ -428,11 +428,34 @@ class PanelState: ObservableObject, Identifiable {
         return description
     }
 
-    /// Remove only AI-generated annotations
-    func clearAIAnnotations() {
-        annotations.removeAll(where: { $0.isAI })
-        aiDescription = nil
-        aiDescriptionSlice = nil
+    /// Remove AI-generated results: by default those of the slice on screen
+    /// (and any not bound to a slice), with `allSlices` every one on the panel.
+    /// Manual measurements are never touched.
+    ///
+    /// Clearing used to drop the results of every slice, so tidying the slice
+    /// in front of you silently discarded analyses of slices you had moved
+    /// away from.
+    func clearAIAnnotations(allSlices: Bool = false) {
+        let current = currentSlice
+        annotations.removeAll { annotation in
+            annotation.isAI && (allSlices || annotation.isVisible(on: current))
+        }
+        if allSlices || aiDescriptionSlice == nil || aiDescriptionSlice == current {
+            aiDescription = nil
+            aiDescriptionSlice = nil
+        }
         aiError = nil
+    }
+
+    /// Whether `clearAIAnnotations()` would remove anything.
+    var hasAIResultsOnCurrentSlice: Bool {
+        let current = currentSlice
+        return annotations.contains { $0.isAI && $0.isVisible(on: current) }
+            || visibleAIDescription != nil
+    }
+
+    /// Whether `clearAIAnnotations(allSlices: true)` would remove anything.
+    var hasAnyAIResults: Bool {
+        annotations.contains { $0.isAI } || aiDescription != nil
     }
 }

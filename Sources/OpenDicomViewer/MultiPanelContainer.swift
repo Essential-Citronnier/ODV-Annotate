@@ -2244,16 +2244,30 @@ struct AIInspectorView: View {
 
                 Spacer()
 
-                Button(action: {
-                    panel?.clearAIAnnotations()
-                    model.objectWillChange.send()
-                }) {
+                // Clears this slice; the menu half clears every slice.
+                Menu {
+                    Button("Clear This Slice") {
+                        panel?.clearAIAnnotations()
+                        model.objectWillChange.send()
+                    }
+                    .disabled(panel?.hasAIResultsOnCurrentSlice != true)
+                    Button("Clear All Slices") {
+                        panel?.clearAIAnnotations(allSlices: true)
+                        model.objectWillChange.send()
+                    }
+                    .disabled(panel?.hasAnyAIResults != true)
+                } label: {
                     Label("Clear", systemImage: "trash")
                         .font(.caption)
+                } primaryAction: {
+                    panel?.clearAIAnnotations()
+                    model.objectWillChange.send()
                 }
-                .buttonStyle(.bordered)
+                .menuStyle(.borderedButton)
+                .fixedSize()
                 .controlSize(.small)
-                .disabled(panel?.annotations.contains(where: { $0.isAI }) != true && panel?.aiDescription == nil)
+                .disabled(panel?.hasAnyAIResults != true)
+                .help("Clear AI results on this slice; use the arrow to clear every slice")
             }
             .padding(.horizontal)
             .padding(.top, 8)
