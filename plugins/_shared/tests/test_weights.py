@@ -355,3 +355,96 @@ def test_adapters_look_where_the_host_installs(monkeypatch, tmp_path):
     installed.mkdir()
     (installed / "config.json").write_text("{}")
     assert gemma.model_source() == str(installed)
+
+
+# ---------------------------------------------------------------------------
+# Reusing the built-in server's hub-cache copy (one Gemma copy on disk)
+# ---------------------------------------------------------------------------
+
+REV = "475b9088d29754a3379866cf5aeb6b41acd313c2"
+REPO = "mlx-community/gemma-4-E4B-it-4bit"
+
+
+def _hub_snapshot(cache: Path, files: dict[str, bytes], revision: str = REV) -> Path:
+    """Stage a hub-cache snapshot: content in blobs/, symlinks in snapshots/."""
+    repo_dir = cache / ("models--" + REPO.replace("/", "--"))
+    blobs = repo_dir / "blobs"
+    snapshot = repo_dir / "snapshots" / revision
+    blobs.mkdir(parents=True, exist_ok=True)
+    snapshot.mkdir(parents=True, exist_ok=True)
+    for index, (name, data) in enumerate(files.items()):
+        blob = blobs / f"blob{index}"
+        blob.write_bytes(data)
+        (snapshot / name).symlink_to(blob)
+    return snapshot
+
+
+def test_hub_cache_snapshot_requires_a_complete_pinned_commit(tmp_path):
+    from _shared.weights import hub_cache_snapshot
+
+    assert hub_cache_snapshot(REPO, REV, cache_dir=tmp_path) is None
+    _hub_snapshot(tmp_path, {"config.json": b"{}"})
+    assert hub_cache_snapshot(REPO, REV, cache_dir=tmp_path) is None, "no shards yet"
+    _hub_snapshot(tmp_path, {"model.safetensors": b"w" * 10})
+    assert hub_cache_snapshot(REPO, REV, cache_dir=tmp_path) is not None
+    # A branch name is not a pin: it may have moved since the cache was filled.
+    assert hub_cache_snapshot(REPO, "main", cache_dir=tmp_path) is None
+    assert hub_cache_snapshot(REPO, None, cache_dir=tmp_path) is None
+
+
+def test_hub_cache_snapshot_checks_every_indexed_shard(tmp_path):
+    from _shared.weights import hub_cache_snapshot
+
+    index = json.dumps({"weight_map": {"a": "m-1.safetensors", "b": "m-2.safetensors"}})
+    _hub_snapshot(tmp_path, {"config.json": b"{}", "model.safetensors.index.json": index.encode(),
+                             "m-1.safetensors": b"1"})
+    assert hub_cache_snapshot(REPO, REV, cache_dir=tmp_path) is None
+    _hub_snapshot(tmp_path, {"m-2.safetensors": b"2"})
+    assert hub_cache_snapshot(REPO, REV, cache_dir=tmp_path) is not None
+
+
+def test_adopt_snapshot_links_without_a_second_copy(tmp_path):
+    import os
+
+    from _shared.progress import ProgressReporter
+    from _shared.weights import adopt_snapshot
+
+    snapshot = _hub_snapshot(tmp_path / "cache",
+                             {"config.json": b"{}", "model.safetensors": b"w" * 100})
+    dest = tmp_path / "weights"
+    dest.mkdir()
+    (dest / "model.safetensors").write_bytes(b"partial")  # a partial earlier attempt
+    placed = adopt_snapshot(snapshot, dest, ProgressReporter())
+
+    assert sorted(p.name for p in placed) == ["config.json", "model.safetensors"]
+    target = dest / "model.safetensors"
+    assert not target.is_symlink(), "a symlink would dangle if the hub cache is cleared"
+    assert target.read_bytes() == b"w" * 100
+    blob = (snapshot / "model.safetensors").resolve()
+    assert os.stat(target).st_ino == os.stat(blob).st_ino, "same blocks, not a copy"
+
+
+def test_gemma_install_prefers_the_hub_cache(tmp_path, monkeypatch, capsys):
+    import importlib
+    import types
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "gemma"))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "cache"))
+    _hub_snapshot(tmp_path / "cache", {"config.json": b"{}", "model.safetensors": b"w"})
+    gemma = importlib.import_module("server")
+    try:
+        def no_download(*_args, **_kwargs):
+            raise AssertionError("must not download when the hub cache has the pin")
+
+        monkeypatch.setattr(gemma, "download_huggingface", no_download)
+        args = types.SimpleNamespace(source="huggingface", repo=REPO, revision=REV)
+        from _shared.progress import ProgressReporter
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        expected = gemma.install_weights(args, dest, ProgressReporter())
+        assert {p.name for p in expected} == {"config.json", "model.safetensors"}
+        assert all(p.exists() for p in expected)
+    finally:
+        sys.modules.pop("server", None)
+        sys.path.remove(str(Path(__file__).resolve().parents[2] / "gemma"))

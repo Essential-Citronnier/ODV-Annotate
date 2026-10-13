@@ -514,6 +514,15 @@ struct PluginInstaller: Sendable {
     /// Checks that the hosts an install needs answer, returning a message
     /// when one does not. Nil skips the check (tests, offline fixtures).
     var networkCheck: (@Sendable ([URL]) async -> String?)? = nil
+    /// Free bytes on the volume holding a URL. Injectable so install tests do
+    /// not pass or fail with the free space of the machine running them.
+    var availableDiskBytes: @Sendable (URL) -> Int64? = { LocalAIDiskSpace.availableBytes(at: $0) }
+    /// Whether a Hugging Face repo at a pinned commit is already complete in
+    /// the hub cache, where the install hook links it from instead of
+    /// downloading (see `SharedGemmaWeights`). Injectable for the same reason.
+    var hubCacheHasSnapshot: @Sendable (_ repo: String, _ revision: String) -> Bool = {
+        HuggingFaceCache.snapshotExists(repo: $0, revision: $1)
+    }
 
     /// Called with each state transition, on an arbitrary executor.
     typealias StateSink = @Sendable (PluginTaskRef, PluginInstallState) -> Void
@@ -583,9 +592,12 @@ struct PluginInstaller: Sendable {
     }
 
     /// Record that `directory` holds a finished download. See `isCompleteDownload`.
-    static func markDownloadComplete(at directory: URL) throws {
+    /// The marker records `revision` (the commit the hook was told to pin) so
+    /// the built-in AI server can tell whether the files are the model it pins.
+    static func markDownloadComplete(at directory: URL, revision: String? = nil) throws {
         let marker = directory.appendingPathComponent(PluginPaths.weightCompletionMarker)
-        try Data(ISO8601DateFormatter().string(from: Date()).utf8).write(to: marker, options: .atomic)
+        try Data(PluginWeightCompletion.markerContents(revision: revision).utf8)
+            .write(to: marker, options: .atomic)
     }
 
     /// Forget a previous completion before re-fetching into the same directory,
@@ -692,14 +704,30 @@ struct PluginInstaller: Sendable {
         // Step 0: preflight. Fail now, with a reason, rather than minutes
         // into a download that cannot finish.
         let needsVenv = !hasVenv(plugin.id)
+        // A download finished before the completion marker existed is adopted
+        // (marker written) rather than fetched again.
+        for weight in task.weights where weight.source != .manual {
+            let directory = paths.weightDirectory(pluginID: plugin.id, weightID: weight.id)
+            let marker = directory.appendingPathComponent(PluginPaths.weightCompletionMarker)
+            guard !FileManager.default.fileExists(atPath: marker.path) else { continue }
+            if PluginWeightCompletion.adoptLegacyDownload(at: directory, weight: weight) {
+                log("Found a finished earlier download of \(weight.id); reusing it.")
+            }
+        }
         let alreadyPresent = Set(presentWeights(plugin: plugin, task: task))
-        let toDownload = task.weights.filter { $0.source != .manual && !alreadyPresent.contains($0.id) }
+        let toFetch = task.weights.filter { $0.source != .manual && !alreadyPresent.contains($0.id) }
+        // Weights the hook will link from the hub cache cost neither disk nor network.
+        let toDownload = toFetch.filter { weight in
+            guard weight.source == .huggingface, let repo = weight.repo,
+                  let revision = weight.revision else { return true }
+            return !hubCacheHasSnapshot(repo, revision)
+        }
         let requiredBytes = Int64(
             (toDownload.reduce(0) { $0 + $1.sizeGB } * 1.1 + (needsVenv ? 2 : 0)) * 1_000_000_000)
         if requiredBytes > 0,
            let message = LocalAIDiskSpace.shortfallMessage(
             requiredBytes: requiredBytes,
-            availableBytes: LocalAIDiskSpace.availableBytes(at: paths.pluginRoot(plugin.id)),
+            availableBytes: availableDiskBytes(paths.pluginRoot(plugin.id)),
             what: plugin.name) {
             return fail(message)
         }
@@ -860,7 +888,7 @@ struct PluginInstaller: Sendable {
             // (section 4b); the marker is what lets a later launch tell this
             // directory apart from one a crash left half-written.
             do {
-                try Self.markDownloadComplete(at: destination)
+                try Self.markDownloadComplete(at: destination, revision: weight.revision)
             } catch {
                 return fail("Could not record the completed download of \(weight.id): "
                             + error.localizedDescription)

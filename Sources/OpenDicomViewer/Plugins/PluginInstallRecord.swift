@@ -243,6 +243,14 @@ final class PluginInstallStore: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [PluginTaskRef: PluginInstallRecord] = [:]
 
+    /// Called by `reverify` for a ready record whose downloaded weight has no
+    /// completion marker: returns whether the directory is a finished download
+    /// from before the marker existed, writing the marker if so. Replaceable
+    /// in tests; see `PluginWeightCompletion.adoptLegacyDownload`.
+    var adoptLegacyDownload: (URL, PluginWeight) -> Bool = {
+        PluginWeightCompletion.adoptLegacyDownload(at: $0, weight: $1)
+    }
+
     init(paths: PluginPaths) {
         self.paths = paths
     }
@@ -351,7 +359,8 @@ final class PluginInstallStore: @unchecked Sendable {
                 // environment is half-built. Start over rather than resume.
                 revised.installState = .notInstalled
             case .ready:
-                if let demoted = Self.demotion(for: record, task: task, fileExists: fileExists) {
+                if let demoted = Self.demotion(for: record, task: task, fileExists: fileExists,
+                                               adoptLegacy: adoptLegacyDownload) {
                     revised.installState = demoted
                 }
             default:
@@ -379,7 +388,8 @@ final class PluginInstallStore: @unchecked Sendable {
     private static func demotion(
         for record: PluginInstallRecord,
         task: PluginTask,
-        fileExists: (String) -> Bool
+        fileExists: (String) -> Bool,
+        adoptLegacy: (URL, PluginWeight) -> Bool
     ) -> PluginInstallState? {
         if task.license.gate != .open && !record.licenseAcknowledged {
             return .resolvingLicense
@@ -396,12 +406,14 @@ final class PluginInstallStore: @unchecked Sendable {
             }
             // Section 7: a downloaded weight counts as present only with the
             // completion marker. Without it the directory may hold a download
-            // a crash cut short. Re-installing re-runs the hook, which resumes
-            // into the same directory rather than starting over.
+            // a crash cut short -- or a finished one from before the marker
+            // existed, which is adopted when it looks complete. Otherwise
+            // re-installing re-runs the hook, which resumes into the same
+            // directory rather than starting over.
             if weight.source != .manual {
-                let marker = URL(fileURLWithPath: path)
-                    .appendingPathComponent(PluginPaths.weightCompletionMarker).path
-                if !fileExists(marker) { return .notInstalled }
+                let directory = URL(fileURLWithPath: path)
+                let marker = directory.appendingPathComponent(PluginPaths.weightCompletionMarker).path
+                if !fileExists(marker) && !adoptLegacy(directory, weight) { return .notInstalled }
             }
         }
         return nil

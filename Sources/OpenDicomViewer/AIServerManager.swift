@@ -138,10 +138,19 @@ class AIServerManager: ObservableObject {
     /// declares it for the same model; the plugin arbiter counts this.
     static let declaredRamGB: Double = 5.0
 
-    /// Whether the model snapshot is already in the Hugging Face cache, i.e.
-    /// whether starting the server will download ~5 GB first.
+    /// Whether the pinned model is already on disk -- in the Hugging Face
+    /// cache, or installed by the Gemma plugin -- i.e. whether starting the
+    /// server will download ~5 GB first.
     var isModelCached: Bool {
-        HuggingFaceCache.snapshotExists(repo: Self.modelRepo, revision: Self.modelRevision)
+        sharedModelDirectory != nil
+            || HuggingFaceCache.snapshotExists(repo: Self.modelRepo, revision: Self.modelRevision)
+    }
+
+    /// The Gemma plugin's installed copy of the pinned revision, when there is
+    /// one. The server loads it (`ODV_MODEL_DIR`) instead of keeping a second
+    /// 5.2 GB copy in the hub cache; see `SharedGemmaWeights`.
+    var sharedModelDirectory: URL? {
+        SharedGemmaWeights.installedDirectory(revision: Self.modelRevision)
     }
 
     private init() {
@@ -785,6 +794,10 @@ class AIServerManager: ObservableObject {
         env["ODV_AI_PORT"] = String(Self.port)
         env["ODV_PARENT_PID"] = String(getpid())
         env["PYTHONUNBUFFERED"] = "1"
+        if let shared = sharedModelDirectory {
+            env["ODV_MODEL_DIR"] = shared.path
+            appendLog("Using the model installed by the Gemma plugin at \(shared.path)")
+        }
         process.environment = env
 
         let pipe = Pipe()

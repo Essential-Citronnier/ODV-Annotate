@@ -42,7 +42,9 @@ from _shared.cli import parse_server_args  # noqa: E402
 from _shared.lifeline import start_parent_watch  # noqa: E402
 from _shared.weights import (  # noqa: E402
     WEIGHTS_DIR_ENV,
+    adopt_snapshot,
     download_huggingface,
+    hub_cache_snapshot,
     install_arg_present,
     installed_weight_dir,
     parse_install_args,
@@ -588,7 +590,13 @@ def install_weights(args, dest: Path, reporter) -> list[Path]:
         )
     repo = args.repo or MODEL_ID
     revision = args.revision or (MODEL_REVISION if repo == MODEL_ID else None)
-    files = download_huggingface(repo, dest, reporter, revision=revision)
+    # The built-in mlx-server keeps the same pinned snapshot in the hub cache.
+    # When it is complete there, link it rather than hold a second 5.2 GB copy.
+    snapshot = hub_cache_snapshot(repo, revision)
+    if snapshot is not None:
+        files = adopt_snapshot(snapshot, dest, reporter)
+    else:
+        files = download_huggingface(repo, dest, reporter, revision=revision)
     # mlx-vlm loads a model directory rather than one named file, and the shard
     # count varies by quantization, so the config plus at least one weight
     # shard is what "present" means here.

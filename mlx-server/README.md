@@ -24,7 +24,10 @@ First run will:
 3. Download the model from Hugging Face (~5.2GB, one-time) into
    `~/.cache/huggingface/hub` (`HF_HOME` / `HF_HUB_CACHE` move it). While it
    downloads, `/health` reports `"phase": "downloading"` with
-   `download_bytes` / `download_total_bytes`.
+   `download_bytes` / `download_total_bytes`. If `ODV_MODEL_DIR` names a
+   directory with this revision's `config.json` and `*.safetensors` (the app
+   sets it to the Gemma plugin's installed weights when their completion marker
+   records the pinned revision), the server loads that and downloads nothing.
 4. Start the server on `http://127.0.0.1:8741`
 
 ## Usage
