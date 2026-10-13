@@ -32,7 +32,7 @@ This means you can analyze DICOM images, detect anatomical structures, identify 
 | Feature | Description |
 |---------|-------------|
 | **Analyze Image** | Full image analysis with anatomical structure detection and bounding boxes |
-| **Describe ROI** | Select any region and get a natural language description from the AI |
+| **Describe ROI** | Draw a region with ROI Stats (S), then choose AI → Describe ROI for a natural language description of it |
 | **Detect Abnormalities** | Highlight potential abnormalities with severity ratings and confidence scores |
 
 **Four analysis modes** to fit your workflow:

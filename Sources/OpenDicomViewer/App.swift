@@ -184,6 +184,13 @@ struct OpenDicomViewerApp: App {
                 }
                 .disabled(!aiService.serverStatus.isReady || model.activePanel?.image == nil)
 
+                Button("Describe ROI") {
+                    if let panel = model.activePanel {
+                        model.triggerAIDescribeLatestROI(for: panel)
+                    }
+                }
+                .disabled(!aiService.serverStatus.isReady || model.activePanel?.image == nil)
+
                 Divider()
 
                 if !aiService.availableModes.isEmpty {
