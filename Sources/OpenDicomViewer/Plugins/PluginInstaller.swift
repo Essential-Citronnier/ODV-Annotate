@@ -67,6 +67,12 @@ enum PluginProcessRunner {
     ///
     /// `onStdoutLine` receives complete lines with the terminator stripped;
     /// `onStderrLine` likewise. Both are called off the main actor.
+    ///
+    /// Cancelling the calling task terminates the child (SIGTERM, then SIGKILL
+    /// after a grace period) and the call throws `CancellationError` once the
+    /// child has gone. Without this, cancelling an install only abandoned the
+    /// awaiting task while pip or a multi-gigabyte download carried on in the
+    /// background, writing into a venv the store had already declared idle.
     static func run(
         executable: URL,
         arguments: [String],
@@ -75,6 +81,8 @@ enum PluginProcessRunner {
         onStdoutLine: @escaping @Sendable (String) -> Void,
         onStderrLine: @escaping @Sendable (String) -> Void
     ) async throws -> PluginProcessOutcome {
+        try Task.checkCancellation()
+
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -91,26 +99,91 @@ enum PluginProcessRunner {
         outPipe.fileHandleForReading.readabilityHandler = { outAssembler.consume($0.availableData) }
         errPipe.fileHandleForReading.readabilityHandler = { errAssembler.consume($0.availableData) }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            process.terminationHandler = { proc in
-                // Detach the handlers before draining: leaving them attached keeps
-                // the dispatch source alive and the file handles open.
-                outPipe.fileHandleForReading.readabilityHandler = nil
-                errPipe.fileHandleForReading.readabilityHandler = nil
-                outAssembler.consume(outPipe.fileHandleForReading.availableData)
-                errAssembler.consume(errPipe.fileHandleForReading.availableData)
-                outAssembler.flush()
-                errAssembler.flush()
-                continuation.resume(returning: PluginProcessOutcome(exitCode: proc.terminationStatus))
+        let control = ProcessControl(process)
+
+        let outcome: PluginProcessOutcome = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                process.terminationHandler = { proc in
+                    // Detach the handlers before draining: leaving them attached keeps
+                    // the dispatch source alive and the file handles open.
+                    outPipe.fileHandleForReading.readabilityHandler = nil
+                    errPipe.fileHandleForReading.readabilityHandler = nil
+                    outAssembler.consume(outPipe.fileHandleForReading.availableData)
+                    errAssembler.consume(errPipe.fileHandleForReading.availableData)
+                    outAssembler.flush()
+                    errAssembler.flush()
+                    continuation.resume(returning: PluginProcessOutcome(exitCode: proc.terminationStatus))
+                }
+                do {
+                    guard try control.launch() else {
+                        outPipe.fileHandleForReading.readabilityHandler = nil
+                        errPipe.fileHandleForReading.readabilityHandler = nil
+                        process.terminationHandler = nil
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                } catch {
+                    outPipe.fileHandleForReading.readabilityHandler = nil
+                    errPipe.fileHandleForReading.readabilityHandler = nil
+                    process.terminationHandler = nil
+                    continuation.resume(throwing: PluginError.transport(
+                        "Could not launch \(executable.lastPathComponent): \(error.localizedDescription)"))
+                }
             }
-            do {
-                try process.run()
-            } catch {
-                outPipe.fileHandleForReading.readabilityHandler = nil
-                errPipe.fileHandleForReading.readabilityHandler = nil
-                process.terminationHandler = nil
-                continuation.resume(throwing: PluginError.transport(
-                    "Could not launch \(executable.lastPathComponent): \(error.localizedDescription)"))
+        } onCancel: {
+            control.cancel()
+        }
+
+        // A child killed on our behalf exits non-zero; report that as the
+        // cancellation it was rather than as a failure the user must interpret.
+        if control.wasCancelled || Task.isCancelled { throw CancellationError() }
+        return outcome
+    }
+
+    /// Lets a cancellation handler, which may run on any thread and before the
+    /// child has even launched, terminate it safely.
+    ///
+    /// `Process.terminate()` raises an Objective-C exception on a process that
+    /// was never launched, so launch and cancel are serialized here: a cancel
+    /// that arrives first prevents the launch instead.
+    final class ProcessControl: @unchecked Sendable {
+        private let lock = NSLock()
+        private let process: Process
+        private var launched = false
+        private var cancelled = false
+
+        /// How long a terminated child gets to exit before SIGKILL.
+        static let gracePeriod: TimeInterval = 5
+
+        init(_ process: Process) {
+            self.process = process
+        }
+
+        var wasCancelled: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return cancelled
+        }
+
+        /// Launch unless already cancelled. Returns false when cancelled first.
+        func launch() throws -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard !cancelled else { return false }
+            try process.run()
+            launched = true
+            return true
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let running = launched && process.isRunning
+            let pid = process.processIdentifier
+            lock.unlock()
+            guard running else { return }
+            process.terminate()
+            let process = self.process
+            DispatchQueue.global().asyncAfter(deadline: .now() + Self.gracePeriod) {
+                if process.isRunning { kill(pid, SIGKILL) }
             }
         }
     }
@@ -121,9 +194,16 @@ enum PluginProcessRunner {
     /// progress line can arrive in two pieces. Carriage returns are treated as
     /// terminators too, so pip's in-place progress bar surfaces as successive
     /// lines instead of one line that never ends.
+    ///
+    /// Buffering is done on bytes, not on decoded text. A read can also end in
+    /// the middle of a multi-byte UTF-8 sequence -- TotalSegmentator's progress
+    /// bars and any non-ASCII log text make that routine -- and decoding each
+    /// chunk on its own failed for such a chunk and discarded all of it. Line
+    /// terminators are single ASCII bytes that never occur inside a multi-byte
+    /// sequence, so splitting on bytes first and decoding whole lines is exact.
     final class LineAssembler: @unchecked Sendable {
         private let lock = NSLock()
-        private var pending = ""
+        private var pending = Data()
         private let sink: @Sendable (String) -> Void
 
         init(sink: @escaping @Sendable (String) -> Void) {
@@ -131,24 +211,40 @@ enum PluginProcessRunner {
         }
 
         func consume(_ data: Data) {
-            guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-            var complete: [String] = []
+            guard !data.isEmpty else { return }
+            var complete: [Data] = []
             lock.lock()
-            pending += chunk
-            while let index = pending.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
-                complete.append(String(pending[pending.startIndex..<index]))
-                pending = String(pending[pending.index(after: index)...])
+            pending.append(data)
+            var lineStart = pending.startIndex
+            var index = pending.startIndex
+            while index < pending.endIndex {
+                let byte = pending[index]
+                if byte == 0x0A || byte == 0x0D {
+                    complete.append(pending.subdata(in: lineStart..<index))
+                    lineStart = pending.index(after: index)
+                }
+                index = pending.index(after: index)
+            }
+            if lineStart > pending.startIndex {
+                pending = pending.subdata(in: lineStart..<pending.endIndex)
             }
             lock.unlock()
-            for line in complete where !line.isEmpty { sink(line) }
+            for line in complete where !line.isEmpty { sink(Self.decode(line)) }
         }
 
         func flush() {
             lock.lock()
             let remainder = pending
-            pending = ""
+            pending = Data()
             lock.unlock()
-            if !remainder.isEmpty { sink(remainder) }
+            if !remainder.isEmpty { sink(Self.decode(remainder)) }
+        }
+
+        /// A whole line that is still not valid UTF-8 is shown with replacement
+        /// characters rather than dropped: a garbled byte in a log line is no
+        /// reason to lose the line.
+        private static func decode(_ line: Data) -> String {
+            String(decoding: line, as: UTF8.self)
         }
     }
 }
@@ -268,8 +364,29 @@ struct PluginEnvironmentLocator: Sendable {
         // signature is a Gatekeeper rejection on a user's machine. Nothing is
         // gained by caching bytecode for a process that exits, so it is off.
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        // PLUGIN_PROTOCOL.md section 4d. The host owns the weight layout, so it
+        // tells the adapter where that is instead of each adapter guessing at
+        // Application Support -- four adapters guessed four slightly different
+        // paths, and none of them was where the installer put the files.
+        environment[PluginHostEnvironment.weightsDirectory] = paths.weightsRoot(pluginID).path
+        // Lets an adapter notice that the app has gone (a crash or a force
+        // quit skips the orderly shutdown) and exit rather than hold gigabytes
+        // of model memory with nobody left to talk to.
+        environment[PluginHostEnvironment.parentPID] = String(ProcessInfo.processInfo.processIdentifier)
         return environment
     }
+}
+
+/// Environment variables the host sets for every adapter process
+/// (PLUGIN_PROTOCOL.md section 4d).
+enum PluginHostEnvironment {
+    /// The plugin's weights root. Weight `<id>` lives in
+    /// `$ODV_WEIGHTS_DIR/<id>/`, the same directory `--dest` named at install.
+    static let weightsDirectory = "ODV_WEIGHTS_DIR"
+    /// The host's pid, for the adapter's parent-death watch.
+    static let parentPID = "ODV_PARENT_PID"
+    /// Section 4b; install hooks only.
+    static let licenseKey = "ODV_PLUGIN_LICENSE_KEY"
 }
 
 // MARK: - Installer
@@ -396,12 +513,50 @@ struct PluginInstaller: Sendable {
             case .manual:
                 return FileManager.default.fileExists(atPath: url.path)
             case .huggingface, .totalsegTask:
-                // A downloader that failed part way can leave the directory in
-                // place, so presence alone is not enough; require content.
-                let contents = try? FileManager.default.contentsOfDirectory(atPath: url.path)
-                return !(contents ?? []).isEmpty
+                return Self.isCompleteDownload(at: url)
             }
         }.map(\.id)
+    }
+
+    /// Whether a downloaded weight directory holds a finished download.
+    ///
+    /// Content alone proves nothing: a download interrupted by a crash, a
+    /// network drop, or the user's Cancel leaves a non-empty directory, and
+    /// treating that as installed skipped the re-download and failed later at
+    /// model load. The host therefore writes a completion marker only after the
+    /// install hook exits 0 (which itself means the adapter verified its files,
+    /// section 4b), and requires it here. Hugging Face's resumable downloads
+    /// also stage `*.incomplete` files under `.cache/huggingface`; any of those
+    /// left behind means a transfer is unfinished whatever the marker says.
+    static func isCompleteDownload(at directory: URL) -> Bool {
+        let manager = FileManager.default
+        let marker = directory.appendingPathComponent(PluginPaths.weightCompletionMarker)
+        guard manager.fileExists(atPath: marker.path) else { return false }
+
+        let cache = directory.appendingPathComponent(".cache/huggingface", isDirectory: true)
+        if let enumerator = manager.enumerator(atPath: cache.path) {
+            for case let relative as String in enumerator where relative.hasSuffix(".incomplete") {
+                return false
+            }
+        }
+
+        // The marker on its own (beside nothing but the hub's bookkeeping)
+        // is not a model either.
+        let contents = (try? manager.contentsOfDirectory(atPath: directory.path)) ?? []
+        return contents.contains { $0 != PluginPaths.weightCompletionMarker && $0 != ".cache" }
+    }
+
+    /// Record that `directory` holds a finished download. See `isCompleteDownload`.
+    static func markDownloadComplete(at directory: URL) throws {
+        let marker = directory.appendingPathComponent(PluginPaths.weightCompletionMarker)
+        try Data(ISO8601DateFormatter().string(from: Date()).utf8).write(to: marker, options: .atomic)
+    }
+
+    /// Forget a previous completion before re-fetching into the same directory,
+    /// so an interrupted re-download cannot inherit the old marker.
+    static func clearDownloadMarker(at directory: URL) {
+        try? FileManager.default.removeItem(
+            at: directory.appendingPathComponent(PluginPaths.weightCompletionMarker))
     }
 
     // MARK: License gate
@@ -467,6 +622,16 @@ struct PluginInstaller: Sendable {
             publish(.failed(message))
             return .failed(message)
         }
+        // A cancelled install is not a failed one: the user asked for it to
+        // stop, the child processes have been terminated, and whatever was
+        // left half-built is redone by the next install. The store logs the
+        // cancellation itself.
+        func cancelled() -> PluginInstallState {
+            publish(.notInstalled)
+            return .notInstalled
+        }
+
+        if Task.isCancelled { return cancelled() }
 
         if plugin.requiresAppleSilicon {
             #if !arch(arm64)
@@ -506,6 +671,8 @@ struct PluginInstaller: Sendable {
                 guard outcome.succeeded else {
                     return fail("Creating the virtual environment failed (exit \(outcome.exitCode)).")
                 }
+            } catch is CancellationError {
+                return cancelled()
             } catch {
                 return fail(error.localizedDescription)
             }
@@ -535,6 +702,8 @@ struct PluginInstaller: Sendable {
             guard outcome.succeeded else {
                 return fail("Installing dependencies failed (exit \(outcome.exitCode)). Check the log above.")
             }
+        } catch is CancellationError {
+            return cancelled()
         } catch {
             return fail(error.localizedDescription)
         }
@@ -573,13 +742,14 @@ struct PluginInstaller: Sendable {
                 try FileManager.default.createDirectory(
                     at: paths.weightDirectory(pluginID: plugin.id, weightID: weight.id),
                     withIntermediateDirectories: true)
+                Self.clearDownloadMarker(at: destination)
             } catch {
                 return fail("Could not create the weights directory: \(error.localizedDescription)")
             }
 
             var environment = locator.processEnvironment(for: plugin.id)
             if let key = licenseKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
-                environment["ODV_PLUGIN_LICENSE_KEY"] = key
+                environment[PluginHostEnvironment.licenseKey] = key
             }
 
             // Captured from the adapter's stdout so a structured failure can be
@@ -617,10 +787,24 @@ struct PluginInstaller: Sendable {
                     }
                     return fail("Downloading \(weight.id) failed (exit \(outcome.exitCode)).")
                 }
+            } catch is CancellationError {
+                return cancelled()
             } catch {
                 return fail(error.localizedDescription)
             }
+
+            // Exit 0 is the adapter's statement that the files are complete
+            // (section 4b); the marker is what lets a later launch tell this
+            // directory apart from one a crash left half-written.
+            do {
+                try Self.markDownloadComplete(at: destination)
+            } catch {
+                return fail("Could not record the completed download of \(weight.id): "
+                            + error.localizedDescription)
+            }
         }
+
+        if Task.isCancelled { return cancelled() }
 
         // Step 4: verify and record.
         let present = Set(presentWeights(plugin: plugin, task: task))

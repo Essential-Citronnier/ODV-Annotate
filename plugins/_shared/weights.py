@@ -25,11 +25,15 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .lifeline import start_parent_watch
 from .progress import ProgressReporter, emit_log, emit_progress
 from .protocol import ErrorCode, PluginError, error_payload
 
 __all__ = [
     "LICENSE_KEY_ENV",
+    "WEIGHTS_DIR_ENV",
+    "installed_weight_dir",
+    "safe_component",
     "install_arg_present",
     "license_key",
     "parse_install_args",
@@ -40,6 +44,47 @@ __all__ = [
 
 # Section 4b: the host passes a licence key here, never in argv.
 LICENSE_KEY_ENV = "ODV_PLUGIN_LICENSE_KEY"
+
+# Section 4d: the plugin's weights root. Weight <id> lives in
+# $ODV_WEIGHTS_DIR/<id>/, the directory the install hook was given as --dest.
+WEIGHTS_DIR_ENV = "ODV_WEIGHTS_DIR"
+
+
+def safe_component(identifier: str) -> str:
+    """Fold an identifier to the path component the host uses for it.
+
+    Mirrors `PluginPaths.safeComponent` in the host: anything outside
+    letters, digits, '-', '_' and '.' becomes '-'. The two must agree, or an
+    adapter would look for its weights one directory away from where the host
+    installed them.
+    """
+    folded = "".join(ch if (ch.isalnum() or ch in "-_.") else "-" for ch in identifier)
+    return "plugin" if folded in ("", ".", "..") else folded
+
+
+def installed_weight_dir(plugin_id: str, weight_id: str,
+                         override_env: str | None = None) -> Path:
+    """The directory the host installed `weight_id` into.
+
+    Resolution order:
+
+    1. `override_env`, when the adapter names one and it is set -- for
+       running an adapter by hand against weights kept elsewhere.
+    2. `$ODV_WEIGHTS_DIR/<weight_id>`, which the host always sets.
+    3. The host's default layout under Application Support, so an adapter
+       started standalone on a machine with the app installed still finds
+       what the store downloaded.
+    """
+    if override_env:
+        override = os.environ.get(override_env, "").strip()
+        if override:
+            return Path(override).expanduser()
+    root = os.environ.get(WEIGHTS_DIR_ENV, "").strip()
+    if root:
+        return Path(root).expanduser() / safe_component(weight_id)
+    return (Path.home() / "Library" / "Application Support" / "OpenDicomViewer"
+            / "plugins" / safe_component(plugin_id) / "weights"
+            / safe_component(weight_id))
 
 
 def install_arg_present(argv: Sequence[str] | None = None) -> bool:
@@ -98,6 +143,9 @@ def run_install(
     id to count as installed. It raises `PluginError` for anything it can
     describe in protocol terms.
     """
+    # A download abandoned by a crashed host would otherwise run to completion
+    # into a directory nobody will mark complete.
+    start_parent_watch()
     dest = Path(args.dest).expanduser().resolve()
     reporter = ProgressReporter()
 

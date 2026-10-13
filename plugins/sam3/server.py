@@ -28,7 +28,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import threading
 from pathlib import Path
@@ -42,6 +41,7 @@ from _shared.cli import parse_server_args  # noqa: E402
 from _shared.sam_session import SamSessionAdapter, select_device  # noqa: E402
 from _shared.weights import (  # noqa: E402
     install_arg_present,
+    installed_weight_dir,
     parse_install_args,
     run_install,
     verify_manual_checkpoint,
@@ -56,6 +56,11 @@ TERMS_URL = "https://huggingface.co/facebook/sam3"
 # shows the user this exact name and the directory below.
 CHECKPOINT_FILENAME = "sam3.pt"
 
+# The manual weight's id in plugins.json. The store tells the user to place the
+# checkpoint at <weights root>/<this id>/sam3.pt (`manualWeightPath`), so that
+# is where the adapter looks.
+WEIGHT_ID = "sam3-checkpoint"
+
 # Matches `max_sessions` in plugins.json. SAM 3 is the larger model, so it
 # caches fewer sessions than SAM 2 within a comparable memory budget.
 MAX_SESSIONS = 2
@@ -69,13 +74,11 @@ def weights_dir() -> Path:
     """The documented location for the manually placed checkpoint.
 
     This path is shown verbatim in the store's license gate, so it must be
-    stable and must not depend on how the adapter was launched.
+    stable and must not depend on how the adapter was launched: it is the
+    directory of the store's `manualWeightPath`, reported by the host through
+    ODV_WEIGHTS_DIR. `ODV_SAM3_WEIGHTS` overrides it for standalone testing.
     """
-    override = os.environ.get("ODV_SAM3_WEIGHTS")
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / "Library" / "Application Support" / "OpenDicomViewer" / \
-        "plugins" / PLUGIN_ID / "weights"
+    return installed_weight_dir(PLUGIN_ID, WEIGHT_ID, override_env="ODV_SAM3_WEIGHTS")
 
 
 def license_message() -> str:

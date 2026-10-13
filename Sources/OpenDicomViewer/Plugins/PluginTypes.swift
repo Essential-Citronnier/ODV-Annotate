@@ -253,7 +253,14 @@ struct PluginManifest: Codable, Sendable, Equatable {
     /// a plugin list from the network, so the set of installable plugins is
     /// fixed at build time and reviewable in version control.
     static func loadBundled() throws -> PluginManifest {
-        guard let url = Bundle.main.url(forResource: "plugins", withExtension: "json") else {
+        // The packaged app carries the manifest in Contents/Resources
+        // (scripts/package_app.sh). A SwiftPM build -- `swift run`, or the
+        // executable under .build -- has it only in the target's resource
+        // bundle, so without the fallback a development build loaded nothing.
+        // Checked second because the `Bundle.module` accessor traps when its
+        // bundle is absent, which it is inside the .app.
+        guard let url = Bundle.main.url(forResource: "plugins", withExtension: "json")
+                ?? Bundle.module.url(forResource: "plugins", withExtension: "json") else {
             throw PluginError.manifestMissing
         }
         return try load(contentsOf: url)

@@ -89,7 +89,7 @@ resident engine.
 | Input kind | Transport | Rationale |
 |---|---|---|
 | `slice2d` | base64 PNG in the request body | one rendered slice, small |
-| `series3d` | **filesystem path** to the series directory | 3D geometry and full-range HU values are needed; base64-ing a volume is wasteful and lossy |
+| `series3d` | **filesystem path** to a directory holding **exactly one series** | 3D geometry and full-range HU values are needed; base64-ing a volume is wasteful and lossy |
 | `roi` | normalized rect `{x, y, width, height}`, 0–1 | resolution-independent |
 | `points` | list of `{x, y, label}`, x/y normalized 0–1, `label` 1=foreground 0=background | SAM-style prompts |
 | `box` | normalized rect | SAM-style prompt |
@@ -108,6 +108,14 @@ paths are returned.
 
 A plugin declares which kinds it consumes and produces per task; the host routes
 the result to the right renderer from that declaration alone.
+
+**`series3d` holds one series.** Studies are commonly stored with several series
+in one folder, so the host does not pass the folder the images happen to live
+in: it stages symbolic links to the selected series' files, and nothing else,
+in a private directory and passes that. The directory is removed when the
+invocation ends; an adapter must not keep paths into it. An adapter that
+receives a directory with more than one series should fail with `bad_input`
+rather than choose one.
 
 ---
 
@@ -296,6 +304,34 @@ reads it whenever it exists, including after a non-zero exit, because the
 adapter's own error message is more actionable than an exit code. Adapters
 should treat writing it as the expected behavior rather than a courtesy.
 
+## 4d. Host-provided environment
+
+Every adapter process the host spawns — server, one-shot, or install hook —
+inherits the host's environment plus:
+
+| Variable | Value | Use |
+|---|---|---|
+| `ODV_WEIGHTS_DIR` | the plugin's weights root | Weight `<id>` lives in `$ODV_WEIGHTS_DIR/<id>/` — the same directory the §4b hook received as `--dest`. `<id>` is the manifest weight id with any character outside `[A-Za-z0-9._-]` replaced by `-`. |
+| `ODV_PARENT_PID` | the host's pid | Parent-death watch, below. |
+| `ODV_PLUGIN_LICENSE_KEY` | licence key | §4b; install hooks only, and only when the user entered one. |
+| `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | `1` | Servers and one-shots only (not install hooks): invariant 3, enforced. |
+
+**Weights are loaded from `ODV_WEIGHTS_DIR`, never from a guessed path or a hub
+id.** The host owns the on-disk layout and may change it; the variable is the
+contract. A `manual` weight's file is at `$ODV_WEIGHTS_DIR/<id>/<filename>`,
+the exact path the store shows the user. A per-adapter override variable (for
+example `ODV_SAM2_WEIGHTS`) may take precedence for development, but an adapter
+must work with only `ODV_WEIGHTS_DIR` set. An adapter whose weights are absent
+from that directory reports `not_ready` (or `license_required` for a `manual`
+weight) rather than downloading them.
+
+**Parent-death watch.** When `ODV_PARENT_PID` is set, the adapter polls about
+once a second and exits when that process no longer exists or the adapter has
+been orphaned (re-parented to pid 1). The host stops its adapters on an orderly
+quit, but a crash or force quit skips that, and an orphaned adapter would hold
+its model's memory and its port indefinitely. `_shared.lifeline` implements
+this; `run_adapter`, `run_oneshot`, and `run_install` start it.
+
 ## 5. Mask RLE encoding
 
 `mask2d.rle` is a flat array of run lengths over the mask in **row-major** order,
@@ -339,6 +375,17 @@ notInstalled → resolvingLicense → downloading → installing → ready
 - `installing` covers venv creation and `pip install -r requirements.txt`.
 - `ready` requires: venv present, all declared weight files present, license
   satisfied.
+- A downloaded weight counts as present only when its directory holds the
+  host's completion marker, `.odv-download-complete`, and no
+  `.cache/huggingface/**/*.incomplete` file. The host deletes the marker before
+  running the §4b hook and writes it only after the hook exits 0, so a download
+  interrupted by a crash, a network failure, or Cancel is fetched again rather
+  than taken for installed. Adapters neither read nor write the marker. A
+  `manual` weight has no marker; the file being where the store said is enough.
+- Cancelling an install terminates the hook or pip process (SIGTERM, then
+  SIGKILL after 5 s) and returns the task to `notInstalled`.
+- Installs of tasks belonging to one plugin share its virtualenv and run one at
+  a time.
 - The host re-verifies `ready` on launch; a task whose weights vanished falls
   back to `notInstalled` rather than failing at first use.
 

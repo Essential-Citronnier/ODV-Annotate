@@ -205,3 +205,91 @@ def test_an_absent_manual_checkpoint_is_license_required(tmp_path):
     # the store shows them verbatim and the user cannot act without either.
     assert "https://huggingface.co/facebook/sam3" in info.value.message
     assert str(tmp_path / "sam3.pt") in info.value.message
+
+
+# ---------------------------------------------------------------------------
+# Section 4d: where an installed weight lives
+# ---------------------------------------------------------------------------
+
+from _shared.weights import (  # noqa: E402
+    WEIGHTS_DIR_ENV,
+    installed_weight_dir,
+    safe_component,
+)
+
+
+def test_safe_component_matches_the_host_folding():
+    # PluginPaths.safeComponent: keep letters, digits, '-', '_', '.'.
+    assert safe_component("sam2.1-hiera-small") == "sam2.1-hiera-small"
+    assert safe_component("Dataset297_TotalSegmentator_total_3mm_1559subj") == \
+        "Dataset297_TotalSegmentator_total_3mm_1559subj"
+    assert safe_component("a/b c") == "a-b-c"
+    assert safe_component("..") == "plugin"
+    assert safe_component("") == "plugin"
+
+
+def test_installed_weight_dir_follows_the_host_variable(monkeypatch, tmp_path):
+    monkeypatch.setenv(WEIGHTS_DIR_ENV, str(tmp_path))
+    monkeypatch.delenv("ODV_TEST_OVERRIDE", raising=False)
+    assert installed_weight_dir("sam2", "sam2.1-hiera-small",
+                                override_env="ODV_TEST_OVERRIDE") \
+        == tmp_path / "sam2.1-hiera-small"
+
+
+def test_installed_weight_dir_prefers_an_explicit_override(monkeypatch, tmp_path):
+    monkeypatch.setenv(WEIGHTS_DIR_ENV, str(tmp_path / "host"))
+    monkeypatch.setenv("ODV_TEST_OVERRIDE", str(tmp_path / "mine"))
+    assert installed_weight_dir("sam2", "w", override_env="ODV_TEST_OVERRIDE") \
+        == tmp_path / "mine"
+
+
+def test_installed_weight_dir_defaults_to_the_app_layout(monkeypatch):
+    monkeypatch.delenv(WEIGHTS_DIR_ENV, raising=False)
+    path = installed_weight_dir("gemma-4-e4b", "gemma-4-e4b-it-4bit")
+    assert path.parts[-4:] == ("plugins", "gemma-4-e4b", "weights", "gemma-4-e4b-it-4bit")
+    assert "OpenDicomViewer" in path.parts
+
+
+def test_adapters_look_where_the_host_installs(monkeypatch, tmp_path):
+    """Each adapter's weight lookup must land in $ODV_WEIGHTS_DIR/<weight id>.
+
+    The weight ids are the ones plugins.json declares; a mismatch here is the
+    defect this contract exists to remove.
+    """
+    import importlib.util
+
+    monkeypatch.setenv(WEIGHTS_DIR_ENV, str(tmp_path))
+    for env in ("ODV_SAM2_WEIGHTS", "ODV_SAM3_WEIGHTS", "ODV_GEMMA_WEIGHTS"):
+        monkeypatch.delenv(env, raising=False)
+
+    manifest = json.loads((Path(__file__).resolve().parents[3] / "Sources"
+                           / "OpenDicomViewer" / "Resources" / "plugins.json").read_text())
+    declared = {plugin["id"]: {w["id"] for task in plugin["tasks"] for w in task["weights"]}
+                for plugin in manifest["plugins"]}
+
+    root = Path(__file__).resolve().parents[2]
+
+    def load(name):
+        spec = importlib.util.spec_from_file_location(f"adapter_{name}", root / name / "server.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    sam2 = load("sam2")
+    assert sam2.WEIGHT_ID in declared[sam2.PLUGIN_ID]
+    assert sam2.weights_dir() == tmp_path / sam2.WEIGHT_ID
+
+    sam3 = load("sam3")
+    assert sam3.WEIGHT_ID in declared[sam3.PLUGIN_ID]
+    # The store's manualWeightPath: <weights root>/<weight id>/<filename>.
+    assert sam3.Sam3Backend().checkpoint_path() == tmp_path / sam3.WEIGHT_ID / "sam3.pt"
+
+    gemma = load("gemma")
+    assert gemma.WEIGHT_ID in declared[gemma.PLUGIN_ID]
+    with pytest.raises(PluginError) as missing:
+        gemma.model_source()
+    assert missing.value.code == ErrorCode.NOT_READY
+    installed = tmp_path / gemma.WEIGHT_ID
+    installed.mkdir()
+    (installed / "config.json").write_text("{}")
+    assert gemma.model_source() == str(installed)

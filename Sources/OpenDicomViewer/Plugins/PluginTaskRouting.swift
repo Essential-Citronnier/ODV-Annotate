@@ -14,6 +14,50 @@ import AppKit
 import Foundation
 import SwiftUI
 
+/// Presents exactly one series to a plugin that takes a directory.
+///
+/// Studies are routinely stored with several series in one folder, and the
+/// one-shot contract passes a directory (PLUGIN_PROTOCOL.md section 2). Handing
+/// the adapter the folder of the panel's first image therefore handed it every
+/// series in that folder, and TotalSegmentator's DICOM conversion segmented
+/// whichever series it happened to pick -- not necessarily the one on screen.
+/// The selected series' files are linked into a private directory instead, so
+/// what the adapter reads is precisely what the user selected. Symbolic links
+/// cost no copy of the pixel data.
+enum PluginSeriesStaging {
+
+    /// Link `files` into a new directory beneath `root` and return it.
+    static func stage(_ files: [URL],
+                      under root: URL = FileManager.default.temporaryDirectory) throws -> URL {
+        let manager = FileManager.default
+        let directory = root.appendingPathComponent("odv-series-\(UUID().uuidString)",
+                                                    isDirectory: true)
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        var seen = Set<String>()
+        do {
+            for (index, file) in files.enumerated() {
+                let source = file.standardizedFileURL
+                guard seen.insert(source.path).inserted else { continue }
+                // Prefixed with the position so two files that share a name in
+                // different source folders cannot collide.
+                let name = String(format: "%06d-", index) + source.lastPathComponent
+                try manager.createSymbolicLink(
+                    at: directory.appendingPathComponent(name, isDirectory: false),
+                    withDestinationURL: source)
+            }
+        } catch {
+            discard(directory)
+            throw error
+        }
+        return directory
+    }
+
+    /// Remove a staged directory. Only the links go; the sources are untouched.
+    static func discard(_ directory: URL) {
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
 extension Notification.Name {
     /// Posted by the AI menu, which lives in a different view tree from the
     /// view that owns the store sheet.
@@ -35,8 +79,9 @@ extension DICOMModel {
         }
 
         let invocation: PluginInvocation
+        let staged: URL?
         do {
-            invocation = try buildInvocation(for: task, panel: panel)
+            (invocation, staged) = try buildInvocation(for: task, panel: panel)
         } catch {
             panel.aiError = error.localizedDescription
             return
@@ -46,6 +91,7 @@ extension DICOMModel {
         panel.aiError = nil
 
         Task {
+            defer { if let staged { PluginSeriesStaging.discard(staged) } }
             do {
                 let result = try await runtime.invoke(ref, invocation)
                 await MainActor.run {
@@ -69,9 +115,13 @@ extension DICOMModel {
     ///
     /// A task asking for something the panel cannot supply fails here, before a
     /// model is started, rather than as a confusing error from the adapter.
+    ///
+    /// Returns, alongside the invocation, any directory staged for it, which
+    /// the caller removes once the run is over.
     private func buildInvocation(for task: PluginTask,
-                                 panel: PanelState) throws -> PluginInvocation {
+                                 panel: PanelState) throws -> (PluginInvocation, URL?) {
         var invocation = PluginInvocation()
+        var staged: URL?
 
         for kind in task.inputs {
             switch kind {
@@ -83,9 +133,11 @@ extension DICOMModel {
                 invocation.slice2d = encoded
 
             case .series3d:
-                guard let directory = seriesDirectory(for: panel) else {
+                guard let files = seriesFiles(for: panel) else {
                     throw PluginError.unsupportedInput(.series3d)
                 }
+                let directory = try PluginSeriesStaging.stage(files)
+                staged = directory
                 invocation.series3d = directory.path
 
             case .text:
@@ -102,7 +154,7 @@ extension DICOMModel {
             }
         }
 
-        return invocation
+        return (invocation, staged)
     }
 
     private func clinicalContext(for panel: PanelState) -> String {
@@ -119,12 +171,13 @@ extension DICOMModel {
         return parts.joined(separator: ", ")
     }
 
-    /// Directory holding the panel's series, for plugins that take a path
-    /// rather than a rendered slice.
-    private func seriesDirectory(for panel: PanelState) -> URL? {
-        guard panel.seriesIndex >= 0, panel.seriesIndex < allSeries.count,
-              let first = allSeries[panel.seriesIndex].images.first else { return nil }
-        return first.url.deletingLastPathComponent()
+    /// The files of the panel's series and no other, for plugins that take a
+    /// path rather than a rendered slice. See `PluginSeriesStaging`.
+    private func seriesFiles(for panel: PanelState) -> [URL]? {
+        guard panel.seriesIndex >= 0, panel.seriesIndex < allSeries.count else { return nil }
+        let series = allSeries[panel.seriesIndex]
+        let files = series.images.map(\.url)
+        return files.isEmpty ? nil : files
     }
 
     static func base64PNG(_ image: NSImage) -> String? {

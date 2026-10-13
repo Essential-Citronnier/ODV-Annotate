@@ -75,6 +75,11 @@ struct PluginPaths: Sendable, Equatable {
         weightsRoot(pluginID).appendingPathComponent(Self.safeComponent(weightID), isDirectory: true)
     }
 
+    /// File the host writes into a downloaded weight directory once the install
+    /// hook has exited 0. Its absence means the download never finished
+    /// (PLUGIN_PROTOCOL.md section 7).
+    static let weightCompletionMarker = ".odv-download-complete"
+
     /// Absolute path a `gated-download` checkpoint must be placed at. The store
     /// shows this string verbatim, so it has to be stable and predictable.
     func manualWeightPath(pluginID: String, weight: PluginWeight) -> URL {

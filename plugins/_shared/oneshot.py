@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .lifeline import start_parent_watch
 from .progress import ProgressReporter, emit_log
 from .protocol import ErrorCode, PluginError, error_payload
 
@@ -98,6 +99,9 @@ def run_oneshot(
     and a progress reporter. It raises `PluginError` for anything it can
     describe in protocol terms; anything else becomes `internal`.
     """
+    # Section 4d: a one-shot is typically the heaviest process on the machine;
+    # it must not keep running for a host that has crashed.
+    start_parent_watch()
     started = time.perf_counter()
     out_dir = Path(args.out).expanduser().resolve()
     reporter = ProgressReporter()

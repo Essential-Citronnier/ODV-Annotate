@@ -16,6 +16,11 @@ struct OpenDicomViewerApp: App {
     @ObservedObject private var aiService = AIService.shared
     @ObservedObject private var pluginStore = PluginStore.shared
 
+    init() {
+        // Loads the plugin manifest and stops adapter processes at quit.
+        PluginRuntime.bootstrapForApplication()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView(model: model)
