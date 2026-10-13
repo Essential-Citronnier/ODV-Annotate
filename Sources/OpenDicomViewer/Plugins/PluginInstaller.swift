@@ -6,6 +6,7 @@
 // AIServerManager to any adapter satisfying PLUGIN_PROTOCOL.md section 7.
 // Licensed under the MIT License. See LICENSE for details.
 
+import CryptoKit
 import Foundation
 
 // MARK: - Log buffer
@@ -574,6 +575,23 @@ struct PluginInstaller: Sendable {
     /// that would rebuild it. One made while the app ran from the DMG or a
     /// translocated path links to an interpreter that is gone once the app
     /// runs from /Applications; it is rebuilt rather than reused.
+    /// SHA-256 of a requirements file, hex-encoded; nil if unreadable.
+    static func requirementsDigest(at url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Whether the plugin's venv was installed from its current requirements
+    /// file. A venv without the marker predates it, or its pip run never
+    /// finished; either way it is not known to match and counts as stale.
+    func venvMatchesRequirements(_ plugin: PluginDescriptor) -> Bool {
+        guard let current = Self.requirementsDigest(at: locator.requirementsFile(for: plugin)) else {
+            return true  // nothing to compare against; don't demote on a missing file
+        }
+        let recorded = try? String(contentsOf: paths.requirementsMarker(plugin.id), encoding: .utf8)
+        return recorded?.trimmingCharacters(in: .whitespacesAndNewlines) == current
+    }
+
     func hasVenv(_ pluginID: String) -> Bool {
         PythonVenvCheck.isUsable(venv: paths.venv(pluginID),
                                  python: locator.pythonOverride == nil ? locator.bundledPython : nil)
@@ -829,6 +847,9 @@ struct PluginInstaller: Sendable {
                 onStderrLine: { log($0) })
             guard outcome.succeeded else {
                 return fail("Installing dependencies failed (exit \(outcome.exitCode)). Check the log above.")
+            }
+            if let digest = Self.requirementsDigest(at: requirements) {
+                try? Data(digest.utf8).write(to: paths.requirementsMarker(plugin.id), options: .atomic)
             }
         } catch is CancellationError {
             return cancelled()

@@ -62,11 +62,37 @@ enum AIAnalysisEngine: String, CaseIterable, Identifiable {
     }
 }
 
+/// A user-facing AI action, independent of which engine runs it.
+enum AIAction: Equatable {
+    case analyze
+    case detectAbnormalities
+    case describeROI
+
+    /// Label for the Retry button of a failed run.
+    var retryTitle: String {
+        switch self {
+        case .analyze: return "Retry Analysis"
+        case .detectAbnormalities: return "Retry Detection"
+        case .describeROI: return "Retry Describe ROI"
+        }
+    }
+}
+
 @MainActor
 extension DICOMModel {
 
+    /// Run `action` on the panel's slice with the preferred engine.
+    func triggerPreferredAI(_ action: AIAction, for panel: PanelState) {
+        switch action {
+        case .analyze: triggerPreferredAIAnalysis(for: panel)
+        case .detectAbnormalities: triggerPreferredAIAbnormalityDetection(for: panel)
+        case .describeROI: triggerPreferredAIDescribeROI(for: panel)
+        }
+    }
+
     /// Analyze the panel's slice with the preferred engine.
     func triggerPreferredAIAnalysis(for panel: PanelState) {
+        panel.lastAIAction = .analyze
         switch AIAnalysisEngine.current {
         case .builtIn: triggerAIAnalysis(for: panel)
         case .gemmaPlugin:
@@ -77,6 +103,7 @@ extension DICOMModel {
 
     /// Describe the latest ROI Stats rectangle with the preferred engine.
     func triggerPreferredAIDescribeROI(for panel: PanelState) {
+        panel.lastAIAction = .describeROI
         switch AIAnalysisEngine.current {
         case .builtIn: triggerAIDescribeLatestROI(for: panel)
         case .gemmaPlugin:
@@ -87,6 +114,7 @@ extension DICOMModel {
 
     /// Flag abnormalities with the preferred engine.
     func triggerPreferredAIAbnormalityDetection(for panel: PanelState) {
+        panel.lastAIAction = .detectAbnormalities
         switch AIAnalysisEngine.current {
         case .builtIn: triggerAIAbnormalityDetection(for: panel)
         case .gemmaPlugin:

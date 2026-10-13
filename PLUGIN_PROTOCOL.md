@@ -373,8 +373,13 @@ notInstalled → resolvingLicense → downloading → installing → ready
 
 - `resolvingLicense` is entered only for gated tasks.
 - `installing` covers venv creation and `pip install -r requirements.txt`.
-- `ready` requires: venv present, all declared weight files present, license
-  satisfied.
+- `ready` requires: venv present and built from the adapter's current
+  requirements, all declared weight files present, license satisfied.
+- After `pip install -r` succeeds the host writes the SHA-256 of that
+  requirements file to `.venv/.odv-requirements-sha256`. The launch re-check
+  demotes a `ready` task to `notInstalled` when the marker is missing or no
+  longer matches (an app update changed the lock), so the next Install re-runs
+  pip; weights already on disk are reused.
 - A downloaded weight counts as present only when its directory holds the
   host's completion marker, `.odv-download-complete`, and no
   `.cache/huggingface/**/*.incomplete` file. The host deletes the marker before

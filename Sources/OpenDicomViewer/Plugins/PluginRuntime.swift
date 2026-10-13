@@ -421,7 +421,8 @@ final class PluginRuntime: ObservableObject {
         }
 
         store.load()
-        store.reverify(manifest: manifest)
+        store.reverify(manifest: manifest,
+                       venvIsCurrent: { [installer] in installer.venvMatchesRequirements($0) })
         refreshInstallStates()
         for plugin in manifest.plugins where runtimeStates[plugin.id] == nil {
             runtimeStates[plugin.id] = .stopped

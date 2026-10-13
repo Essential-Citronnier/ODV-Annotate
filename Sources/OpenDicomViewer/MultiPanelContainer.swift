@@ -2388,9 +2388,12 @@ struct AIInspectorView: View {
                         .foregroundStyle(.red)
                         .multilineTextAlignment(.center)
                         .textSelection(.enabled)
-                    Button("Retry") {
-                        panel.clearAIAnnotations()
-                        model.triggerPreferredAIAnalysis(for: panel)
+                    Button(panel.lastAIAction.retryTitle) {
+                        let action = panel.lastAIAction
+                        // Describe ROI only replaces the description, so keep
+                        // the slice's boxes when retrying it.
+                        if action != .describeROI { panel.clearAIAnnotations() }
+                        model.triggerPreferredAI(action, for: panel)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)

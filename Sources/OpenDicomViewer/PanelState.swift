@@ -319,6 +319,9 @@ class PanelState: ObservableObject, Identifiable {
     // AI Analysis State
     @Published var aiAnalysisInProgress: Bool = false
     @Published var aiError: String? = nil
+    /// The AI action the user last asked for on this panel, so Retry repeats
+    /// that action rather than always running a full analysis.
+    var lastAIAction: AIAction = .analyze
     @Published var aiDescription: String? = nil
     /// The slice `aiDescription` was computed on.
     @Published var aiDescriptionSlice: AnnotationSlice? = nil
