@@ -801,3 +801,130 @@ static void opj_info_callback(const char *msg, void *client_data) {
 }
 
 @end
+
+@implementation DCMTKFrameDecoder {
+  DcmFileFormat *_file;
+  E_TransferSyntax _xfer;
+  NSLock *_lock;
+  NSInteger _frameCount;
+}
+
++ (void)initialize {
+  ensureDCMTKInitialized();
+}
+
+- (instancetype)initWithPath:(NSString *)path {
+  self = [super init];
+  if (!self || !path)
+    return nil;
+  _lock = [[NSLock alloc] init];
+  _file = new DcmFileFormat();
+  // Large elements (pixel data) stay on disk and are read per frame.
+  if (_file->loadFile([path UTF8String]).bad()) {
+    delete _file;
+    _file = NULL;
+    return nil;
+  }
+  DcmDataset *ds = _file->getDataset();
+  _xfer = ds->getOriginalXfer();
+  Sint32 frames = 1;
+  if (ds->findAndGetSint32(DCM_NumberOfFrames, frames).bad() || frames < 1)
+    frames = 1;
+  _frameCount = frames;
+  return self;
+}
+
+- (void)dealloc {
+  if (_file) {
+    delete _file;
+    _file = NULL;
+  }
+}
+
+- (NSInteger)frameCount {
+  return _frameCount;
+}
+
+// Caller holds _lock. Returns a DicomImage for one frame, or NULL.
+- (DicomImage *)newImageForFrame:(NSInteger)frame {
+  if (!_file || frame < 0 || frame >= _frameCount)
+    return NULL;
+  DicomImage *image =
+      new DicomImage(_file, _xfer, CIF_UsePartialAccessToPixelData,
+                     (unsigned long)frame, 1);
+  if (!image || image->getStatus() != EIS_Normal) {
+    delete image;
+    return NULL;
+  }
+  return image;
+}
+
+- (CGImageRef)copyFrameImage:(NSInteger)frame ww:(double)ww wc:(double)wc {
+  [_lock lock];
+  DicomImage *image = [self newImageForFrame:frame];
+  if (!image) {
+    [_lock unlock];
+    return NULL;
+  }
+  if (image->isMonochrome()) {
+    if (ww > 0)
+      image->setWindow(wc, ww);
+    else
+      image->setMinMaxWindow();
+  }
+  unsigned long size = image->getOutputDataSize(8);
+  void *buffer = size ? malloc(size) : NULL;
+  BOOL ok = buffer && image->getOutputData(buffer, size, 8, 0, 0);
+  int samples = image->isMonochrome() ? 1 : 3;
+  size_t width = image->getWidth(), height = image->getHeight();
+  delete image;
+  [_lock unlock];
+  if (!ok) {
+    free(buffer);
+    return NULL;
+  }
+
+  CFDataRef data = CFDataCreateWithBytesNoCopy(kCFAllocatorDefault,
+                                               (const UInt8 *)buffer, size,
+                                               kCFAllocatorMalloc);
+  CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
+  CGColorSpaceRef colorSpace = samples == 1 ? CGColorSpaceCreateDeviceGray()
+                                            : CGColorSpaceCreateDeviceRGB();
+  CGImageRef cg = CGImageCreate(width, height, 8, 8 * samples, width * samples,
+                                colorSpace,
+                                kCGBitmapByteOrderDefault | kCGImageAlphaNone,
+                                provider, NULL, false,
+                                kCGRenderingIntentDefault);
+  CGColorSpaceRelease(colorSpace);
+  CGDataProviderRelease(provider);
+  CFRelease(data);
+  return cg;
+}
+
+- (BOOL)getMinMaxOfFrame:(NSInteger)frame min:(double *)minValue max:(double *)maxValue {
+  [_lock lock];
+  DicomImage *image = [self newImageForFrame:frame];
+  BOOL ok = NO;
+  if (image && image->isMonochrome()) {
+    double lo = 0, hi = 0;
+    if (image->getMinMaxValues(lo, hi)) {
+      *minValue = lo;
+      *maxValue = hi;
+      ok = YES;
+    }
+  }
+  delete image;
+  [_lock unlock];
+  return ok;
+}
+
+- (BOOL)getStoredWindowCenter:(double *)center width:(double *)width {
+  [_lock lock];
+  DicomImage *image = [self newImageForFrame:0];
+  BOOL ok = image && storedWindow(image, center, width);
+  delete image;
+  [_lock unlock];
+  return ok;
+}
+
+@end

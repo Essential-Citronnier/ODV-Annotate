@@ -10,6 +10,7 @@
 import Foundation
 import AppKit
 import ImageIO
+import DCMTKWrapper
 
 func cineLog(_ msg: String) {
     let line = "[\(Date())] \(msg)\n"
@@ -26,6 +27,14 @@ func cineLog(_ msg: String) {
     }
 }
 
+/// One encapsulated pixel data item (fragment): where its item tag starts
+/// and where its bytes are.
+struct EncapsulatedFragment: Equatable {
+    let itemOffset: Int
+    let dataOffset: Int
+    let length: Int
+}
+
 class MultiFrameDecoder {
     let url: URL
     let numberOfFrames: Int
@@ -37,10 +46,25 @@ class MultiFrameDecoder {
     let frameTimeMs: Double
     let isColor: Bool
 
+    /// How frames are turned into images
+    enum DecodePath: Equatable {
+        case raw        // uncompressed: Swift decode with a fixed window
+        case imageIO    // baseline JPEG / JPEG 2000 via ImageIO
+        case dcmtk      // JPEG Lossless, JPEG-LS, RLE, 12-bit JPEG, ... via DCMTK
+    }
+    let decodePath: DecodePath
+    /// Window applied to every frame (modality units); nil for ImageIO frames
+    let window: (width: Double, center: Double)?
+
     private let mappedData: Data
-    private var frameTable: [(offset: Int, length: Int)] = []
+    /// Fragments making up each frame (one or more per frame)
+    private var frameTable: [[(offset: Int, length: Int)]] = []
     private let isEncapsulated: Bool
     private let isSigned: Bool
+    private let isBigEndian: Bool
+    private let pixelAttributes: DicomPixelAttributes
+    private var dcmtkDecoder: DCMTKFrameDecoder?
+    private let dcmtkLock = NSLock()
     private let frameCache = NSCache<NSNumber, NSImage>()
     private let prefetchQueue = DispatchQueue(label: "com.opendicomviewer.framePrefetch", qos: .userInitiated)
 
@@ -50,6 +74,27 @@ class MultiFrameDecoder {
     private let ringBufferSize = 60  // ~2 seconds at 30fps
     private var ringBufferDecoding = false
     private var ringBufferTarget: Int = 0  // Target frame to decode ahead to
+
+    /// Transfer syntaxes ImageIO can't decode (or decodes without DICOM
+    /// semantics), routed through DCMTK instead.
+    static let dcmtkTransferSyntaxes: Set<String> = [
+        "1.2.840.10008.1.2.4.51",   // JPEG Extended (12-bit)
+        "1.2.840.10008.1.2.4.57",   // JPEG Lossless
+        "1.2.840.10008.1.2.4.70",   // JPEG Lossless SV1
+        "1.2.840.10008.1.2.4.80",   // JPEG-LS Lossless
+        "1.2.840.10008.1.2.4.81",   // JPEG-LS Near-Lossless
+        "1.2.840.10008.1.2.5",      // RLE Lossless
+        "1.2.840.10008.1.2.1.99",   // Deflated Explicit VR LE
+    ]
+
+    static func decodePath(transferSyntax ts: String, bitsStored: Int) -> DecodePath {
+        let uncompressed: Set<String> = ["", "1.2.840.10008.1.2", "1.2.840.10008.1.2.1", "1.2.840.10008.1.2.2"]
+        if uncompressed.contains(ts) { return .raw }
+        if dcmtkTransferSyntaxes.contains(ts) { return .dcmtk }
+        // Baseline JPEG declared with >8-bit data can't be shown by ImageIO
+        if ts == "1.2.840.10008.1.2.4.50" && bitsStored > 8 { return .dcmtk }
+        return .imageIO
+    }
 
     /// Failable init - returns nil if file is not a valid multi-frame DICOM.
     init?(url: URL) {
@@ -64,7 +109,7 @@ class MultiFrameDecoder {
 
         // 2. Parse header metadata using SimpleDicomParser
         let parser = SimpleDicomParser(data: data)
-        guard let (elements, _, _) = try? parser.parse(stopAtPixelData: true) else { return nil }
+        guard let (elements, _, parsedTS) = try? parser.parse(stopAtPixelData: true) else { return nil }
         let pixelDataOffset = parser.offset  // Points at the (7FE0,0010) tag
 
         // Helper closures for tag lookup
@@ -86,27 +131,27 @@ class MultiFrameDecoder {
         guard let nf = getInt(0x0028, 0x0008), nf > 1 else { return nil }
         self.numberOfFrames = nf
 
-        // Dimensions
-        self.frameWidth  = getInt(0x0028, 0x0011) ?? 0   // Columns
-        self.frameHeight = getInt(0x0028, 0x0010) ?? 0   // Rows
-        self.bitsAllocated  = getInt(0x0028, 0x0100) ?? 8
-        self.samplesPerPixel = getInt(0x0028, 0x0002) ?? 1
+        let transferSyntax = (parsedTS ?? getStr(0x0002, 0x0010) ?? "")
+            .trimmingCharacters(in: .controlCharacters.union(.whitespaces))
+        let bigEndian = transferSyntax == "1.2.840.10008.1.2.2"
+        self.isBigEndian = bigEndian
+        let attributes = DicomPixelAttributes(elements: elements, bigEndian: bigEndian)
+        self.pixelAttributes = attributes
 
-        // PixelRepresentation (0028,0103): 0 = unsigned, 1 = signed
-        self.isSigned = (getInt(0x0028, 0x0103) ?? 0) == 1
+        // Dimensions
+        self.frameWidth  = attributes.columns ?? 0
+        self.frameHeight = attributes.rows ?? 0
+        self.bitsAllocated  = attributes.bitsAllocated
+        self.samplesPerPixel = attributes.samplesPerPixel
+        self.isSigned = attributes.pixelRepresentation == 1
 
         // PhotometricInterpretation (0028,0004)
-        let photo = getStr(0x0028, 0x0004) ?? ""
-        self.isColor = photo.contains("RGB") || photo.contains("YBR")
+        let photo = attributes.photometric.uppercased()
+        self.isColor = photo.contains("RGB") || photo.contains("YBR") || photo.contains("PALETTE")
 
-        // Transfer Syntax UID (0002,0010) - determines encapsulated vs raw layout
-        let transferSyntax = getStr(0x0002, 0x0010)?.trimmingCharacters(in: .whitespaces) ?? ""
-        let uncompressedUIDs: Set<String> = [
-            "1.2.840.10008.1.2",    // Implicit VR Little Endian
-            "1.2.840.10008.1.2.1",  // Explicit VR Little Endian
-            "1.2.840.10008.1.2.2",  // Explicit VR Big Endian
-        ]
-        self.isEncapsulated = !uncompressedUIDs.contains(transferSyntax)
+        let path = MultiFrameDecoder.decodePath(transferSyntax: transferSyntax, bitsStored: attributes.bitsStored)
+        self.decodePath = path
+        self.isEncapsulated = path != .raw
 
         // Timing: CineRate (0018,0040) IS, FrameTime (0018,1063) DS (ms/frame)
         // Prefer FrameTime; fall back to CineRate; default 30 fps
@@ -127,18 +172,23 @@ class MultiFrameDecoder {
             self.frameTimeMs = 1000.0 / rawCineRate
         }
 
-        // 3. Find PixelData tag and parse frame table
+        // 3. Build the frame table
         let parseStart = CFAbsoluteTimeGetCurrent()
-        var table: [(offset: Int, length: Int)] = []
-        if isEncapsulated {
-            guard MultiFrameDecoder.findPixelDataAndParseFrames(data: data, frameTable: &table, pixelDataTagOffset: pixelDataOffset, fileURL: url) else {
-                cineLog("DECODER findPixelDataAndParseFrames FAILED for \(url.lastPathComponent)")
+        var table: [[(offset: Int, length: Int)]] = []
+        switch path {
+        case .imageIO:
+            guard let frames = MultiFrameDecoder.encapsulatedFrameTable(
+                data: data, pixelDataTagOffset: pixelDataOffset, numberOfFrames: nf,
+                transferSyntax: transferSyntax, fileURL: url) else {
+                cineLog("DECODER encapsulated frame table FAILED for \(url.lastPathComponent)")
                 return nil
             }
-        } else {
+            table = frames
+        case .raw:
+            var flat: [(offset: Int, length: Int)] = []
             MultiFrameDecoder.buildRawFrameTable(
                 data: data,
-                frameTable: &table,
+                frameTable: &flat,
                 pixelDataTagOffset: pixelDataOffset,
                 numberOfFrames: nf,
                 frameWidth: frameWidth,
@@ -146,10 +196,19 @@ class MultiFrameDecoder {
                 bitsAllocated: bitsAllocated,
                 samplesPerPixel: samplesPerPixel
             )
-            guard !table.isEmpty else {
+            guard !flat.isEmpty else {
                 cineLog("DECODER buildRawFrameTable FAILED for \(url.lastPathComponent)")
                 return nil
             }
+            table = flat.map { [$0] }
+        case .dcmtk:
+            guard let dec = DCMTKFrameDecoder(path: url.path), dec.frameCount > 0 else {
+                cineLog("DECODER DCMTK frame decoder FAILED for \(url.lastPathComponent)")
+                return nil
+            }
+            self.dcmtkDecoder = dec
+            // Frames are addressed by index; offsets are unused for this path
+            table = Array(repeating: [], count: min(nf, dec.frameCount))
         }
         cineLog("DECODER Frame table built: \(table.count) frames in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - parseStart))s for \(url.lastPathComponent)")
 
@@ -159,60 +218,102 @@ class MultiFrameDecoder {
         }
         self.frameTable = table
 
-        // 4. Configure cache
+        // 4. One window for all frames (modality units): the file's stored
+        // window, else the first frame's range. Per-frame auto-windowing made
+        // brightness flicker during playback.
+        switch path {
+        case .raw:
+            if let w = attributes.windowWidth, w > 0, let c = attributes.windowCenter {
+                self.window = (w, c)
+            } else if let first = table.first?.first, first.offset + first.length <= data.count,
+                      let decoded = PlainPixelDecoder.decode(pixelData: data.subdata(in: first.offset..<(first.offset + first.length)),
+                                                             attributes: attributes, bigEndian: bigEndian),
+                      decoded.samples == 1 {
+                let w = PixelValues.defaultWindow(storedWidth: nil, storedCenter: nil, data: decoded.data,
+                                                  bits: decoded.bitDepth, isSigned: decoded.isSigned)
+                self.window = (w.width, w.center)
+            } else {
+                self.window = nil
+            }
+        case .dcmtk:
+            var c = 0.0, w = 0.0, lo = 0.0, hi = 0.0
+            if let dec = dcmtkDecoder, dec.getStoredWindowCenter(&c, width: &w), w > 0 {
+                self.window = (w, c)
+            } else if let dec = dcmtkDecoder, dec.getMinMax(ofFrame: 0, min: &lo, max: &hi) {
+                self.window = (max(hi - lo, 1), (hi + lo) / 2)
+            } else {
+                self.window = nil
+            }
+        case .imageIO:
+            self.window = nil
+        }
+
+        // 5. Configure cache
         frameCache.countLimit = 120
         frameCache.totalCostLimit = 500 * 1024 * 1024 // 500 MB
-        cineLog("DECODER init COMPLETE: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - initStart))s total for \(url.lastPathComponent) (\(min(nf, table.count)) effective frames)")
+        cineLog("DECODER init COMPLETE: \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - initStart))s total for \(url.lastPathComponent) (\(min(nf, table.count)) effective frames, path \(path))")
     }
 
     // MARK: - Frame Access
 
     /// Return a decoded frame image at the given index. Checks the cache first.
     func frameImage(at index: Int) -> NSImage? {
-        guard index >= 0 && index < min(numberOfFrames, frameTable.count) else { return nil }
+        guard index >= 0 && index < effectiveFrameCount else { return nil }
 
         let key = NSNumber(value: index)
         if let cached = frameCache.object(forKey: key) {
             return cached
         }
-
-        let entry = frameTable[index]
-        guard entry.offset >= 0 && entry.offset + entry.length <= mappedData.count else { return nil }
-
-        let image: NSImage?
-        if isEncapsulated {
-            // Zero-copy slice into memory-mapped data — JPEG/compressed
-            let frameData = mappedData[entry.offset..<(entry.offset + entry.length)]
-            image = NSImage(data: frameData)
-        } else {
-            let frameData = mappedData[entry.offset..<(entry.offset + entry.length)]
-            image = renderRawFrame(frameData)
-        }
-
-        guard let image = image else { return nil }
+        guard let cg = frameCGImage(at: index) else { return nil }
+        let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
         frameCache.setObject(image, forKey: key)
         return image
     }
 
+    /// Compressed bytes of a frame: a zero-copy slice for single-fragment
+    /// frames, concatenated fragments otherwise.
+    private func frameBytes(at index: Int) -> Data? {
+        let fragments = frameTable[index]
+        guard !fragments.isEmpty,
+              fragments.allSatisfy({ $0.offset >= 0 && $0.offset + $0.length <= mappedData.count }) else { return nil }
+        if fragments.count == 1 {
+            let f = fragments[0]
+            return mappedData[f.offset..<(f.offset + f.length)]
+        }
+        var joined = Data(capacity: fragments.reduce(0) { $0 + $1.length })
+        for f in fragments { joined.append(mappedData[f.offset..<(f.offset + f.length)]) }
+        return joined
+    }
+
     /// Decode a frame directly to CGImage (faster than NSImage for display pipeline)
     func frameCGImage(at index: Int) -> CGImage? {
-        guard index >= 0 && index < min(numberOfFrames, frameTable.count) else { return nil }
+        guard index >= 0 && index < effectiveFrameCount else { return nil }
 
-        let entry = frameTable[index]
-        guard entry.offset >= 0 && entry.offset + entry.length <= mappedData.count else { return nil }
-
-        if !isEncapsulated {
-            let frameData = mappedData[entry.offset..<(entry.offset + entry.length)]
-            return renderRawFrame(frameData)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        switch decodePath {
+        case .raw:
+            guard let frameData = frameBytes(at: index) else { return nil }
+            return renderRawFrame(frameData)
+        case .dcmtk:
+            return dcmtkFrame(at: index)
+        case .imageIO:
+            if let frameData = frameBytes(at: index),
+               let source = CGImageSourceCreateWithData(frameData as CFData, nil),
+               let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) {
+                return image
+            }
+            // ImageIO couldn't decode this codestream; let DCMTK try
+            return dcmtkFrame(at: index)
         }
+    }
 
-        let frameData = mappedData[entry.offset..<(entry.offset + entry.length)] as NSData
-        guard let source = CGImageSourceCreateWithData(frameData, nil) else { return nil }
-
-        let options: [CFString: Any] = [
-            kCGImageSourceShouldCacheImmediately: true  // Force eager decode
-        ]
-        return CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary)
+    private func dcmtkFrame(at index: Int) -> CGImage? {
+        dcmtkLock.lock()
+        if dcmtkDecoder == nil { dcmtkDecoder = DCMTKFrameDecoder(path: url.path) }
+        let decoder = dcmtkDecoder
+        dcmtkLock.unlock()
+        guard let decoder = decoder else { return nil }
+        let w = window ?? (0, 0)
+        return decoder.copyFrameImage(index, ww: w.width, wc: w.center)
     }
 
     /// Prefetch frames ahead of the current position for smooth playback.
@@ -372,266 +473,187 @@ class MultiFrameDecoder {
         }
     }
 
-    /// Render raw (uncompressed) pixel bytes to an NSImage using auto window/level.
-    private func renderRawFrame(_ frameData: Data) -> NSImage? {
-        guard frameWidth > 0, frameHeight > 0 else { return nil }
-
+    /// Render one uncompressed frame to an 8-bit CGImage: decode with the
+    /// Modality LUT (BitsAllocated, byte order, planar config handled by
+    /// PlainPixelDecoder), then apply the decoder-wide window and MONOCHROME1.
+    private func renderRawFrame(_ frameData: Data) -> CGImage? {
+        guard frameWidth > 0, frameHeight > 0,
+              let decoded = PlainPixelDecoder.decode(pixelData: frameData, attributes: pixelAttributes, bigEndian: isBigEndian)
+        else { return nil }
         let totalPixels = frameWidth * frameHeight
 
-        // RGB path
-        if samplesPerPixel == 3 {
-            let totalBytes = totalPixels * 3
-            guard frameData.count >= totalBytes else { return nil }
-            let colorSpace = CGColorSpaceCreateDeviceRGB()
-            guard let provider = CGDataProvider(data: frameData as CFData) else { return nil }
-            guard let cgImg = CGImage(
+        if decoded.samples == 3 {
+            guard let provider = CGDataProvider(data: decoded.data as CFData) else { return nil }
+            return CGImage(
                 width: frameWidth, height: frameHeight,
                 bitsPerComponent: 8, bitsPerPixel: 24,
                 bytesPerRow: frameWidth * 3,
-                space: colorSpace,
+                space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
                 provider: provider, decode: nil,
                 shouldInterpolate: true, intent: .defaultIntent
-            ) else { return nil }
-            return NSImage(cgImage: cgImg, size: NSSize(width: frameWidth, height: frameHeight))
+            )
         }
 
-        // Grayscale path — compute auto window/level from this frame's pixels
-        let (minVal, maxVal) = computeRawMinMax(data: frameData)
-        let ww = max(maxVal - minVal, 1.0)
-        let wc = minVal + ww / 2.0
+        let (ww, wc): (Double, Double)
+        if let w = window {
+            (ww, wc) = (max(w.width, 1), w.center)
+        } else {
+            let r = PixelValues.minMax(data: decoded.data, bits: decoded.bitDepth, isSigned: decoded.isSigned)
+            (ww, wc) = (max(r.max - r.min, 1), (r.max + r.min) / 2)
+        }
         let windowBottom = wc - ww / 2.0
+        let invert = pixelAttributes.isMonochrome1
 
-        let colorSpace = CGColorSpaceCreateDeviceGray()
-        guard let context = CGContext(
-            data: nil,
+        var gray = Data(count: totalPixels)
+        decoded.data.withUnsafeBytes { raw in
+            gray.withUnsafeMutableBytes { dst in
+                let out = dst.bindMemory(to: UInt8.self)
+                for i in 0..<totalPixels {
+                    let v = PixelValues.value(in: raw, index: i, bits: decoded.bitDepth, isSigned: decoded.isSigned) ?? 0
+                    var norm = (v - windowBottom) / ww * 255.0
+                    if invert { norm = 255.0 - norm }
+                    out[i] = UInt8(max(0, min(255, norm)))
+                }
+            }
+        }
+        guard let provider = CGDataProvider(data: gray as CFData) else { return nil }
+        return CGImage(
             width: frameWidth, height: frameHeight,
-            bitsPerComponent: 8, bytesPerRow: frameWidth,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else { return nil }
-        guard let destData = context.data else { return nil }
-        let destBuffer = destData.bindMemory(to: UInt8.self, capacity: totalPixels)
-
-        if bitsAllocated > 16 {
-            // 32-bit pixels
-            frameData.withUnsafeBytes { rawBuffer in
-                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt32.self) else { return }
-                guard frameData.count >= totalPixels * 4 else { return }
-                for i in 0..<totalPixels {
-                    let val: Double = isSigned ? Double(Int32(bitPattern: ptr[i])) : Double(ptr[i])
-                    let norm = (val - windowBottom) / ww * 255.0
-                    destBuffer[i] = UInt8(max(0, min(255, norm)))
-                }
-            }
-        } else if bitsAllocated > 8 {
-            // 16-bit pixels
-            frameData.withUnsafeBytes { rawBuffer in
-                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt16.self) else { return }
-                guard frameData.count >= totalPixels * 2 else { return }
-                for i in 0..<totalPixels {
-                    let val: Double = isSigned ? Double(Int16(bitPattern: ptr[i])) : Double(ptr[i])
-                    let norm = (val - windowBottom) / ww * 255.0
-                    destBuffer[i] = UInt8(max(0, min(255, norm)))
-                }
-            }
-        } else {
-            // 8-bit pixels
-            frameData.withUnsafeBytes { rawBuffer in
-                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-                for i in 0..<totalPixels {
-                    let val = Double(ptr[i])
-                    let norm = (val - windowBottom) / ww * 255.0
-                    destBuffer[i] = UInt8(max(0, min(255, norm)))
-                }
-            }
-        }
-
-        guard let cgImage = context.makeImage() else { return nil }
-        return NSImage(cgImage: cgImage, size: NSSize(width: frameWidth, height: frameHeight))
-    }
-
-    /// Compute pixel min/max for auto window/level on a raw frame.
-    private func computeRawMinMax(data: Data) -> (Double, Double) {
-        var minVal = Double.greatestFiniteMagnitude
-        var maxVal = -Double.greatestFiniteMagnitude
-        let totalPixels = frameWidth * frameHeight
-
-        if bitsAllocated > 16 {
-            data.withUnsafeBytes { rawBuffer in
-                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt32.self) else { return }
-                let count = min(data.count / 4, totalPixels)
-                for i in 0..<count {
-                    let v: Double = isSigned ? Double(Int32(bitPattern: ptr[i])) : Double(ptr[i])
-                    if v < minVal { minVal = v }
-                    if v > maxVal { maxVal = v }
-                }
-            }
-        } else if bitsAllocated > 8 {
-            data.withUnsafeBytes { rawBuffer in
-                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt16.self) else { return }
-                let count = min(data.count / 2, totalPixels)
-                for i in 0..<count {
-                    let v: Double = isSigned ? Double(Int16(bitPattern: ptr[i])) : Double(ptr[i])
-                    if v < minVal { minVal = v }
-                    if v > maxVal { maxVal = v }
-                }
-            }
-        } else {
-            data.withUnsafeBytes { rawBuffer in
-                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-                let count = min(data.count, totalPixels)
-                for i in 0..<count {
-                    let v = Double(ptr[i])
-                    if v < minVal { minVal = v }
-                    if v > maxVal { maxVal = v }
-                }
-            }
-        }
-
-        if maxVal == minVal { maxVal = minVal + 1 }
-        return (minVal, maxVal)
+            bitsPerComponent: 8, bitsPerPixel: 8,
+            bytesPerRow: frameWidth,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+            provider: provider, decode: nil,
+            shouldInterpolate: true, intent: .defaultIntent
+        )
     }
 
     // MARK: - Encapsulated Pixel Data Parser
 
-    /// Scan the memory-mapped DICOM bytes for the PixelData element
-    /// (7FE0,0010) and walk its encapsulated item sequence to build a
-    /// frame offset table.
+    /// Walk the encapsulated item sequence of PixelData (7FE0,0010) and
+    /// group fragments into frames.
     ///
-    /// Encapsulated pixel data layout:
-    ///   PixelData tag (7FE0,0010) + VR + length (FFFFFFFF)
-    ///   Item 0 : Basic Offset Table   (FFFE,E000) + length + offsets
-    ///   Item 1 : Frame 0 JPEG bytes   (FFFE,E000) + length + data
-    ///   Item 2 : Frame 1 JPEG bytes   ...
-    ///   Sequence Delimiter            (FFFE,E0DD) + 00000000
-    private static func findPixelDataAndParseFrames(
+    /// Layout:
+    ///   PixelData tag + VR + length (FFFFFFFF)
+    ///   Item 0 : Basic Offset Table (FFFE,E000) + length + UInt32 offsets
+    ///   Item 1…: fragments (a frame may span several)
+    ///   Sequence Delimiter (FFFE,E0DD)
+    ///
+    /// Item headers are read with FileHandle seeks so only ~8 bytes per item
+    /// are paged in, instead of touching every page of a multi-GB mapping.
+    static func encapsulatedFrameTable(
         data: Data,
-        frameTable: inout [(offset: Int, length: Int)],
-        pixelDataTagOffset: Int = -1,
-        fileURL: URL? = nil
-    ) -> Bool {
-        var tagOffset = pixelDataTagOffset
+        pixelDataTagOffset: Int,
+        numberOfFrames: Int,
+        transferSyntax: String,
+        fileURL: URL
+    ) -> [[(offset: Int, length: Int)]]? {
+        guard pixelDataTagOffset >= 0, pixelDataTagOffset + 8 <= data.count else { return nil }
+        guard let fh = try? FileHandle(forReadingFrom: fileURL) else { return nil }
+        defer { try? fh.close() }
 
-        if tagOffset < 0 {
-            // Fallback: scan for PixelData tag (only used if offset not provided)
-            // PixelData tag bytes in little-endian: group 7FE0 = E0 7F, element 0010 = 10 00
-            let p0: UInt8 = 0xE0, p1: UInt8 = 0x7F, p2: UInt8 = 0x10, p3: UInt8 = 0x00
-
-            data.withUnsafeBytes { rawBuffer in
-                guard let base = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-                let count = data.count
-                // Start after the 132-byte DICOM preamble+magic
-                for i in 132..<(count - 12) {
-                    if base[i] == p0 && base[i+1] == p1 && base[i+2] == p2 && base[i+3] == p3 {
-                        tagOffset = i
-                        break
-                    }
-                }
-            }
+        func read(_ offset: Int, _ count: Int) -> Data? {
+            guard offset >= 0, offset + count <= data.count else { return nil }
+            fh.seek(toFileOffset: UInt64(offset))
+            let d = fh.readData(ofLength: count)
+            return d.count == count ? d : nil
+        }
+        func u32(_ d: Data, _ at: Int) -> Int {
+            Int(d[d.startIndex + at]) | Int(d[d.startIndex + at + 1]) << 8
+                | Int(d[d.startIndex + at + 2]) << 16 | Int(d[d.startIndex + at + 3]) << 24
         }
 
-        guard tagOffset >= 0 else { return false }
-
-        // Advance past the tag (4 bytes), then detect VR to find item start.
-        var itemsStart = tagOffset + 4
-
-        data.withUnsafeBytes { rawBuffer in
-            guard let base = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            guard itemsStart + 2 <= data.count else { return }
-            let vr0 = base[itemsStart]
-            let vr1 = base[itemsStart + 1]
-            // ASCII 'O'=0x4F, 'B'=0x42, 'W'=0x57
-            // Explicit VR OB or OW: VR(2) + reserved(2) + 32-bit length(4) = 8 bytes header
-            if vr0 == 0x4F && (vr1 == 0x42 || vr1 == 0x57) {
-                itemsStart += 8
-            } else {
-                // Implicit VR: 32-bit length only (4 bytes)
-                itemsStart += 4
-            }
-        }
-
-        // Walk the item sequence.
-        // When a fileURL is available, use FileHandle seeks + small reads so that
-        // only the 8-byte item headers are paged in (~26 KB for 3305 frames),
-        // instead of sequentially touching every page in the memory-mapped file
-        // which triggers macOS prefetch and pages in the entire file (~12 GB RSS).
-        var offset = itemsStart
-        var isFirstItem = true
-
-        if let fileURL = fileURL {
-            guard let fh = try? FileHandle(forReadingFrom: fileURL) else { return false }
-            defer { fh.closeFile() }
-
-            while true {
-                fh.seek(toFileOffset: UInt64(offset))
-                let headerBytes = fh.readData(ofLength: 8)
-                guard headerBytes.count == 8 else { break }
-
-                let t0 = headerBytes[0], t1 = headerBytes[1]
-                let t2 = headerBytes[2], t3 = headerBytes[3]
-
-                // Sequence delimiter tag (FFFE,E0DD) in LE: FE FF DD E0
-                if t0 == 0xFE && t1 == 0xFF && t2 == 0xDD && t3 == 0xE0 { break }
-
-                // All items must carry item tag (FFFE,E000) in LE: FE FF 00 E0
-                guard t0 == 0xFE && t1 == 0xFF && t2 == 0x00 && t3 == 0xE0 else { break }
-
-                // 4-byte little-endian item length
-                let len = Int(headerBytes[4])
-                          | (Int(headerBytes[5]) << 8)
-                          | (Int(headerBytes[6]) << 16)
-                          | (Int(headerBytes[7]) << 24)
-
-                let dataStart = offset + 8
-
-                if isFirstItem {
-                    // Item 0 is the Basic Offset Table; skip it
-                    isFirstItem = false
-                } else if len > 0 && dataStart + len <= data.count {
-                    frameTable.append((offset: dataStart, length: len))
-                }
-
-                // Advance; guard against negative/zero len causing infinite loop
-                offset = dataStart + max(0, len)
-            }
+        // Tag (4) then explicit "OB"/"OW" + reserved + length (8), or implicit length (4)
+        var offset = pixelDataTagOffset + 4
+        if let vr = read(offset, 2), vr[vr.startIndex] == 0x4F,
+           vr[vr.startIndex + 1] == 0x42 || vr[vr.startIndex + 1] == 0x57 {
+            offset += 8
         } else {
-            // Fallback: walk items via the memory-mapped buffer (no file URL available)
-            data.withUnsafeBytes { rawBuffer in
-                guard let base = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-                let count = data.count
-
-                while offset + 8 <= count {
-                    let t0 = base[offset], t1 = base[offset+1]
-                    let t2 = base[offset+2], t3 = base[offset+3]
-
-                    // Sequence delimiter tag (FFFE,E0DD) in LE: FE FF DD E0
-                    if t0 == 0xFE && t1 == 0xFF && t2 == 0xDD && t3 == 0xE0 { break }
-
-                    // All items must carry item tag (FFFE,E000) in LE: FE FF 00 E0
-                    guard t0 == 0xFE && t1 == 0xFF && t2 == 0x00 && t3 == 0xE0 else { break }
-
-                    // 4-byte little-endian item length
-                    let len = Int(base[offset+4])
-                              | (Int(base[offset+5]) << 8)
-                              | (Int(base[offset+6]) << 16)
-                              | (Int(base[offset+7]) << 24)
-
-                    let dataStart = offset + 8
-
-                    if isFirstItem {
-                        // Item 0 is the Basic Offset Table; skip it
-                        isFirstItem = false
-                    } else if len > 0 && dataStart + len <= count {
-                        frameTable.append((offset: dataStart, length: len))
-                    }
-
-                    // Advance; guard against negative/zero len causing infinite loop
-                    offset = dataStart + max(0, len)
-                }
-            }
+            offset += 4
         }
 
-        return !frameTable.isEmpty
+        var basicOffsetTable: [UInt32] = []
+        var fragments: [EncapsulatedFragment] = []
+        var isFirstItem = true
+        while let header = read(offset, 8) {
+            let b = [UInt8](header)
+            if b[0] == 0xFE && b[1] == 0xFF && b[2] == 0xDD && b[3] == 0xE0 { break }        // sequence end
+            guard b[0] == 0xFE && b[1] == 0xFF && b[2] == 0x00 && b[3] == 0xE0 else { break } // item
+            let len = u32(header, 4)
+            guard len != 0xFFFF_FFFF else { break }
+            let dataStart = offset + 8
+            if isFirstItem {
+                isFirstItem = false
+                if len >= 4, let bot = read(dataStart, len) {
+                    basicOffsetTable = stride(from: 0, to: len - 3, by: 4).map { UInt32(u32(bot, $0)) }
+                }
+            } else if len > 0 && dataStart + len <= data.count {
+                fragments.append(EncapsulatedFragment(itemOffset: offset, dataOffset: dataStart, length: len))
+            }
+            offset = dataStart + len
+        }
+        guard !fragments.isEmpty else { return nil }
+
+        let isRLE = transferSyntax == "1.2.840.10008.1.2.5"
+        let frames = groupFragments(fragments, basicOffsetTable: basicOffsetTable, numberOfFrames: numberOfFrames) { fragment in
+            if isRLE { return true }  // RLE: exactly one fragment per frame
+            guard let head = read(fragment.dataOffset, min(12, fragment.length)) else { return false }
+            return startsCodestream([UInt8](head))
+        }
+        let table = frames.map { $0.map { (offset: $0.dataOffset, length: $0.length) } }
+        return table.isEmpty ? nil : table
+    }
+
+    /// True when bytes begin a new image codestream: JPEG / JPEG-LS SOI
+    /// (FFD8 FF), J2K SOC+SIZ (FF4F FF51) or a JP2 signature box.
+    static func startsCodestream(_ b: [UInt8]) -> Bool {
+        if b.count >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF { return true }
+        if b.count >= 4 && b[0] == 0xFF && b[1] == 0x4F && b[2] == 0xFF && b[3] == 0x51 { return true }
+        if b.count >= 8 && b[4] == 0x6A && b[5] == 0x50 && b[6] == 0x20 && b[7] == 0x20 { return true }
+        return false
+    }
+
+    /// Group fragments into frames:
+    /// 1. Basic Offset Table present: frame i holds the fragments whose item
+    ///    offset (relative to the first fragment item) is in [BOT[i], BOT[i+1]).
+    /// 2. One fragment per frame.
+    /// 3. A single frame: all fragments.
+    /// 4. Otherwise a new frame starts at each fragment that begins a codestream.
+    static func groupFragments(
+        _ fragments: [EncapsulatedFragment],
+        basicOffsetTable: [UInt32],
+        numberOfFrames: Int,
+        startsFrame: (EncapsulatedFragment) -> Bool
+    ) -> [[EncapsulatedFragment]] {
+        guard let first = fragments.first else { return [] }
+
+        if !basicOffsetTable.isEmpty {
+            let starts = basicOffsetTable.map { first.itemOffset + Int($0) }
+            if zip(starts, starts.dropFirst()).allSatisfy({ $0 < $1 }) {
+                var frames: [[EncapsulatedFragment]] = Array(repeating: [], count: starts.count)
+                for f in fragments {
+                    // Last BOT entry whose start is <= this fragment's item offset
+                    guard let idx = starts.lastIndex(where: { $0 <= f.itemOffset }) else { continue }
+                    frames[idx].append(f)
+                }
+                if frames.allSatisfy({ !$0.isEmpty }) { return frames }
+            }
+        }
+        if fragments.count == numberOfFrames {
+            return fragments.map { [$0] }
+        }
+        if numberOfFrames == 1 {
+            return [fragments]
+        }
+        var frames: [[EncapsulatedFragment]] = []
+        for f in fragments {
+            if frames.isEmpty || startsFrame(f) {
+                frames.append([f])
+            } else {
+                frames[frames.count - 1].append(f)
+            }
+        }
+        return frames
     }
 }
