@@ -165,8 +165,9 @@ struct Annotation: Identifiable {
     let id = UUID()
     let type: AnnotationType
     var isAI: Bool = false
-    /// The slice this annotation was computed on. nil means it is not bound
-    /// to a slice and shows wherever the panel is (manual measurements).
+    /// The slice this annotation was drawn or computed on (manual
+    /// measurements and AI results alike). nil means it is not bound to a
+    /// slice and shows wherever the panel is.
     var slice: AnnotationSlice? = nil
 
     func isVisible(on current: AnnotationSlice) -> Bool {
@@ -193,6 +194,12 @@ class PanelState: ObservableObject, Identifiable {
     // MIP slab projection
     @Published var mipSlabPosition: Int = 0    // center slice index (scrollable)
     @Published var mipSlabThickness: Int = 10  // number of slices in the slab
+    /// Projection used for the MIP panel (MIP / MinIP / Average)
+    @Published var projectionMode: ProjectionMode = .mip
+
+    /// Non-fatal geometry warnings of the volume behind an MPR/MIP panel
+    /// (multi-phase, spacing, gantry tilt, blank slices). Empty in 2D mode.
+    @Published var volumeWarnings: [String] = []
 
     // Rendered Image
     @Published var image: NSImage? = nil
@@ -328,6 +335,8 @@ class PanelState: ObservableObject, Identifiable {
         mprSliceIndex = 0
         mipSlabPosition = 0
         mipSlabThickness = 10
+        projectionMode = .mip
+        volumeWarnings = []
         image = nil
         displayImageWidth = 0
         displayImageHeight = 0
@@ -395,7 +404,7 @@ class PanelState: ObservableObject, Identifiable {
         selectedAnnotationID = nil
     }
 
-    /// The slice currently on screen, for binding and filtering AI annotations.
+    /// The slice currently on screen, for binding and filtering annotations.
     var currentSlice: AnnotationSlice {
         switch panelMode {
         case .slice2D:
@@ -426,6 +435,12 @@ class PanelState: ObservableObject, Identifiable {
         guard let description = aiDescription,
               aiDescriptionSlice == nil || aiDescriptionSlice == currentSlice else { return nil }
         return description
+    }
+
+    /// Add a manual measurement (ruler, angle, ROI stats) bound to the slice
+    /// on screen, so it only shows on the slice it was drawn on.
+    func addMeasurement(_ type: AnnotationType) {
+        annotations.append(Annotation(type: type, slice: currentSlice))
     }
 
     /// Remove only AI-generated annotations

@@ -31,8 +31,9 @@ final class VolumeData {
     let origin: SIMD3<Double>          // ImagePositionPatient of first slice
     let rowDirection: SIMD3<Double>    // Normalized row direction cosine
     let colDirection: SIMD3<Double>    // Normalized column direction cosine
-    /// Slice stacking direction, normalized. Normally cross(row, col); with
-    /// gantry tilt it is the actual first→last position direction.
+    /// Slice stacking direction, normalized. Normally cross(row, col). The
+    /// builder resamples gantry-tilted series onto an orthogonal grid, so a
+    /// sheared direction only remains when that correction was skipped.
     let sliceDirection: SIMD3<Double>
 
     /// Linear encoding of the stored Int16 voxels: value = stored × slope + intercept.
@@ -41,8 +42,9 @@ final class VolumeData {
     let rescaleSlope: Double
     let rescaleIntercept: Double
 
-    /// Non-fatal geometry issues found while building (multi-phase, spacing, tilt)
-    let warnings: [String]
+    /// Non-fatal geometry issues found while building (multi-phase, spacing,
+    /// tilt, blank slices), shown on MPR/MIP panels
+    var warnings: [String]
 
     /// 4×4 affine: voxel (i,j,k) → world (x,y,z) in mm
     let voxelToWorldMatrix: simd_double4x4

@@ -42,7 +42,7 @@ struct VolumeToolbar: View {
                         }
                     }
                 } label: {
-                    Text("MIP")
+                    Text(panel.projectionMode.rawValue)
                         .font(.system(.caption2, design: .monospaced))
                         .padding(.horizontal, 4)
                         .padding(.vertical, 2)

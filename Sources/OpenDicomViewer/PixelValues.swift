@@ -16,17 +16,27 @@
 //
 // Convention: decoded monochrome values are in modality units (RescaleSlope
 // and RescaleIntercept applied, e.g. Hounsfield Units), matching DCMTK's
-// getInterData(). Color is 8-bit interleaved RGB.
+// getInterData(). Color is 8-bit interleaved RGB. Integer-valued data uses
+// 8/16/32-bit integers; data whose rescale produces fractional values (PET
+// SUV-scaled, Philips MR) is Float32, marked by `bitDepth == floatBits`.
 // Licensed under the MIT License. See LICENSE for details.
 
 import Foundation
 import CoreGraphics
 
 enum PixelValues {
+    /// Bit depth marking a buffer of Float32 modality values (the FITS
+    /// BITPIX convention: negative means IEEE float). `isSigned` is ignored.
+    static let floatBits = -32
+
+    @inline(__always)
+    static func isFloat(bits: Int) -> Bool { bits == floatBits }
+
     /// Bytes per stored sample for a decoded buffer of the given bit depth.
     @inline(__always)
     static func bytesPerSample(bits: Int) -> Int {
-        bits > 16 ? 4 : (bits > 8 ? 2 : 1)
+        if bits == floatBits { return 4 }
+        return bits > 16 ? 4 : (bits > 8 ? 2 : 1)
     }
 
     /// Value of pixel `index` (row-major). For RGB, returns the mean of the
@@ -45,17 +55,21 @@ enum PixelValues {
         let start = index * spp * bps
         guard index >= 0, start + spp * bps <= raw.count else { return nil }
         if spp == 1 {
-            return sample(raw, byteOffset: start, bps: bps, isSigned: isSigned)
+            return sample(raw, byteOffset: start, bps: bps, isSigned: isSigned, isFloat: bits == floatBits)
         }
         var sum = 0.0
         for c in 0..<min(spp, 3) {
-            sum += sample(raw, byteOffset: start + c * bps, bps: bps, isSigned: isSigned)
+            sum += sample(raw, byteOffset: start + c * bps, bps: bps, isSigned: isSigned, isFloat: bits == floatBits)
         }
         return sum / Double(min(spp, 3))
     }
 
     @inline(__always)
-    private static func sample(_ raw: UnsafeRawBufferPointer, byteOffset: Int, bps: Int, isSigned: Bool) -> Double {
+    private static func sample(_ raw: UnsafeRawBufferPointer, byteOffset: Int, bps: Int, isSigned: Bool, isFloat: Bool) -> Double {
+        if isFloat {
+            let v = Double(raw.loadUnaligned(fromByteOffset: byteOffset, as: Float32.self))
+            return v.isFinite ? v : 0
+        }
         switch bps {
         case 4:
             let v = raw.loadUnaligned(fromByteOffset: byteOffset, as: UInt32.self)
@@ -115,6 +129,43 @@ enum PixelValues {
             }
         }
         return out
+    }
+
+    /// Convert Int16 stored values to Float32 modality values (for volume
+    /// encodings with a fractional slope or intercept, e.g. PET).
+    static func int16ToModalityFloat(_ data: Data, slope: Double, intercept: Double) -> Data {
+        let count = data.count / 2
+        var out = Data(count: count * 4)
+        data.withUnsafeBytes { src in
+            out.withUnsafeMutableBytes { dst in
+                let s = src.bindMemory(to: Int16.self)
+                let d = dst.bindMemory(to: Float32.self)
+                for i in 0..<count { d[i] = Float32(Double(s[i]) * slope + intercept) }
+            }
+        }
+        return out
+    }
+
+    /// Text for a modality value in readouts: integers as integers, small
+    /// fractional values (PET SUV/Bq-scaled, MR) with enough digits to
+    /// distinguish them.
+    static func format(_ v: Double) -> String {
+        guard v.isFinite else { return "–" }
+        if isIntegral(v) { return String(format: "%.0f", v) }
+        let a = abs(v)
+        if a >= 1000 { return String(format: "%.0f", v) }
+        if a >= 10 { return String(format: "%.1f", v) }
+        if a >= 0.01 { return String(format: "%.3f", v) }
+        return String(format: "%.3g", v)
+    }
+
+    /// True when `x` is an integer (so integer storage loses nothing).
+    @inline(__always)
+    static func isIntegral(_ x: Double) -> Bool { x == x.rounded() }
+
+    /// Values = stored × slope + intercept stay integers for integer stored values.
+    static func isIntegralRescale(slope: Double, intercept: Double) -> Bool {
+        isIntegral(slope) && isIntegral(intercept)
     }
 }
 
@@ -205,7 +256,7 @@ struct DecodedPixelBuffer {
     let data: Data
     let width: Int
     let height: Int
-    /// 8, 16 or 32 (bytes per sample = 1, 2, 4)
+    /// 8, 16 or 32 (bytes per sample = 1, 2, 4), or PixelValues.floatBits
     let bitDepth: Int
     let samples: Int
     let isSigned: Bool
@@ -286,10 +337,19 @@ enum PlainPixelDecoder {
         return pack(values, lo: lo, hi: hi, width: width, height: height)
     }
 
-    /// Pack values into the narrowest of UInt8 / Int16 / UInt16 / Int32
-    /// (same choice as the DCMTK wrapper's JPEG 2000 path).
+    /// Pack values into the narrowest of UInt8 / Int16 / UInt16 / Int32, or
+    /// Float32 when any value is fractional (same choice as the DCMTK
+    /// wrapper's packModalityValues).
     static func pack(_ values: [Double], lo: Double, hi: Double, width: Int, height: Int) -> DecodedPixelBuffer {
         let n = values.count
+        if values.contains(where: { !PixelValues.isIntegral($0) }) {
+            var d = Data(count: n * 4)
+            d.withUnsafeMutableBytes { p in
+                let o = p.bindMemory(to: Float32.self)
+                for i in 0..<n { o[i] = Float32(values[i]) }
+            }
+            return DecodedPixelBuffer(data: d, width: width, height: height, bitDepth: PixelValues.floatBits, samples: 1, isSigned: true)
+        }
         if lo >= 0 && hi <= 255 {
             let d = Data(values.map { UInt8(clamping: Int($0.rounded())) })
             return DecodedPixelBuffer(data: d, width: width, height: height, bitDepth: 8, samples: 1, isSigned: false)
