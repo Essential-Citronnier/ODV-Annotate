@@ -188,6 +188,31 @@ final class AIHardeningTests: XCTestCase {
         XCTAssertFalse(AIServerManager.setupMarkerIsValid(markerContents: other, requirementsHash: hash))
     }
 
+    /// launch.sh writes the marker with `shasum -a 256`; the app must read
+    /// what it writes as current.
+    func testLaunchScriptMarkerMatchesTheAppHash() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let requirements = root.appendingPathComponent("mlx-server/requirements.txt")
+        let script = try String(contentsOf: root.appendingPathComponent("mlx-server/launch.sh"),
+                                encoding: .utf8)
+        XCTAssertTrue(script.contains("$VENV_DIR/.odv-setup-complete"))
+        XCTAssertTrue(script.contains("shasum -a 256"))
+
+        let shasum = Process()
+        shasum.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+        shasum.arguments = ["-a", "256", requirements.path]
+        let pipe = Pipe()
+        shasum.standardOutput = pipe
+        try shasum.run()
+        shasum.waitUntilExit()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let written = String(output.split(separator: " ").first ?? "") + "\n"
+        let expected = AIServerManager.requirementsHash(of: try Data(contentsOf: requirements))
+        XCTAssertTrue(AIServerManager.setupMarkerIsValid(markerContents: written,
+                                                          requirementsHash: expected))
+    }
+
     func testReadinessBackoffGrowsAndCaps() {
         // Capped at ~5 s so download progress and readiness show promptly.
         XCTAssertEqual(AIServerManager.readinessBackoff(attempt: 0), 2)

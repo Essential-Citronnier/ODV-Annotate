@@ -30,6 +30,11 @@ First run will:
    records the pinned revision), the server loads that and downloads nothing.
 4. Start the server on `http://127.0.0.1:8741`
 
+A successful install writes `.venv/.odv-setup-complete` holding the SHA-256
+of `requirements.txt`, the same marker the app writes, so a development build
+of the viewer uses this venv as-is instead of running its own setup. When
+`requirements.txt` changes, the next `./launch.sh` reinstalls.
+
 ## Usage
 
 ```bash

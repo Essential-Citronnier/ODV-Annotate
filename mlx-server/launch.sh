@@ -15,6 +15,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 PID_FILE="$SCRIPT_DIR/.server.pid"
+# The app's setup marker (AIServerManager.setupMarkerURL): SHA-256 of
+# requirements.txt, written only after a successful install and import probe.
+# Writing the same marker here lets a development build of the app use this
+# venv as-is instead of rerunning its own setup once.
+SETUP_MARKER="$VENV_DIR/.odv-setup-complete"
+REQUIREMENTS="$SCRIPT_DIR/requirements.txt"
 PORT=8741
 
 # The server rejects requests without this per-launch token. Export the same
@@ -94,16 +100,37 @@ if [ "${1:-}" = "--setup" ]; then
     FORCE_SETUP=true
 fi
 
-if [ ! -d "$VENV_DIR" ] || [ "$FORCE_SETUP" = true ]; then
-    info "Creating virtual environment..."
-    python3 -m venv "$VENV_DIR"
+requirements_hash() {
+    shasum -a 256 "$REQUIREMENTS" | cut -d' ' -f1
+}
+
+# Installed, and for the current requirements? The same test the app applies.
+setup_current() {
+    [ -x "$VENV_DIR/bin/python3" ] || return 1
+    [ -f "$SETUP_MARKER" ] || return 1
+    [ "$(tr -d '[:space:]' < "$SETUP_MARKER")" = "$(requirements_hash)" ]
+}
+
+if [ "$FORCE_SETUP" = true ] || ! setup_current; then
+    if [ ! -d "$VENV_DIR" ] || [ "$FORCE_SETUP" = true ]; then
+        info "Creating virtual environment..."
+        python3 -m venv --clear "$VENV_DIR"
+    else
+        info "Virtual environment out of date; reinstalling dependencies..."
+    fi
+    # An interrupted install must not look complete.
+    rm -f "$SETUP_MARKER"
 
     info "Installing dependencies (this may take a few minutes)..."
     "$VENV_DIR/bin/pip" install --upgrade pip -q
-    "$VENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements.txt"
+    "$VENV_DIR/bin/pip" install -r "$REQUIREMENTS"
+
+    info "Verifying installation..."
+    "$VENV_DIR/bin/python3" -c "import mlx_vlm, fastapi, uvicorn, PIL"
+    requirements_hash > "$SETUP_MARKER"
     info "Dependencies installed."
 else
-    info "Virtual environment found."
+    info "Virtual environment found and current."
 fi
 
 # ---------------------------------------------------------------------------
@@ -125,7 +152,7 @@ fi
 stop_server 2>/dev/null || true
 
 info "Starting MLX server on port $PORT..."
-info "Model will be downloaded on first run (~4.5GB for 4-bit quantized Gemma 4 E4B)"
+info "Model will be downloaded on first run (~5.2 GB for 4-bit Gemma 4 E4B), unless ODV_MODEL_DIR names an installed copy"
 echo ""
 
 "$VENV_DIR/bin/python" "$SCRIPT_DIR/server.py" &
