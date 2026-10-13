@@ -30,13 +30,21 @@ struct MemoryStatus: Equatable, Sendable {
 /// machine running them.
 enum MemoryProbe {
 
+    /// Page counters the availability estimate is computed from. A plain
+    /// value so the arithmetic is testable without a live kernel.
+    struct VMCounters: Equatable, Sendable {
+        var inactive: UInt64 = 0
+        var wired: UInt64 = 0
+        var purgeable: UInt64 = 0
+        /// Anonymous (process-private) pages, active and inactive.
+        var internalPages: UInt64 = 0
+        /// File-backed pages, which the kernel can drop and re-read.
+        var externalPages: UInt64 = 0
+        /// Pages occupied by the compressor itself.
+        var compressor: UInt64 = 0
+    }
+
     /// Live reading from the Mach VM statistics.
-    ///
-    /// Available memory is derived as `physical - (internal - purgeable + wired
-    /// + compressed)`, which is the same decomposition Activity Monitor shows as
-    /// "Memory Used". Purgeable pages are subtracted back out because the kernel
-    /// will reclaim them under pressure rather than page us out, so counting
-    /// them as consumed would make the arbiter needlessly pessimistic.
     ///
     /// `host_statistics64` is the only interface that exposes the compressor
     /// page count, and the compressor is precisely where a mis-admitted model
@@ -62,13 +70,50 @@ enum MemoryProbe {
             return MemoryStatus(physicalGB: physicalGB, availableGB: physicalGB / 2)
         }
 
-        let pageSize = Double(vm_kernel_page_size)
-        let usedPages = Double(stats.internal_page_count)
-            - Double(stats.purgeable_count)
-            + Double(stats.wire_count)
-            + Double(stats.compressor_page_count)
+        let counters = VMCounters(
+            inactive: UInt64(stats.inactive_count),
+            wired: UInt64(stats.wire_count),
+            purgeable: UInt64(stats.purgeable_count),
+            internalPages: UInt64(stats.internal_page_count),
+            externalPages: UInt64(stats.external_page_count),
+            compressor: UInt64(stats.compressor_page_count))
+        return MemoryStatus(
+            physicalGB: physicalGB,
+            availableGB: availableGB(counters, pageSize: Double(vm_kernel_page_size),
+                                     physicalGB: physicalGB))
+    }
+
+    /// Memory a newcomer can have without pushing the active working set of
+    /// anything else into the compressor.
+    ///
+    /// Counted as committed: wired pages, the compressor's own pages, and
+    /// anonymous memory in active use. Counted as available: free pages,
+    /// file-backed cache (dropped and re-read on demand), purgeable pages (the
+    /// kernel discards them under pressure rather than paging anyone out), and
+    /// inactive anonymous pages.
+    ///
+    /// Inactive anonymous memory is what the earlier estimate missed. It is
+    /// memory a process allocated and has not touched recently -- a closed
+    /// tab's heap, a backgrounded app -- and macOS compresses or swaps it
+    /// before it touches anything active. Counting it as consumed made a Mac
+    /// that had been up a while look full and refused models that load
+    /// comfortably. The kernel does not split the inactive queue by kind, so
+    /// the anonymous share is bounded from below as `inactive - external`
+    /// (every inactive file page is also an external page): the estimate can
+    /// only err on the low side.
+    ///
+    /// Active anonymous memory is deliberately not treated as compressible,
+    /// even though the compressor would take it: squeezing another process's
+    /// working set to make room is the thrashing this arbiter exists to
+    /// prevent. The user can still overrule a headroom refusal per start
+    /// (`AdmissionDecision.refuseLiveHeadroom`).
+    static func availableGB(_ c: VMCounters, pageSize: Double, physicalGB: Double) -> Double {
+        let inactiveAnonymous = c.inactive > c.externalPages ? c.inactive - c.externalPages : 0
+        let anonymous = Double(c.internalPages)
+        let reclaimable = min(anonymous, Double(c.purgeable) + Double(inactiveAnonymous))
+        let usedPages = (anonymous - reclaimable) + Double(c.wired) + Double(c.compressor)
         let usedGB = max(0, usedPages * pageSize) / MemoryStatus.bytesPerGB
-        return MemoryStatus(physicalGB: physicalGB, availableGB: max(0, physicalGB - usedGB))
+        return min(physicalGB, max(0, physicalGB - usedGB))
     }
 
     /// A fixed reading, for tests and for previews.
@@ -109,12 +154,35 @@ enum AdmissionDecision: Equatable, Sendable {
     case admit
     /// There is room once these plugins stop, in the order given.
     case evictThenAdmit([String])
-    /// There is no arrangement of the resident set that fits.
+    /// There is no arrangement of the resident set that fits the declared
+    /// budget. Never overridable: the request is larger than the plugin
+    /// subsystem's share of physical memory, or work in flight holds that share.
     case refuse(requiredGB: Double, availableGB: Double)
+    /// The declared budget fits (after `evictions`), but the machine does not
+    /// have the memory free right now. The user may start anyway: the live
+    /// reading is an estimate, and the cost of being wrong is paging, not a
+    /// request the machine can never satisfy.
+    case refuseLiveHeadroom(requiredGB: Double, availableGB: Double, evictions: [String])
 
     var isAdmitted: Bool {
-        if case .refuse = self { return false }
-        return true
+        switch self {
+        case .admit, .evictThenAdmit: return true
+        case .refuse, .refuseLiveHeadroom: return false
+        }
+    }
+
+    /// Whether the user may overrule this refusal.
+    var isOverridable: Bool {
+        if case .refuseLiveHeadroom = self { return true }
+        return false
+    }
+
+    /// The decision to act on when the user chose "Start anyway": admit after
+    /// the evictions the budget needs. Anything but a headroom refusal is
+    /// returned unchanged, so a budget refusal can never be overridden.
+    var overridden: AdmissionDecision {
+        guard case .refuseLiveHeadroom(_, _, let evictions) = self else { return self }
+        return evictions.isEmpty ? .admit : .evictThenAdmit(evictions)
     }
 
     /// Plugin identifiers the caller must stop before proceeding.
@@ -127,10 +195,14 @@ enum AdmissionDecision: Equatable, Sendable {
 /// Why a request was refused, in a form the store can show verbatim.
 extension AdmissionDecision {
     var refusalError: PluginError? {
-        if case .refuse(let required, let available) = self {
+        switch self {
+        case .refuse(let required, let available):
             return .insufficientMemory(required: required, available: available)
+        case .refuseLiveHeadroom(let required, let available, _):
+            return .insufficientLiveMemory(required: required, available: available)
+        case .admit, .evictThenAdmit:
+            return nil
         }
-        return nil
     }
 }
 
@@ -258,9 +330,16 @@ struct ResourceArbiter: Sendable {
                 .sorted { ($0.lastUsed, $0.pluginID) < ($1.lastUsed, $1.pluginID) }
             guard let victim = candidates.first else {
                 let stillResident = remaining.reduce(0) { $0 + $1.declaredRamGB }
-                return .refuse(
-                    requiredGB: request.declaredRamGB,
-                    availableGB: max(0, min(budget - stillResident, headroom + freed)))
+                let available = max(0, min(budget - stillResident, headroom + freed))
+                // Only the live reading stands in the way: the user may
+                // overrule it. Evictions are the ones the budget needs, not
+                // the ones made chasing headroom that was never going to come.
+                if fitsBudget {
+                    return .refuseLiveHeadroom(
+                        requiredGB: request.declaredRamGB, availableGB: available,
+                        evictions: budgetEvictions(request, residents: residents, budget: budget))
+                }
+                return .refuse(requiredGB: request.declaredRamGB, availableGB: available)
             }
 
             remaining.removeAll { $0.pluginID == victim.pluginID }
@@ -269,6 +348,21 @@ struct ResourceArbiter: Sendable {
         }
 
         return evicted.isEmpty ? .admit : .evictThenAdmit(evicted)
+    }
+
+    /// The least-recently-used evictions that make `request` fit `budget`,
+    /// ignoring live headroom. Only called once the budget is known to fit.
+    private func budgetEvictions(_ request: PluginResidency, residents: [PluginResidency],
+                                 budget: Double) -> [String] {
+        var demand = residents.reduce(0) { $0 + $1.declaredRamGB }
+        var evicted: [String] = []
+        let candidates = residents.filter(\.isEvictable)
+            .sorted { ($0.lastUsed, $0.pluginID) < ($1.lastUsed, $1.pluginID) }
+        for victim in candidates where demand + request.declaredRamGB > budget + Self.epsilon {
+            demand -= victim.declaredRamGB
+            evicted.append(victim.pluginID)
+        }
+        return evicted
     }
 
     /// Admission for a one-shot invocation.

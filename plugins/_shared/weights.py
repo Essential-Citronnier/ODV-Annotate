@@ -40,6 +40,8 @@ __all__ = [
     "parse_install_args",
     "run_install",
     "download_huggingface",
+    "hub_cache_snapshot",
+    "adopt_snapshot",
     "verify_manual_checkpoint",
 ]
 
@@ -358,6 +360,99 @@ def download_huggingface(repo: str, dest: Path, reporter: ProgressReporter,
         ) from None
 
     return [path for path in dest.rglob("*") if path.is_file()]
+
+
+def _hub_cache_dir() -> Path:
+    """The Hugging Face hub cache, honouring HF_HUB_CACHE / HF_HOME.
+
+    Resolved by hand rather than through huggingface_hub so that it works
+    before (and without) that package being importable.
+    """
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"]).expanduser()
+    home = os.environ.get("HF_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache", "huggingface")
+    return Path(home).expanduser() / "hub"
+
+
+def hub_cache_snapshot(repo: str, revision: str | None,
+                       cache_dir: Path | None = None) -> Path | None:
+    """A complete snapshot of `repo` at `revision` in the hub cache, or None.
+
+    This is where the built-in mlx-server downloads the same Gemma model.
+    Only an exact commit counts -- a branch name could have moved since -- and
+    only a snapshot whose weights are all there: the hub links each file into
+    the snapshot as it finishes, so an interrupted download can leave
+    config.json behind without the shards. When the model ships a shard index,
+    every shard it names must be present.
+    """
+    if not repo or not revision or len(revision) != 40:
+        return None
+    root = cache_dir if cache_dir is not None else _hub_cache_dir()
+    snapshot = root / ("models--" + repo.replace("/", "--")) / "snapshots" / revision
+    if not (snapshot / "config.json").is_file():
+        return None
+    index = snapshot / "model.safetensors.index.json"
+    if index.is_file():
+        import json
+
+        try:
+            shards = set(json.loads(index.read_text()).get("weight_map", {}).values())
+        except (OSError, ValueError):
+            return None
+        if not shards or not all((snapshot / shard).is_file() for shard in shards):
+            return None
+    elif not any(path.is_file() for path in snapshot.glob("*.safetensors")):
+        return None
+    return snapshot
+
+
+def _link_or_clone(source: Path, target: Path) -> None:
+    """Place `source` at `target` without a second copy on disk where possible.
+
+    A hard link first: the file then has two names and one set of blocks, and
+    survives either name being deleted (the hub cache being cleared, or the
+    plugin being removed). Across volumes that fails, and an APFS clone
+    (`cp -c`) is the next best: copy-on-write, so still no extra space. A plain
+    copy is the last resort, and still beats downloading 5 GB again.
+    """
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    try:
+        os.link(source, target)
+        return
+    except OSError:
+        pass
+    import shutil
+    import subprocess
+
+    if sys.platform == "darwin":
+        result = subprocess.run(["/bin/cp", "-c", str(source), str(target)],
+                                capture_output=True)
+        if result.returncode == 0:
+            return
+    shutil.copy2(source, target)
+
+
+def adopt_snapshot(snapshot: Path, dest: Path, reporter: ProgressReporter) -> list[Path]:
+    """Populate `dest` from a hub-cache snapshot instead of downloading.
+
+    The snapshot's entries are symlinks into the cache's blob store; each is
+    resolved and linked (see `_link_or_clone`) under its file name, so `dest`
+    ends up in the same flat layout `download_huggingface` produces.
+    """
+    reporter.stage(0.05, 0.95, f"Reusing the model already downloaded at {snapshot}")
+    entries = sorted(path for path in snapshot.rglob("*")
+                     if path.is_file() and not path.name.startswith("."))
+    placed: list[Path] = []
+    for index, entry in enumerate(entries, start=1):
+        relative = entry.relative_to(snapshot)
+        target = dest / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _link_or_clone(entry.resolve(), target)
+        placed.append(target)
+        reporter.within(index / max(1, len(entries)), f"Linked {relative}")
+    return placed
 
 
 def verify_manual_checkpoint(dest: Path, filename: str | None, terms_url: str,

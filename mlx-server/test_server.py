@@ -192,6 +192,51 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(body["phase"], "loading")
         self.assertIsNone(body["download_bytes"])
 
+    def test_local_model_dir_needs_config_and_shards(self):
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {server.LOCAL_MODEL_DIR_ENV: directory}):
+                self.assertIsNone(server.local_model_dir())
+                (Path(directory) / "config.json").write_text("{}")
+                self.assertIsNone(server.local_model_dir())
+                (Path(directory) / "model.safetensors").write_bytes(b"w")
+                self.assertEqual(server.local_model_dir(), Path(directory))
+        with mock.patch.dict(os.environ, {server.LOCAL_MODEL_DIR_ENV: ""}):
+            self.assertIsNone(server.local_model_dir())
+
+    def test_load_model_uses_the_installed_copy_without_the_hub(self):
+        import sys
+        import tempfile
+        import types
+        from unittest import mock
+
+        loaded = []
+        fake_vlm = types.ModuleType("mlx_vlm")
+        fake_vlm.load = lambda source, **kwargs: (loaded.append((source, kwargs)) or ("m", "p"))
+        fake_hub = types.ModuleType("huggingface_hub")
+
+        def no_download(*_a, **_k):
+            raise AssertionError("must not download")
+
+        fake_hub.snapshot_download = no_download
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "config.json").write_text("{}")
+            (Path(directory) / "model.safetensors").write_bytes(b"w")
+            with mock.patch.dict(os.environ, {server.LOCAL_MODEL_DIR_ENV: directory}), \
+                    mock.patch.dict(sys.modules, {"mlx_vlm": fake_vlm,
+                                                  "huggingface_hub": fake_hub}), \
+                    mock.patch.object(server, "snapshot_present", return_value=False):
+                server.load_model()
+        try:
+            self.assertEqual(loaded, [(directory, {})])
+            self.assertEqual(server._phase, "ready")
+        finally:
+            server._model = None
+            server._processor = None
+            server._phase = "loading"
+
     def test_no_cors_headers(self):
         response = self.client.options(
             "/analyze", headers={**AUTH, "Origin": "http://evil.example",

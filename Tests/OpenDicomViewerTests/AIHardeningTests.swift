@@ -147,7 +147,33 @@ final class AIHardeningTests: XCTestCase {
         panel.imageIndex = 7
         XCTAssertNil(panel.visibleAIDescription)
         panel.clearAIAnnotations()
+        XCTAssertNotNil(panel.aiDescriptionSlice, "clearing this slice keeps another slice's description")
+        panel.clearAIAnnotations(allSlices: true)
         XCTAssertNil(panel.aiDescriptionSlice)
+    }
+
+    func testClearRemovesOnlyTheCurrentSliceByDefault() {
+        let panel = makePanel()
+        let first = panel.currentSlice
+        let manual = Annotation(type: .ruler(start: .zero, end: CGPoint(x: 1, y: 1), distanceMM: 1))
+        panel.annotations = [aiBox(on: first), manual]
+        panel.imageIndex += 1
+        let second = panel.currentSlice
+        panel.annotations.append(aiBox(on: second))
+        panel.aiDescription = "here"
+        panel.aiDescriptionSlice = second
+        XCTAssertTrue(panel.hasAIResultsOnCurrentSlice)
+
+        panel.clearAIAnnotations()
+        XCTAssertFalse(panel.hasAIResultsOnCurrentSlice)
+        XCTAssertTrue(panel.hasAnyAIResults, "the first slice's result survives")
+        XCTAssertEqual(panel.annotations.filter(\.isAI).map(\.slice), [Optional(first)])
+        XCTAssertNil(panel.aiDescription)
+        XCTAssertTrue(panel.annotations.contains { !$0.isAI }, "manual measurements are untouched")
+
+        panel.clearAIAnnotations(allSlices: true)
+        XCTAssertFalse(panel.hasAnyAIResults)
+        XCTAssertEqual(panel.annotations.count, 1)
     }
 
     // MARK: - Setup marker
@@ -160,6 +186,31 @@ final class AIHardeningTests: XCTestCase {
         XCTAssertFalse(AIServerManager.setupMarkerIsValid(markerContents: "", requirementsHash: hash))
         let other = AIServerManager.requirementsHash(of: Data("mlx==2\n".utf8))
         XCTAssertFalse(AIServerManager.setupMarkerIsValid(markerContents: other, requirementsHash: hash))
+    }
+
+    /// launch.sh writes the marker with `shasum -a 256`; the app must read
+    /// what it writes as current.
+    func testLaunchScriptMarkerMatchesTheAppHash() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let requirements = root.appendingPathComponent("mlx-server/requirements.txt")
+        let script = try String(contentsOf: root.appendingPathComponent("mlx-server/launch.sh"),
+                                encoding: .utf8)
+        XCTAssertTrue(script.contains("$VENV_DIR/.odv-setup-complete"))
+        XCTAssertTrue(script.contains("shasum -a 256"))
+
+        let shasum = Process()
+        shasum.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+        shasum.arguments = ["-a", "256", requirements.path]
+        let pipe = Pipe()
+        shasum.standardOutput = pipe
+        try shasum.run()
+        shasum.waitUntilExit()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let written = String(output.split(separator: " ").first ?? "") + "\n"
+        let expected = AIServerManager.requirementsHash(of: try Data(contentsOf: requirements))
+        XCTAssertTrue(AIServerManager.setupMarkerIsValid(markerContents: written,
+                                                          requirementsHash: expected))
     }
 
     func testReadinessBackoffGrowsAndCaps() {

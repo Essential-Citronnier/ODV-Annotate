@@ -888,6 +888,9 @@ for scenario in scenarios {
     case .refuse(let required, let avail):
         label = "refuse"
         requiredGB = required
+        availableOut = avail    case .refuseLiveHeadroom(let required, let avail, _):
+        label = "refuse"  // overridable by the user; see isOverridable
+        requiredGB = required
         availableOut = avail
     }
 

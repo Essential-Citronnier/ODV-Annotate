@@ -219,8 +219,13 @@ struct OpenDicomViewerApp: App {
                     Divider()
                 }
 
-                Button("Clear AI Annotations") {
+                Button("Clear AI Annotations on This Slice") {
                     model.activePanel?.clearAIAnnotations()
+                    model.objectWillChange.send()
+                }
+                Button("Clear AI Annotations on All Slices") {
+                    model.activePanel?.clearAIAnnotations(allSlices: true)
+                    model.objectWillChange.send()
                 }
 
                 Toggle("Show AI Annotations", isOn: Binding(

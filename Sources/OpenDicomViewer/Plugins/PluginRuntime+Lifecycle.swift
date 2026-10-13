@@ -36,6 +36,9 @@ extension PluginRuntime {
         ) { _ in
             MainActor.assumeIsolated {
                 PluginRuntime.shared.terminateAllForQuit()
+                // Installs and one-shot runs in progress: pip and its build
+                // subprocesses, weight downloads, a segmentation.
+                PluginProcessRunner.ProcessControl.terminateAllForQuit()
             }
         }
     }

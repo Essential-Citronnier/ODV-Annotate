@@ -363,6 +363,9 @@ final class PluginRuntime: ObservableObject {
     /// figure.
     private var runningOneShotTasks: [String: String] = [:]
     private var sessions: [String: SessionLedger] = [:]
+    /// Plugins whose next admission may overrule a live-headroom refusal,
+    /// because the user chose "Start anyway". Consumed by that admission.
+    private var lowMemoryOverrides: Set<String> = []
     private let urlSession: URLSession
 
     // MARK: Model memory outside the plugin subsystem
@@ -607,8 +610,22 @@ final class PluginRuntime: ObservableObject {
         lastUsed[ref.pluginID] = Date()
     }
 
+    /// Let the next start or one-shot of `pluginID` proceed past a
+    /// live-headroom refusal (`PluginError.insufficientLiveMemory`). Has no
+    /// effect on a refusal against the declared budget, which stays final.
+    func allowLowMemoryStart(_ pluginID: String) {
+        lowMemoryOverrides.insert(pluginID)
+    }
+
     /// Apply an admission decision, stopping whatever it names.
-    private func applyAdmission(_ decision: AdmissionDecision, requester: String) async throws {
+    private func applyAdmission(_ proposed: AdmissionDecision, requester: String) async throws {
+        var decision = proposed
+        // An override is for one start: consumed whether or not it was needed,
+        // so it cannot stay armed for a later one.
+        if lowMemoryOverrides.remove(requester) != nil, decision.isOverridable {
+            log(for: requester).line("Starting despite low free memory, as requested.")
+            decision = decision.overridden
+        }
         if let error = decision.refusalError {
             log(for: requester).line("Refused: \(error.localizedDescription)")
             throw error
@@ -849,7 +866,9 @@ final class PluginRuntime: ObservableObject {
         deliberateStops.insert(pid)
         runtimeStates[pluginID] = .stopping
         log(for: pluginID).line("Stopping…")
-        process.terminate()
+        // The whole group, so a helper the adapter spawned does not outlive it.
+        let group = ProcessGroup.led(by: pid)
+        ProcessGroup.send(SIGTERM, group: group, pid: pid)
 
         // A model mid-load ignores SIGTERM until it returns from a native call,
         // so give it a bounded grace period before forcing the issue. The arbiter
@@ -862,9 +881,10 @@ final class PluginRuntime: ObservableObject {
         // period into an immediate SIGKILL.
         let exited = await Self.waitForExit(process, timeout: 3)
         if !exited {
-            kill(pid, SIGKILL)
             log(for: pluginID).line("Did not exit in time; terminated.")
         }
+        // Unconditionally: the adapter may have exited while a child did not.
+        ProcessGroup.send(SIGKILL, group: group, pid: pid)
 
         // Only clear state that still belongs to this process: the exit
         // handler may already have run, and a new start may have begun.
@@ -908,16 +928,17 @@ final class PluginRuntime: ObservableObject {
     func terminateAllForQuit(grace: TimeInterval = 2) {
         for inFlight in startTasks.values { inFlight.task.cancel() }
         let running = processes.values.filter(\.isRunning)
-        for process in running {
-            deliberateStops.insert(process.processIdentifier)
-            process.terminate()
+        let groups = running.map { ($0.processIdentifier, ProcessGroup.led(by: $0.processIdentifier)) }
+        for (pid, group) in groups {
+            deliberateStops.insert(pid)
+            ProcessGroup.send(SIGTERM, group: group, pid: pid)
         }
         let deadline = Date().addingTimeInterval(grace)
         while running.contains(where: \.isRunning) && Date() < deadline {
             usleep(50_000)
         }
-        for process in running where process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
+        for (pid, group) in groups {
+            ProcessGroup.send(SIGKILL, group: group, pid: pid)
         }
     }
 

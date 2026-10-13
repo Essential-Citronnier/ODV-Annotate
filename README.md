@@ -78,7 +78,9 @@ local AI. If you agree, it:
 2. Installs MLX and the other pinned Python packages (~1.5 GB)
 3. Starts the AI server on `http://127.0.0.1:8741`, which downloads the Gemma 4
    E4B model (~5.2 GB, one-time) into the Hugging Face cache,
-   `~/.cache/huggingface/hub`
+   `~/.cache/huggingface/hub` -- unless the Gemma plugin already installed the
+   same pinned model, in which case the server loads that copy and downloads
+   nothing (see "Where the model lives" below)
 4. Runs the analysis you asked for as soon as the model is loaded
 
 Expect 10–30 minutes on a first run, depending on your connection; the AI
@@ -156,6 +158,24 @@ OpenDicomViewer-Annotate.app/
 ```
 
 > Python packages (MLX, mlx-vlm, FastAPI) are installed on first AI use into `~/Library/Application Support/OpenDicomViewer/`; the Gemma 4 E4B model is downloaded into the Hugging Face cache, `~/.cache/huggingface/hub`.
+
+#### Where the model lives
+
+There is one ~5.2 GB copy of Gemma 4 E4B (revision `475b9088…`) on disk,
+whichever engine fetched it first:
+
+| Installed first | Location | The other engine |
+|-----------------|----------|------------------|
+| Built-in AI server | `~/.cache/huggingface/hub/models--mlx-community--gemma-4-E4B-it-4bit/` (`HF_HOME` / `HF_HUB_CACHE` move it) | The Gemma plugin's installer hard-links those files into its weight directory instead of downloading |
+| Gemma plugin (Plugin Store) | `~/Library/Application Support/OpenDicomViewer/plugins/gemma-4-e4b/weights/gemma-4-e4b-it-4bit/` | The built-in server loads that directory (`ODV_MODEL_DIR`) instead of downloading |
+
+The built-in server uses the plugin's directory only when its
+`.odv-download-complete` marker records the same pinned revision. Hard links
+share their blocks, so removing either path (clearing the hub cache, or
+removing the plugin) frees nothing until the other is removed too, and leaves
+the other engine's copy intact. If the plugin is removed while the built-in
+server has no hub-cache copy, the server downloads the model again on its next
+start.
 
 ### [v1.2.0](https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v1.2.0)
 

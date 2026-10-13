@@ -343,6 +343,28 @@ def snapshot_present() -> bool:
     return any(path.is_file() for path in snapshot.glob("*.safetensors"))
 
 
+# A directory already holding this revision's files, normally the Gemma
+# plugin's installed weights (one 5.2 GB copy serves both engines). The viewer
+# sets it only after checking the directory's completion marker records
+# MODEL_REVISION; a directory without the files is ignored here too.
+LOCAL_MODEL_DIR_ENV = "ODV_MODEL_DIR"
+
+
+def local_model_dir() -> Path | None:
+    """The pre-installed model directory to load from instead of the hub cache."""
+    value = os.environ.get(LOCAL_MODEL_DIR_ENV, "").strip()
+    if not value:
+        return None
+    directory = Path(value).expanduser()
+    if not (directory / "config.json").is_file():
+        logger.warning("%s=%s has no config.json; using the hub cache", LOCAL_MODEL_DIR_ENV, value)
+        return None
+    if not any(path.is_file() for path in directory.glob("*.safetensors")):
+        logger.warning("%s=%s has no weight shards; using the hub cache", LOCAL_MODEL_DIR_ENV, value)
+        return None
+    return directory
+
+
 def downloaded_bytes() -> int:
     """Bytes of this model in the hub cache, partial downloads included.
 
@@ -390,7 +412,15 @@ def load_model():
     logger.info(f"Loading model: {MODEL_ID} @ {MODEL_REVISION}")
     start = time.time()
     try:
-        if not snapshot_present():
+        local = local_model_dir()
+        if local is not None:
+            # Never reaches the Hub: the files and their revision are known.
+            _phase = "loading"
+            logger.info("Loading from the installed copy at %s", local)
+            from mlx_vlm import load
+
+            model, processor = load(str(local))
+        elif not snapshot_present():
             _phase = "downloading"
             # The size query runs beside the download rather than before it.
             threading.Thread(target=_fetch_expected_bytes, name="snapshot-size",
@@ -401,10 +431,11 @@ def load_model():
 
             snapshot_download(MODEL_ID, revision=MODEL_REVISION)
             logger.info(f"Download finished in {time.time() - start:.1f}s")
-        _phase = "loading"
-        from mlx_vlm import load
+        if local is None:
+            _phase = "loading"
+            from mlx_vlm import load
 
-        model, processor = load(MODEL_ID, revision=MODEL_REVISION)
+            model, processor = load(MODEL_ID, revision=MODEL_REVISION)
     except BaseException as exc:  # noqa: BLE001
         _load_error = f"{type(exc).__name__}: {exc}"
         logger.error("Model load failed: %s", _load_error)

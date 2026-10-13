@@ -213,3 +213,44 @@ enum HuggingFaceCache {
         }
     }
 }
+
+// MARK: - Process groups
+
+/// Signals a child together with everything it spawned.
+///
+/// pip builds wheels in subprocesses, and hub downloads and model servers can
+/// spawn helpers of their own; signalling only the direct child left those
+/// running after Cancel or quit, still writing into a venv the app had
+/// declared idle. Foundation's `Process` on macOS spawns its child as the
+/// leader of a new process group (pgid == pid; `PluginProcessGroupTests`
+/// guards this), and the child's own children inherit that group unless they
+/// deliberately leave it. Signalling the group therefore reaches all of them.
+///
+/// The group id is captured while the leader is alive: once it exits,
+/// `getpgid` on its pid fails, but grandchildren it orphaned are still in the
+/// group and still need the signal.
+enum ProcessGroup {
+
+    /// The process group `pid` leads, or nil when it leads none (or is gone).
+    /// Never the app's own group: signalling that would signal the app.
+    static func led(by pid: pid_t) -> pid_t? {
+        guard pid > 1 else { return nil }
+        let group = getpgid(pid)
+        guard group == pid, group != getpgrp() else { return nil }
+        return group
+    }
+
+    /// Send `signal` to `group` when known, else to `pid` alone.
+    static func send(_ signal: Int32, group: pid_t?, pid: pid_t) {
+        if let group, group > 1, group != getpgrp() {
+            killpg(group, signal)
+        } else if pid > 1 {
+            kill(pid, signal)
+        }
+    }
+
+    /// Send `signal` to whatever group `pid` leads right now, or to `pid`.
+    static func send(_ signal: Int32, toGroupLedBy pid: pid_t) {
+        send(signal, group: led(by: pid), pid: pid)
+    }
+}

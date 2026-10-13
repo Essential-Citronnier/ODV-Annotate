@@ -382,8 +382,27 @@ notInstalled → resolvingLicense → downloading → installing → ready
   interrupted by a crash, a network failure, or Cancel is fetched again rather
   than taken for installed. Adapters neither read nor write the marker. A
   `manual` weight has no marker; the file being where the store said is enough.
-- Cancelling an install terminates the hook or pip process (SIGTERM, then
-  SIGKILL after 5 s) and returns the task to `notInstalled`.
+- The marker is `key=value` lines: `completed=<ISO 8601 time>` and, when the
+  manifest pins one, `revision=<commit>`. Markers written before the revision
+  line existed hold only a timestamp and still mean complete. Another reader of
+  the same model (the built-in AI server) trusts the directory only when the
+  recorded revision matches its own pin.
+- A weight directory with no marker that nevertheless looks finished -- no
+  `*.incomplete` file; for a Hugging Face weight `config.json` and every shard
+  `model.safetensors.index.json` names (or at least one weight file), with the
+  hub's `.cache/huggingface/download/*.metadata` commit matching any pinned
+  revision; and at least 90% of `size_gb` on disk -- is an install from before
+  the marker existed. The launch re-check and the install preflight write its
+  marker instead of demoting it, so it is not downloaded again. Anything else
+  is re-fetched by the hook, which resumes into the same directory.
+- Cancelling an install terminates the hook or pip process and everything it
+  spawned (SIGTERM, then SIGKILL after 5 s) and returns the task to
+  `notInstalled`. The host starts every adapter, pip, and hook process as the
+  leader of its own process group and signals the group, so wheel builds and
+  download helpers go too; the same happens to any install or one-shot run in
+  progress when the app quits. An adapter that moves a child into a new
+  session or group of its own (`setsid`, `start_new_session=True`) takes it
+  out of the host's reach and must stop it itself.
 - Installs of tasks belonging to one plugin share its virtualenv and run one at
   a time.
 - The host re-verifies `ready` on launch; a task whose weights vanished falls

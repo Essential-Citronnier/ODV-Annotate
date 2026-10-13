@@ -138,10 +138,19 @@ class AIServerManager: ObservableObject {
     /// declares it for the same model; the plugin arbiter counts this.
     static let declaredRamGB: Double = 5.0
 
-    /// Whether the model snapshot is already in the Hugging Face cache, i.e.
-    /// whether starting the server will download ~5 GB first.
+    /// Whether the pinned model is already on disk -- in the Hugging Face
+    /// cache, or installed by the Gemma plugin -- i.e. whether starting the
+    /// server will download ~5 GB first.
     var isModelCached: Bool {
-        HuggingFaceCache.snapshotExists(repo: Self.modelRepo, revision: Self.modelRevision)
+        sharedModelDirectory != nil
+            || HuggingFaceCache.snapshotExists(repo: Self.modelRepo, revision: Self.modelRevision)
+    }
+
+    /// The Gemma plugin's installed copy of the pinned revision, when there is
+    /// one. The server loads it (`ODV_MODEL_DIR`) instead of keeping a second
+    /// 5.2 GB copy in the hub cache; see `SharedGemmaWeights`.
+    var sharedModelDirectory: URL? {
+        SharedGemmaWeights.installedDirectory(revision: Self.modelRevision)
     }
 
     private init() {
@@ -785,6 +794,10 @@ class AIServerManager: ObservableObject {
         env["ODV_AI_PORT"] = String(Self.port)
         env["ODV_PARENT_PID"] = String(getpid())
         env["PYTHONUNBUFFERED"] = "1"
+        if let shared = sharedModelDirectory {
+            env["ODV_MODEL_DIR"] = shared.path
+            appendLog("Using the model installed by the Gemma plugin at \(shared.path)")
+        }
         process.environment = env
 
         let pipe = Pipe()
@@ -948,10 +961,11 @@ class AIServerManager: ObservableObject {
         if let completion { afterExit[pid, default: []].append(completion) }
         // serverProcess stays set until the exit is observed, so
         // handleTermination can tell this exit from a newer process's.
-        process.terminate()
+        let group = ProcessGroup.led(by: pid)
+        ProcessGroup.send(SIGTERM, group: group, pid: pid)
 
         DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
-            if process.isRunning { kill(pid, SIGKILL) }
+            ProcessGroup.send(SIGKILL, group: group, pid: pid)
         }
     }
 
@@ -981,7 +995,15 @@ class AIServerManager: ObservableObject {
         setupProcessLock.lock()
         let setupProcess = activeSetupProcess
         setupProcessLock.unlock()
-        setupProcess?.terminate()
+        // pip and the wheel builds it spawned: the whole group.
+        if let setupProcess, setupProcess.isRunning {
+            let pid = setupProcess.processIdentifier
+            let group = ProcessGroup.led(by: pid)
+            ProcessGroup.send(SIGTERM, group: group, pid: pid)
+            let deadline = Date().addingTimeInterval(1)
+            while setupProcess.isRunning && Date() < deadline { usleep(50_000) }
+            ProcessGroup.send(SIGKILL, group: group, pid: pid)
+        }
 
         if let pid = adoptedPID { kill(pid, SIGTERM) }
 
@@ -989,16 +1011,16 @@ class AIServerManager: ObservableObject {
             removePIDRecord()
             return
         }
-        stoppingPIDs.insert(process.processIdentifier)
-        process.terminate()
+        let pid = process.processIdentifier
+        stoppingPIDs.insert(pid)
+        let group = ProcessGroup.led(by: pid)
+        ProcessGroup.send(SIGTERM, group: group, pid: pid)
         let deadline = Date().addingTimeInterval(3)
         while process.isRunning && Date() < deadline {
             usleep(50_000)
         }
-        if process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
-            process.waitUntilExit()
-        }
+        ProcessGroup.send(SIGKILL, group: group, pid: pid)
+        if process.isRunning { process.waitUntilExit() }
         removePIDRecord()
     }
 

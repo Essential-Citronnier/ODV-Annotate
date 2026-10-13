@@ -136,6 +136,10 @@ extension PluginRuntime: PluginRuntimeFacade {
         do {
             try await startPlugin(pluginID)
         } catch {
+            if LowMemoryStartPrompt.offerOverride(for: error, pluginID: pluginID, runtime: self) {
+                await start(pluginID)
+                return
+            }
             log(for: pluginID).line("Start failed: \(error.localizedDescription)")
         }
     }
