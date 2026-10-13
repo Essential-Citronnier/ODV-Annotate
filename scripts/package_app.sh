@@ -135,8 +135,14 @@ find "${RESOURCES_DIR}/python" -name "*.pyc" -delete 2>/dev/null || true
 # first time it imports a module, so the choice is to compile the bytecode now
 # and seal it, or to let the app break its own signature on first launch.
 # Compiling now also removes that cost from startup.
+#
+# `unchecked-hash` pycs are trusted as they are: the interpreter neither
+# compares them with the source's mtime nor rewrites them. Timestamp pycs (the
+# default) went stale -- and were rewritten inside the signed bundle -- as soon
+# as a copy reset the sources' mtimes (`cp -R` into the DMG did exactly that).
 echo "  Precompiling standard library (must precede signing)..."
 "${RESOURCES_DIR}/python/bin/python3" -m compileall -q -f \
+    --invalidation-mode unchecked-hash \
     "${RESOURCES_DIR}/python/lib/python${PYTHON_FULL_VERSION%.*}" >/dev/null 2>&1 || true
 
 echo "Creating Info.plist..."
@@ -212,7 +218,9 @@ echo "Creating DMG at ${DMG_NAME}..."
 rm -rf "${DMG_TEMP}" "${DMG_NAME}"
 mkdir -p "${DMG_TEMP}"
 
-cp -R "${APP_BUNDLE}" "${DMG_TEMP}/"
+# ditto, not cp -R: it preserves mtimes, extended attributes and the code
+# signature's resource layout exactly.
+ditto "${APP_BUNDLE}" "${DMG_TEMP}/$(basename "${APP_BUNDLE}")"
 ln -s /Applications "${DMG_TEMP}/Applications"
 
 hdiutil create -volname "${DISPLAY_NAME}" \

@@ -104,6 +104,8 @@ struct PluginWeight: Codable, Sendable, Equatable {
     let source: PluginWeightSource
     /// Hugging Face repo id, when applicable.
     let repo: String?
+    /// Hugging Face commit the weights are pinned to, when declared.
+    var revision: String? = nil
     /// TotalSegmentator task name, when applicable.
     let task: String?
     /// Expected filename for manually placed checkpoints.
@@ -111,7 +113,7 @@ struct PluginWeight: Codable, Sendable, Equatable {
     let sizeGB: Double
 
     enum CodingKeys: String, CodingKey {
-        case id, source, repo, task, filename
+        case id, source, repo, revision, task, filename
         case sizeGB = "size_gb"
     }
 }

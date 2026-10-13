@@ -2,8 +2,11 @@
 // OpenDicomViewer
 //
 // Manages the lifecycle of the Python MLX inference server process.
-// On first use, automatically creates a Python venv in Application Support
-// and installs dependencies before launching the server.
+// Nothing happens at launch: the first time the user asks for AI, they are
+// asked once whether to enable it (a ~6-7 GB download). Once enabled, the
+// first AI request creates a Python venv in Application Support, installs the
+// pinned dependencies, and starts the server, which downloads the model on its
+// first run. Requests made meanwhile wait and run once the model is ready.
 //
 // Trust model: the server only answers requests carrying a per-launch random
 // token, handed to it through ODV_AI_TOKEN. A listener on the port that
@@ -44,6 +47,11 @@ enum AISetupState: Equatable {
     }
 }
 
+extension Notification.Name {
+    /// Posted when the built-in AI server reports ready.
+    static let odvAIServerReady = Notification.Name("odv.aiServerReady")
+}
+
 // MARK: - Manager
 
 class AIServerManager: ObservableObject {
@@ -56,9 +64,22 @@ class AIServerManager: ObservableObject {
     @Published var setupState: AISetupState = .unknown
     /// Streamed output from pip install (shown in the setup progress UI)
     @Published var setupLog: String = ""
-    /// True from the moment setup completes until the server becomes ready;
-    /// used to show the "first-run model download" hint.
-    @Published var isFirstRun: Bool = false
+    /// The user's answer to "Enable local AI?": nil until asked. Persisted.
+    @Published private(set) var aiEnabled: Bool? = AIServerManager.storedEnabledChoice() {
+        didSet {
+            if let aiEnabled {
+                UserDefaults.standard.set(aiEnabled, forKey: Self.enabledKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.enabledKey)
+            }
+        }
+    }
+
+    private static let enabledKey = "LocalAIEnabled"
+
+    private static func storedEnabledChoice() -> Bool? {
+        UserDefaults.standard.object(forKey: enabledKey) as? Bool
+    }
 
     private var serverProcess: Process?
     /// PIDs of processes we asked to stop; their exit is not a failure.
@@ -69,6 +90,28 @@ class AIServerManager: ObservableObject {
     private var readinessTask: Task<Void, Never>?
     /// A server started outside the app (sharing our token) that we adopted.
     private var adoptedPID: Int32?
+    /// The launch-time check (orphan sweep, adoption) runs once per process.
+    /// It is triggered from each window's appearance, and running it again
+    /// read this process's own PID record and killed its own server.
+    private var didRunLaunchCheck = false
+    /// Bumped by every stop, so a start still waiting for the plugin runtime
+    /// to free the model does not spawn after the user stopped it.
+    private var launchGeneration = 0
+    /// The latest AI request made while the server was not ready; it runs
+    /// once the model is ready. One slot: a burst of clicks runs once.
+    private var pendingRun: (() -> Void)? {
+        didSet { hasPendingRun = pendingRun != nil }
+    }
+    /// Whether an AI request is waiting for the server (shown in the UI).
+    @Published private(set) var hasPendingRun = false
+    /// When the server last finished a request or became ready, for the
+    /// plugin arbiter's least-recently-used eviction order.
+    private(set) var lastUsed: Date = .distantPast
+
+    /// Hooks the plugin runtime installs so the built-in server and the Gemma
+    /// plugin never hold the same model in memory at once: called before the
+    /// built-in server starts, it stops (and awaits) any plugin that would.
+    var willStartServer: (() async -> Void)?
 
     /// pip / venv child process, so quitting mid-install does not orphan it.
     private let setupProcessLock = NSLock()
@@ -83,6 +126,23 @@ class AIServerManager: ObservableObject {
     private static let port = 8741
     /// Initial readiness wait; polling continues with backoff afterwards.
     private static let initialReadyTimeout: TimeInterval = 300
+
+    /// The model server.py loads, and the revision it pins. Kept in step with
+    /// MODEL_ID / MODEL_REVISION there (a test compares them).
+    static let modelRepo = "mlx-community/gemma-4-E4B-it-4bit"
+    static var modelRevision: String {
+        let override = ProcessInfo.processInfo.environment["ODV_MODEL_REVISION"] ?? ""
+        return override.isEmpty ? "475b9088d29754a3379866cf5aeb6b41acd313c2" : override
+    }
+    /// Declared resident memory of the loaded model, as the plugin manifest
+    /// declares it for the same model; the plugin arbiter counts this.
+    static let declaredRamGB: Double = 5.0
+
+    /// Whether the model snapshot is already in the Hugging Face cache, i.e.
+    /// whether starting the server will download ~5 GB first.
+    var isModelCached: Bool {
+        HuggingFaceCache.snapshotExists(repo: Self.modelRepo, revision: Self.modelRevision)
+    }
 
     private init() {
         if let token = ProcessInfo.processInfo.environment["ODV_AI_TOKEN"], !token.isEmpty {
@@ -206,7 +266,8 @@ class AIServerManager: ObservableObject {
         if env["HOME"] == nil {
             env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
         }
-        return env
+        // pip and huggingface_hub ignore the macOS proxy settings.
+        return SystemProxyEnvironment.applying(to: env)
     }
 
     // MARK: - Setup State Check
@@ -230,9 +291,16 @@ class AIServerManager: ObservableObject {
         (try? Data(contentsOf: requirementsURL)).map(Self.requirementsHash(of:))
     }
 
-    /// Whether the venv exists and a completed, current install is recorded.
+    /// Whether the venv exists, still belongs to the interpreter that would
+    /// rebuild it, and a completed, current install is recorded.
+    ///
+    /// A venv created while the app ran from the DMG or an App Translocation
+    /// path links to an interpreter that is gone (or stale) once the app runs
+    /// from /Applications; such a venv is incomplete and setup rebuilds it.
     var isSetupComplete: Bool {
-        guard FileManager.default.fileExists(atPath: venvPythonPath) else { return false }
+        guard PythonVenvCheck.isUsable(venv: venvDirectory, python: bundledPythonPath) else {
+            return false
+        }
         let marker = try? String(contentsOf: setupMarkerURL, encoding: .utf8)
         return Self.setupMarkerIsValid(markerContents: marker,
                                        requirementsHash: currentRequirementsHash)
@@ -242,7 +310,10 @@ class AIServerManager: ObservableObject {
         // Never clobber a running install with a filesystem snapshot taken
         // halfway through it.
         guard setupState != .installingDeps else { return }
-        setupState = isSetupComplete ? .ready : .notSetup
+        let complete = isSetupComplete
+        setupState = complete ? .ready : .notSetup
+        // Installs made before the enable prompt existed count as enabled.
+        if complete && aiEnabled == nil { aiEnabled = true }
     }
 
     // MARK: - Find Python 3
@@ -288,21 +359,140 @@ class AIServerManager: ObservableObject {
         #endif
     }
 
-    /// Check available disk space. Returns error message if below the required threshold.
-    /// First-run needs ~5 GB: venv+packages (~500 MB) + model (~4.5 GB).
-    private static let requiredDiskSpaceBytes: Int64 = 5_000_000_000  // 5 GB
+    /// Python packages (~1.5 GB installed) plus headroom.
+    static let environmentDiskBytes: Int64 = 2_000_000_000
+    /// The model snapshot (5.2 GB) plus headroom for the download.
+    static let modelDiskBytes: Int64 = 6_000_000_000
+
+    /// Free space needed for setup: ~8 GB on a first run, less when the model
+    /// is already cached.
+    static func requiredSetupBytes(modelCached: Bool) -> Int64 {
+        environmentDiskBytes + (modelCached ? 0 : modelDiskBytes)
+    }
 
     private func checkDiskSpace() -> String? {
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        do {
-            let values = try homeDir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            if let available = values.volumeAvailableCapacityForImportantUsage,
-               available < Self.requiredDiskSpaceBytes {
-                let availableGB = String(format: "%.1f", Double(available) / 1_000_000_000)
-                return "Disk space insufficient: \(availableGB) GB available, ~5 GB required.\nFree up space and try again.\n(Python packages ~500 MB + AI model ~4.5 GB)"
-            }
-        } catch {}
-        return nil
+        let cached = isModelCached
+        return LocalAIDiskSpace.shortfallMessage(
+            requiredBytes: Self.requiredSetupBytes(modelCached: cached),
+            availableBytes: LocalAIDiskSpace.availableBytes(),
+            what: cached ? "the Python packages"
+                         : "the Python packages (~1.5 GB) and the AI model (~5.2 GB)")
+    }
+
+    /// Re-checked before a server start that will download the model: the
+    /// disk may have filled up since setup.
+    private func checkModelDiskSpace() -> String? {
+        guard !isModelCached else { return nil }
+        return LocalAIDiskSpace.shortfallMessage(
+            requiredBytes: Self.modelDiskBytes,
+            availableBytes: LocalAIDiskSpace.availableBytes(at: HuggingFaceCache.hubDirectory()),
+            what: "the AI model download (~5.2 GB)")
+    }
+
+    // MARK: - Enabling
+
+    /// Ask once whether to enable local AI. Returns whether it is enabled.
+    @MainActor
+    func confirmEnableIfNeeded() -> Bool {
+        if aiEnabled == true { return true }
+        if aiEnabled == nil && isSetupComplete {
+            aiEnabled = true
+            return true
+        }
+        // Declined before: the inspector offers the button instead of a modal.
+        guard aiEnabled == nil else { return false }
+        let alert = NSAlert()
+        alert.messageText = "Enable local AI?"
+        alert.informativeText = """
+            The AI assistant runs Gemma 4 entirely on this Mac. Enabling it downloads \
+            about 6–7 GB once: Python packages (~1.5 GB) and the model (~5.2 GB), \
+            and needs about 8 GB of free disk space. Setup takes roughly 10–30 \
+            minutes depending on your connection; you can keep working meanwhile.
+
+            Images never leave this Mac.
+            """
+        alert.addButton(withTitle: "Enable Local AI")
+        alert.addButton(withTitle: "Not Now")
+        let enabled = alert.runModal() == .alertFirstButtonReturn
+        aiEnabled = enabled
+        return enabled
+    }
+
+    /// Enable from an explicit button (no prompt) and begin setup or start.
+    func enableAndStart() {
+        aiEnabled = true
+        startServer()
+    }
+
+    /// Make sure the server is ready or on its way. Returns false when the
+    /// user declined to enable local AI, or setup has failed (the inspector
+    /// shows why, with Retry).
+    @MainActor
+    @discardableResult
+    func ensureStarted() -> Bool {
+        if aiService.serverStatus.isReady { return true }
+        guard confirmEnableIfNeeded() else { return false }
+        if setupState == .unknown { checkSetupState() }
+        switch setupState {
+        case .installingDeps:
+            return true
+        case .failed:
+            return false
+        case .notSetup, .ready, .unknown:
+            if isServerRunning { return true }
+            startServer()
+            if case .failed = setupState { return false }
+            return true
+        }
+    }
+
+    /// Run `work` once the server is ready (replacing any earlier pending
+    /// request), or now if it already is.
+    func runWhenReady(_ work: @escaping () -> Void) {
+        if aiService.serverStatus.isReady {
+            work()
+        } else {
+            pendingRun = work
+        }
+    }
+
+    private func serverBecameReady() {
+        lastUsed = Date()
+        let work = pendingRun
+        pendingRun = nil
+        NotificationCenter.default.post(name: .odvAIServerReady, object: nil)
+        work?()
+    }
+
+    /// Forget a queued request: the server it was waiting for will not come.
+    private func dropPendingRun() {
+        pendingRun = nil
+    }
+
+    func noteUsed() {
+        lastUsed = Date()
+    }
+
+    /// A short hint for a setup failure, read from the tail of the log.
+    static func setupFailureHint(log: String) -> String {
+        let tail = log.split(separator: "\n").suffix(40).joined(separator: "\n").lowercased()
+        if tail.contains("no space left") {
+            return "The disk ran out of space during installation."
+        }
+        if tail.contains("proxyerror") || tail.contains("407 proxy") {
+            return "The network proxy refused the connection. Check the proxy settings in System Settings › Network."
+        }
+        if tail.contains("certificate verify failed") || tail.contains("sslerror") {
+            return "A secure connection to the package index failed (often a network filter or proxy intercepting HTTPS)."
+        }
+        let networkMarkers = ["could not find a version", "connectionerror", "connection refused",
+                              "timed out", "name resolution", "nodename nor servname",
+                              "network is unreachable", "max retries exceeded",
+                              "temporary failure in name resolution"]
+        if networkMarkers.contains(where: tail.contains) {
+            return "The package index could not be reached. Check your internet connection (and proxy) and try again."
+        }
+        return "See the log below for the cause."
     }
 
     // MARK: - Setup Environment
@@ -328,7 +518,7 @@ class AIServerManager: ObservableObject {
 
         setupState = .installingDeps
         setupLog = ""
-        isFirstRun = true
+        aiEnabled = true
 
         // Capture value types before entering background task
         let venvDir = venvDirectory
@@ -359,15 +549,25 @@ class AIServerManager: ObservableObject {
             await MainActor.run { self.appendSetupLog("Python: \(python3)\n") }
 
             let env = self.buildPythonEnvironment()
+            if let proxy = env["HTTPS_PROXY"] ?? env["https_proxy"] {
+                await MainActor.run { self.appendSetupLog("Using proxy: \(proxy)\n") }
+            } else if SystemProxyEnvironment.usesAutoConfig(SystemProxyEnvironment.currentSettings()) {
+                await MainActor.run {
+                    self.appendSetupLog("Note: this Mac uses a proxy auto-config (PAC) file, which Python cannot read. If downloads fail, set HTTPS_PROXY.\n")
+                }
+            }
             let log: @Sendable (String) -> Void = { str in
                 Task { @MainActor [weak self] in self?.appendSetupLog(str) }
             }
 
-            // Create virtual environment
+            // Create the virtual environment from scratch every time. A venv
+            // made from an interpreter that has since moved (app run from the
+            // DMG or a translocated path) has dangling links that a plain
+            // `venv` over the top leaves in place, so setup failed forever.
             await MainActor.run { self.appendSetupLog("Creating virtual environment...\n") }
             let venvOK = await self.runSetupProcess(
                 executable: python3,
-                arguments: ["-m", "venv", venvDir.path],
+                arguments: ["-m", "venv", "--clear", venvDir.path],
                 environment: env,
                 onOutput: log
             )
@@ -400,7 +600,8 @@ class AIServerManager: ObservableObject {
                 onOutput: log
             )
             guard installOK else {
-                await self.failSetup("Failed to install Python dependencies.\nCheck your network connection and try again.")
+                let hint = await MainActor.run { Self.setupFailureHint(log: self.setupLog) }
+                await self.failSetup("Failed to install Python dependencies.\n\(hint)")
                 return
             }
 
@@ -436,6 +637,7 @@ class AIServerManager: ObservableObject {
         await MainActor.run {
             self.setupState = .failed(message)
             self.appendSetupLog("ERROR: \(message)\n")
+            self.dropPendingRun()
         }
     }
 
@@ -498,7 +700,9 @@ class AIServerManager: ObservableObject {
     // MARK: - Start Server
 
     /// Public entry point. Runs setup first if the venv is missing.
+    /// Starting is an explicit request, so it also counts as enabling AI.
     func startServer() {
+        aiEnabled = true
         // Fail fast on Intel Macs
         if let archError = checkArchitecture() {
             setupState = .failed(archError)
@@ -525,6 +729,11 @@ class AIServerManager: ObservableObject {
             appendLog("Server already running.")
             return
         }
+        // A start already waiting for the plugin runtime to free the model.
+        guard !(isServerRunning && serverProcess == nil && adoptedPID == nil) else {
+            appendLog("Server already starting.")
+            return
+        }
 
         let serverScript = serverDirectory.appendingPathComponent("server.py").path
         guard FileManager.default.fileExists(atPath: serverScript) else {
@@ -540,8 +749,32 @@ class AIServerManager: ObservableObject {
             return
         }
 
-        appendLog("Starting MLX server…")
+        if let diskError = checkModelDiskSpace() {
+            appendLog("ERROR: \(diskError)")
+            setupState = .failed(diskError)
+            dropPendingRun()
+            return
+        }
+
         aiService.serverStatus = .starting
+        aiService.loadProgress = nil
+        isServerRunning = true
+        if let willStartServer {
+            // Stop the Gemma plugin first so the model is never resident twice.
+            let generation = launchGeneration
+            Task { @MainActor in
+                await willStartServer()
+                guard self.launchGeneration == generation else { return }
+                self.spawnServerProcess(serverScript: serverScript)
+            }
+        } else {
+            spawnServerProcess(serverScript: serverScript)
+        }
+    }
+
+    private func spawnServerProcess(serverScript: String) {
+        guard serverProcess == nil || serverProcess?.isRunning != true else { return }
+        appendLog("Starting MLX server…")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: venvPythonPath)
@@ -578,16 +811,20 @@ class AIServerManager: ObservableObject {
             monitorReadiness(of: process)
         } catch {
             appendLog("ERROR: Failed to start server: \(error.localizedDescription)")
+            isServerRunning = false
             aiService.serverStatus = .error("Launch failed")
+            dropPendingRun()
         }
     }
 
     /// Delay before the n-th extra readiness poll after the initial window.
+    /// Capped low so download progress keeps moving and readiness is noticed
+    /// within seconds.
     static func readinessBackoff(attempt: Int) -> TimeInterval {
-        min(60, 5 * pow(2, Double(min(attempt, 10))))
+        min(5, 2 * pow(2, Double(min(attempt, 10))))
     }
 
-    /// Poll until `process` is ready. The first run downloads ~4.5 GB, which
+    /// Poll until `process` is ready. The first run downloads ~5 GB, which
     /// can take far longer than the initial window, so polling continues with
     /// backoff for as long as the process is alive.
     private func monitorReadiness(of process: Process) {
@@ -610,7 +847,7 @@ class AIServerManager: ObservableObject {
                 if attempt == 0 {
                     await MainActor.run {
                         self?.appendLog("Model still loading after \(Int(Self.initialReadyTimeout)) s "
-                                        + "(the first run downloads ~4.5 GB); still waiting…")
+                                        + "(the first run downloads ~5 GB); still waiting…")
                     }
                 }
                 try? await Task.sleep(nanoseconds: UInt64(Self.readinessBackoff(attempt: attempt) * 1e9))
@@ -621,8 +858,8 @@ class AIServerManager: ObservableObject {
             guard ready, !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self, self.serverProcess === process else { return }
-                self.isFirstRun = false
                 self.appendLog("Server is ready!")
+                self.serverBecameReady()
             }
         }
     }
@@ -633,6 +870,7 @@ class AIServerManager: ObservableObject {
         guard serverProcess === process else { return }
         appendLog("ERROR: \(reason)")
         setupState = .failed("AI server could not start:\n\(reason)")
+        dropPendingRun()
         stopServer()
     }
 
@@ -650,6 +888,8 @@ class AIServerManager: ObservableObject {
         readinessTask?.cancel()
         readinessTask = nil
         removePIDRecord()
+        dropPendingRun()
+        aiService.loadProgress = nil
         appendLog("Server exited with code \(process.terminationStatus)")
 
         if expected {
@@ -676,6 +916,8 @@ class AIServerManager: ObservableObject {
     func stopServer(then completion: (() -> Void)? = nil) {
         readinessTask?.cancel()
         readinessTask = nil
+        dropPendingRun()
+        launchGeneration += 1
 
         if let pid = adoptedPID, serverProcess == nil {
             appendLog("Stopping adopted server (PID \(pid))…")
@@ -692,7 +934,7 @@ class AIServerManager: ObservableObject {
         }
 
         guard let process = serverProcess, process.isRunning else {
-            appendLog("Server is not running.")
+            if isServerRunning { appendLog("Server start cancelled.") }
             serverProcess = nil
             isServerRunning = false
             aiService.serverStatus = .stopped
@@ -717,6 +959,16 @@ class AIServerManager: ObservableObject {
 
     func restartServer() {
         stopServer(then: { [weak self] in self?.startServer() })
+    }
+
+    /// Stop the server and wait until it has exited. Used by the plugin
+    /// runtime before the Gemma plugin loads the same model.
+    @MainActor
+    func stopAndWait() async {
+        guard isServerRunning || serverProcess != nil || adoptedPID != nil else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            stopServer(then: { continuation.resume() })
+        }
     }
 
     // MARK: - Quit
@@ -804,6 +1056,10 @@ class AIServerManager: ObservableObject {
     private func terminateOrphanedServer() async -> Bool {
         guard let contents = try? String(contentsOf: pidFileURL, encoding: .utf8),
               let recorded = PIDRecord(serialized: contents) else { return false }
+        // The record may already describe a server this process started (the
+        // user asked for AI before the launch check got here). Never kill it.
+        let ownPID = await MainActor.run { self.serverProcess?.processIdentifier }
+        guard recorded.pid != ownPID else { return false }
         defer { removePIDRecord() }
         guard PIDRecord.current(pid: recorded.pid) == recorded else { return false }
 
@@ -821,41 +1077,37 @@ class AIServerManager: ObservableObject {
 
     // MARK: - Check Existing Server
 
-    /// Called on app launch. Adopts a server already running only if it
-    /// accepts this launch's token (i.e. it was started with our ODV_AI_TOKEN).
-    /// On first install (no venv), automatically triggers setup + model download.
-    /// If setup is already done but server is not running, auto-starts the server.
+    /// Called when a window appears. The first call per process sweeps a
+    /// server orphaned by an earlier crash and adopts one already running
+    /// with our token (launch.sh). Nothing is installed or started here: the
+    /// server starts on first AI use (`ensureStarted`).
     func checkExistingServer() {
-        // A launch-time check must not reset an install already under way.
-        guard setupState != .installingDeps else { return }
+        // A launch-time check must not reset an install already under way,
+        // and must not run twice (see didRunLaunchCheck).
+        guard setupState != .installingDeps, !didRunLaunchCheck else { return }
+        didRunLaunchCheck = true
         checkSetupState()
+        guard serverProcess == nil, adoptedPID == nil else { return }
         Task {
             _ = await terminateOrphanedServer()
             let probe = await aiService.probeHealth()
             await MainActor.run {
-                guard self.setupState != .installingDeps, self.serverProcess == nil else { return }
+                guard self.setupState != .installingDeps, self.serverProcess == nil,
+                      !self.isServerRunning else { return }
                 switch probe {
-                case .ours(_, let pid, _):
+                case .ours(_, let pid, _, _):
                     self.adoptedPID = pid
                     self.isServerRunning = true
                     self.appendLog("Connected to existing MLX server\(pid.map { " (PID \($0))" } ?? "").")
-                    Task { _ = await self.aiService.waitForReady(timeout: Self.initialReadyTimeout) }
+                    Task {
+                        let ready = await self.aiService.waitForReady(timeout: Self.initialReadyTimeout)
+                        if ready { await MainActor.run { self.serverBecameReady() } }
+                    }
                 case .foreign:
                     self.aiService.serverStatus = .error("Port \(Self.port) is used by another process")
                     self.appendLog("ERROR: Port \(Self.port) is in use by a process that is not this app's AI server. Not connecting to it.")
                 case .unreachable:
-                    // Auto-start based on current setup state so the user doesn't
-                    // have to manually trigger anything after a fresh install.
-                    switch self.setupState {
-                    case .notSetup:
-                        // First install: create venv, install deps, download model, start server.
-                        self.setupEnvironment()
-                    case .ready:
-                        // Deps already installed; just launch the server process.
-                        self.launchServerProcess()
-                    default:
-                        break
-                    }
+                    break
                 }
             }
         }
@@ -867,6 +1119,7 @@ class AIServerManager: ObservableObject {
     /// complete, otherwise rerun setup.
     func retrySetup() {
         guard setupState != .installingDeps else { return }
+        aiEnabled = true
         if isSetupComplete {
             setupState = .ready
             aiService.serverStatus = .stopped

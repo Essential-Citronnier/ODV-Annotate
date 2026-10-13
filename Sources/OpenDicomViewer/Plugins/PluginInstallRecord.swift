@@ -394,6 +394,15 @@ final class PluginInstallStore: @unchecked Sendable {
                 // problem again, not a download the host can retry on its own.
                 return weight.source == .manual ? .resolvingLicense : .notInstalled
             }
+            // Section 7: a downloaded weight counts as present only with the
+            // completion marker. Without it the directory may hold a download
+            // a crash cut short. Re-installing re-runs the hook, which resumes
+            // into the same directory rather than starting over.
+            if weight.source != .manual {
+                let marker = URL(fileURLWithPath: path)
+                    .appendingPathComponent(PluginPaths.weightCompletionMarker).path
+                if !fileExists(marker) { return .notInstalled }
+            }
         }
         return nil
     }

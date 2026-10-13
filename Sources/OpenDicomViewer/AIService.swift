@@ -100,12 +100,58 @@ struct AIHealthResponse: Codable {
     let revision: String?
     /// Why the model failed to load, when `status == "error"`.
     let error: String?
+    /// While loading: "starting" | "downloading" | "loading". Absent from
+    /// servers older than this field.
+    let phase: String?
+    /// First-run download: bytes of the model in the hub cache so far, and the
+    /// snapshot's total size when the server could ask the Hub for it.
+    let download_bytes: Int64?
+    let download_total_bytes: Int64?
+}
+
+/// What a loading server is doing, from /health.
+struct AIModelLoadProgress: Equatable {
+    enum Phase: Equatable { case starting, downloading, loading }
+    let phase: Phase
+    let downloadedBytes: Int64?
+    let totalBytes: Int64?
+
+    init(phase: Phase, downloadedBytes: Int64? = nil, totalBytes: Int64? = nil) {
+        self.phase = phase
+        self.downloadedBytes = downloadedBytes
+        self.totalBytes = totalBytes
+    }
+
+    init?(health: AIHealthResponse) {
+        guard health.status == "loading" else { return nil }
+        switch health.phase {
+        case "downloading": phase = .downloading
+        case "loading": phase = .loading
+        default: phase = .starting
+        }
+        downloadedBytes = health.download_bytes
+        totalBytes = health.download_total_bytes
+    }
+
+    /// 0...1 when both figures are known.
+    var fraction: Double? {
+        guard let done = downloadedBytes, let total = totalBytes, total > 0 else { return nil }
+        return min(1, max(0, Double(done) / Double(total)))
+    }
+
+    /// e.g. "1.2 of 5.2 GB" or "1.2 GB".
+    var bytesText: String? {
+        guard let done = downloadedBytes else { return nil }
+        let gb: (Int64) -> String = { String(format: "%.1f", Double($0) / 1_000_000_000) }
+        if let total = totalBytes, total > 0 { return "\(gb(done)) of \(gb(total)) GB" }
+        return "\(gb(done)) GB"
+    }
 }
 
 /// Outcome of one /health request.
 enum AIHealthProbe: Equatable {
     /// Our server (it accepted this launch's token).
-    case ours(status: String, pid: Int32?, error: String?)
+    case ours(status: String, pid: Int32?, error: String?, progress: AIModelLoadProgress? = nil)
     /// Something is listening on the port but rejected our token: another
     /// app, a stale server from an earlier launch, or a hostile listener.
     case foreign
@@ -195,6 +241,8 @@ class AIService: ObservableObject {
         didSet { UserDefaults.standard.set(hasShownDisclaimer, forKey: AIService.disclaimerKey) }
     }
     @Published var availableModes: [AIAnalyzeMode] = []
+    /// Download / load progress of a server that is not ready yet.
+    @Published var loadProgress: AIModelLoadProgress?
     @Published var selectedMode: String = "clinical"
 
     private static let disclaimerKey = "AIDiagnosticDisclaimerAcknowledged"
@@ -206,6 +254,10 @@ class AIService: ObservableObject {
 
     private let baseURL: URL
     private let session: URLSession
+    /// One inference at a time: the server holds a single model and runs one
+    /// generation at once anyway, and queueing here keeps several panels'
+    /// requests from all running into the client timeout behind each other.
+    private let requestQueue = AIRequestQueue()
 
     private init() {
         self.baseURL = URL(string: "http://127.0.0.1:8741")!
@@ -229,14 +281,17 @@ class AIService: ObservableObject {
         guard let health = try? JSONDecoder().decode(AIHealthResponse.self, from: data) else {
             return .foreign
         }
-        return .ours(status: health.status, pid: health.pid, error: health.error)
+        return .ours(status: health.status, pid: health.pid, error: health.error,
+                     progress: AIModelLoadProgress(health: health))
     }
 
     func checkHealth() async {
         let probe = await probeHealth()
         let status: AIServerStatus
+        let progress: AIModelLoadProgress?
+        if case .ours(_, _, _, let reported) = probe { progress = reported } else { progress = nil }
         switch probe {
-        case .ours(let state, _, let error):
+        case .ours(let state, _, let error, _):
             switch state {
             case "ready": status = .ready
             case "error": status = .error(error ?? "Model failed to load")
@@ -252,6 +307,7 @@ class AIService: ObservableObject {
             // still "starting". The manager reports a real exit itself.
             if status == .stopped && serverStatus == .starting { return }
             serverStatus = status
+            loadProgress = progress
         }
         if status.isReady && availableModes.isEmpty {
             await fetchModes()
@@ -420,8 +476,12 @@ class AIService: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
 
+        await requestQueue.acquire()
         await MainActor.run { isInferencing = true }
-        defer { Task { @MainActor in isInferencing = false } }
+        defer {
+            Task { @MainActor in isInferencing = false }
+            Task { await requestQueue.release() }
+        }
 
         let (data, response) = try await session.data(for: request)
 
@@ -441,6 +501,30 @@ class AIService: ObservableObject {
     }
 }
 
+// MARK: - Request queue
+
+/// FIFO async mutex for inference requests.
+actor AIRequestQueue {
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        guard busy else {
+            busy = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            busy = false
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 // MARK: - Errors
 
 enum AIServiceError: LocalizedError {
@@ -452,7 +536,7 @@ enum AIServiceError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .serverNotReady:
-            return "AI server is not running. Start it from the AI menu."
+            return "The local AI model is not ready yet. Try again once it has finished loading."
         case .imageConversionFailed:
             return "Failed to convert image for AI analysis."
         case .invalidResponse:

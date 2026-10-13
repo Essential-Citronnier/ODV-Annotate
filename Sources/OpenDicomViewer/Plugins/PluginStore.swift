@@ -237,6 +237,8 @@ final class PluginStore: ObservableObject {
     @Published var expandedPluginIDs: Set<String> = []
 
     let machine: PluginMachineProfile
+    /// The admission policy's memory shares, for the unsupported check.
+    let arbiter: ResourceArbiter
 
     /// The store the application's own surfaces share.
     ///
@@ -251,9 +253,11 @@ final class PluginStore: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     init(facade: any PluginRuntimeFacade,
-         machine: PluginMachineProfile = .current) {
+         machine: PluginMachineProfile = .current,
+         arbiter: ResourceArbiter = ResourceArbiter()) {
         self.facade = facade
         self.machine = machine
+        self.arbiter = arbiter
         // Everything ships expanded: the store lists a handful of plugins, and
         // a collapsed row hides exactly the size and license information the
         // user opened the store to compare.
@@ -344,9 +348,12 @@ final class PluginStore: ObservableObject {
     /// The single reason this machine cannot run the plugin, or nil.
     ///
     /// Only hard blocks belong here. A plugin that merely competes for memory
-    /// is the arbiter's problem at run time, not the store's at install time;
-    /// a plugin whose declared peak exceeds installed RAM can never succeed and
-    /// is worth saying so before a multi-gigabyte download.
+    /// is the arbiter's problem at run time, not the store's at install time.
+    /// But the arbiter never admits a declaration larger than its share of
+    /// physical memory (`ResourceArbiter.residentFraction`, or
+    /// `oneShotFraction` for one-shot jobs), even with nothing else running,
+    /// so such a plugin can never run here and is worth saying so before a
+    /// multi-gigabyte download: Gemma's 5 GB on an 8 GB Mac, for one.
     private func unsupportedReason(for descriptor: PluginDescriptor) -> String? {
         if descriptor.requiresAppleSilicon && !machine.isAppleSilicon {
             return "\(descriptor.name) requires Apple Silicon. "
@@ -359,11 +366,14 @@ final class PluginStore: ObservableObject {
         let lightest = descriptor.tasks
             .map { descriptor.declaredRAMGB(forTask: $0.id) }
             .min() ?? descriptor.ramGB
-        if lightest > machine.physicalMemoryGB {
+        let fraction = descriptor.execution == .oneShot
+            ? arbiter.oneShotFraction : arbiter.residentFraction
+        let budget = machine.physicalMemoryGB * fraction
+        if lightest > budget + 1e-9 {
             return String(
                 format: "%@ declares %.1f GB peak memory for its smallest task; "
-                    + "this Mac has %.1f GB.",
-                descriptor.name, lightest, machine.physicalMemoryGB)
+                    + "this Mac has %.1f GB, of which plugins may use %.1f GB.",
+                descriptor.name, lightest, machine.physicalMemoryGB, budget)
         }
         return nil
     }
@@ -455,6 +465,29 @@ final class PluginStore: ObservableObject {
         await facade.verifyCheckpoint(for: ref)
     }
 
+    /// Tasks of `pluginID` that one "Install All" click installs: supported,
+    /// open-gate, and not installed or installing yet. Gated tasks still go
+    /// through their gate sheet one by one.
+    func installAllCandidates(for pluginID: String) -> [PluginTaskRef] {
+        guard let group = groups.first(where: { $0.id == pluginID }) else { return [] }
+        return group.rows.filter { row in
+            guard row.isSupported, row.license.gate == .open else { return false }
+            switch row.installState {
+            case .notInstalled, .failed: return true
+            default: return false
+            }
+        }.map(\.ref)
+    }
+
+    /// Install every open-gate task of a plugin. They share the plugin's
+    /// venv and, for Gemma, the same weights, so after the first the rest
+    /// are quick. Installs run one after another.
+    func installAll(_ pluginID: String) async {
+        for ref in installAllCandidates(for: pluginID) {
+            await facade.install(ref, licenseKey: nil)
+        }
+    }
+
     func start(_ pluginID: String) async { await facade.start(pluginID) }
     func stop(_ pluginID: String) async { await facade.stop(pluginID) }
 
@@ -492,11 +525,10 @@ final class PluginStore: ObservableObject {
             }
             return MenuAvailability(isRunnable: false, reason: reason)
         }
-        // A one-shot plugin is spawned per invocation and needs no running
-        // process; a resident or session plugin must already be up.
-        if row.execution.isResident && !row.runtimeState.isReady {
-            return MenuAvailability(isRunnable: false, reason: "plugin not running")
-        }
+        // Installed is enough. A one-shot plugin is spawned per invocation,
+        // and `PluginRuntime.invoke` starts a stopped resident or session
+        // plugin on demand -- requiring the user to press Start in the store
+        // first left every menu item disabled for no reason.
         return MenuAvailability(isRunnable: true, reason: nil)
     }
 

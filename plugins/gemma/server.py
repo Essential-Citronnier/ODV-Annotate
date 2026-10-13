@@ -51,6 +51,9 @@ from _shared.weights import (  # noqa: E402
 
 PLUGIN_ID = "gemma-4-e4b"
 MODEL_ID = "mlx-community/gemma-4-E4B-it-4bit"
+# The snapshot the built-in mlx-server pins too; plugins.json declares it as
+# the weight's `revision`, and a hand-run install without one uses it.
+MODEL_REVISION = "475b9088d29754a3379866cf5aeb6b41acd313c2"
 
 # The weight id plugins.json declares for MODEL_ID. The host installs it into
 # $ODV_WEIGHTS_DIR/<this id>/ (PLUGIN_PROTOCOL.md section 4d).
@@ -61,7 +64,12 @@ WEIGHTS_OVERRIDE_ENV = "ODV_GEMMA_WEIGHTS"
 # own preprocessing would do it anyway, and doing it here bounds the memory a
 # hostile or accidental 8k image could claim.
 MAX_IMAGE_SIZE = 1120
-MAX_TOKENS = 2048
+# Every answer is a short JSON object. Matches mlx-server.
+MAX_TOKENS = 768
+# Low temperature: the same slice should give the same answer twice. Matches
+# mlx-server; the port had 1.0, which made results vary run to run.
+TEMPERATURE = 0.2
+TOP_P = 0.95
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -270,7 +278,7 @@ class GemmaModel:
             )
             response = generate(
                 self._model, self._processor, formatted, image=[image],
-                max_tokens=MAX_TOKENS, temperature=1.0, top_p=0.95,
+                max_tokens=MAX_TOKENS, temperature=TEMPERATURE, top_p=TOP_P,
             )
         return response.text if hasattr(response, "text") else str(response)
 
@@ -278,7 +286,8 @@ class GemmaModel:
         try:
             import mlx.core as mx
 
-            return mx.metal.get_peak_memory() / (1024 * 1024)
+            getter = getattr(mx, "get_peak_memory", None) or mx.metal.get_peak_memory
+            return getter() / (1024 * 1024)
         except Exception:  # noqa: BLE001 - a metrics read must never fail a request
             return None
 
@@ -577,7 +586,9 @@ def install_weights(args, dest: Path, reporter) -> list[Path]:
             f"got '{args.source}'",
             recoverable=False,
         )
-    files = download_huggingface(args.repo or MODEL_ID, dest, reporter)
+    repo = args.repo or MODEL_ID
+    revision = args.revision or (MODEL_REVISION if repo == MODEL_ID else None)
+    files = download_huggingface(repo, dest, reporter, revision=revision)
     # mlx-vlm loads a model directory rather than one named file, and the shard
     # count varies by quantization, so the config plus at least one weight
     # shard is what "present" means here.
@@ -610,7 +621,12 @@ def main(argv: list[str] | None = None) -> int:
     from _shared.serve import build_app
     import uvicorn
 
-    app = build_app(adapter, on_startup=adapter.model.load)
+    # The model loads on a thread, not in the startup hook: a hook that blocks
+    # keeps uvicorn from binding the port, so /health could not answer
+    # "loading" and the host saw only refused connections for the tens of
+    # seconds a load takes.
+    app = build_app(adapter, on_startup=lambda: threading.Thread(
+        target=adapter.model.load, name="model-load", daemon=True).start())
     attach_legacy_routes(app, adapter)
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):

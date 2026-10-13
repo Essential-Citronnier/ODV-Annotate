@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -111,7 +112,7 @@ def parse_install_args(description: str,
                        argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse the section 4b install CLI.
 
-    `--weight-id`, `--source`, `--repo`, and `--task` carry manifest fields
+    `--weight-id`, `--source`, `--repo`, `--revision`, and `--task` carry manifest fields
     verbatim; they are accepted as free strings rather than validated against a
     fixed set so that adding a weight to the manifest does not require editing
     the parser.
@@ -127,6 +128,8 @@ def parse_install_args(description: str,
                         help="Host-owned directory the weights must land in")
     parser.add_argument("--repo", default=None,
                         help="Hugging Face repo id, when the manifest declares one")
+    parser.add_argument("--revision", default=None,
+                        help="Hugging Face commit to pin, when the manifest declares one")
     parser.add_argument("--task", default=None,
                         help="TotalSegmentator task name, when applicable")
     return parser.parse_args(argv)
@@ -209,14 +212,99 @@ def _fail(error: PluginError) -> int:
 # ---------------------------------------------------------------------------
 
 
+def directory_bytes(path: Path) -> int:
+    """Total size of the regular files beneath `path` (0 if it is absent)."""
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                continue
+    return total
+
+
+def _expected_repo_bytes(repo: str, revision: str | None,
+                         allow_patterns: Sequence[str] | None) -> int | None:
+    """Size of what `snapshot_download` will fetch, from the Hub (best effort)."""
+    try:
+        import fnmatch
+
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(repo, revision=revision, files_metadata=True)
+        total = 0
+        for sibling in info.siblings or []:
+            if allow_patterns and not any(fnmatch.fnmatch(sibling.rfilename, pattern)
+                                          for pattern in allow_patterns):
+                continue
+            total += sibling.size or 0
+        return total or None
+    except Exception:  # noqa: BLE001 - progress is a nicety
+        return None
+
+
+class _DownloadProgress:
+    """Reports a download's progress by polling the size of its destination.
+
+    `snapshot_download` offers no byte-level callback that survives across
+    hub versions, but it stages every file under `dest` (as
+    `.cache/huggingface/download/*.incomplete` until complete), so the size of
+    `dest` against the snapshot's total is an honest measure of progress.
+    """
+
+    def __init__(self, dest: Path, reporter: ProgressReporter, repo: str,
+                 expected: int | None, interval: float = 1.0) -> None:
+        self._dest = dest
+        self._reporter = reporter
+        self._repo = repo
+        self._expected = expected
+        self._interval = interval
+        self._baseline = directory_bytes(dest)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="download-progress",
+                                        daemon=True)
+
+    def __enter__(self) -> "_DownloadProgress":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+
+    def set_expected(self, expected: int | None) -> None:
+        self._expected = expected
+
+    def _run(self) -> None:
+        last = -1
+        while not self._stop.wait(self._interval):
+            done = directory_bytes(self._dest)
+            if done == last:
+                continue
+            last = done
+            gb = done / 1e9
+            if self._expected:
+                self._reporter.within(min(0.99, done / self._expected),
+                                      f"Downloading {self._repo}: {gb:.2f} of "
+                                      f"{self._expected / 1e9:.2f} GB")
+            else:
+                self._reporter.log(f"Downloading {self._repo}: {gb:.2f} GB so far")
+
+
 def download_huggingface(repo: str, dest: Path, reporter: ProgressReporter,
-                         allow_patterns: Sequence[str] | None = None) -> list[Path]:
+                         allow_patterns: Sequence[str] | None = None,
+                         revision: str | None = None) -> list[Path]:
     """Download a Hugging Face repo into `dest` and return the files fetched.
 
     `local_dir` is used rather than the shared hub cache so that the weights
     live under the host-owned directory the store manages and can delete when
     the user removes the plugin, instead of accumulating in a cache the host
     does not know about.
+
+    `revision` pins a commit so a re-upload cannot change the weights the
+    adapter was validated against. Progress is reported while the download
+    runs by polling the size of `dest`.
     """
     if not repo:
         raise PluginError(
@@ -224,6 +312,10 @@ def download_huggingface(repo: str, dest: Path, reporter: ProgressReporter,
             "--repo is required for the huggingface source",
             recoverable=False,
         )
+    # Plain HTTP rather than Xet: Xet writes a file late, so polling `dest`
+    # (the only progress measure that survives hub versions) stood still for
+    # minutes. Set before huggingface_hub is first imported in this process.
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
@@ -233,13 +325,23 @@ def download_huggingface(repo: str, dest: Path, reporter: ProgressReporter,
             "Reinstall the plugin from the store.",
         ) from None
 
-    reporter.stage(0.05, 0.95, f"Downloading {repo}")
+    label = f"{repo}@{revision[:12]}" if revision else repo
+    reporter.stage(0.05, 0.95, f"Downloading {label}")
     try:
-        snapshot_download(
-            repo_id=repo,
-            local_dir=str(dest),
-            allow_patterns=list(allow_patterns) if allow_patterns else None,
-        )
+        with _DownloadProgress(dest, reporter, repo, expected=None) as progress:
+            # Asked beside the download, not before it, so a slow metadata
+            # call never delays the transfer itself.
+            sizer = threading.Thread(
+                target=lambda: progress.set_expected(
+                    _expected_repo_bytes(repo, revision, allow_patterns)),
+                name="snapshot-size", daemon=True)
+            sizer.start()
+            snapshot_download(
+                repo_id=repo,
+                revision=revision,
+                local_dir=str(dest),
+                allow_patterns=list(allow_patterns) if allow_patterns else None,
+            )
     except BaseException as exc:  # noqa: BLE001 - hub errors are many and unstable
         # A gated or private repo answers 401/403. That is a licence problem,
         # not a network problem, and the host must route it to the gate.
@@ -252,7 +354,7 @@ def download_huggingface(repo: str, dest: Path, reporter: ProgressReporter,
                 f"downloaded.",
             ) from None
         raise PluginError(
-            ErrorCode.INTERNAL, f"Could not download {repo}: {text}"
+            ErrorCode.INTERNAL, f"Could not download {label}: {text}"
         ) from None
 
     return [path for path in dest.rglob("*") if path.is_file()]

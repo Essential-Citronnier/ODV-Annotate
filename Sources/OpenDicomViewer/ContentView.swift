@@ -86,10 +86,15 @@ struct ContentView: View {
                                 Button(action: {
                                     model.showAIInspector.toggle()
                                     if model.showAIInspector {
+                                        // Opening the inspector analyzes the slice when an engine
+                                        // is set up (starting it if needed); it never kicks off the
+                                        // multi-GB first setup -- the inspector offers that instead.
                                         if let panel = model.activePanel,
-                                           panel.aiDescription == nil && !panel.aiAnalysisInProgress {
+                                           panel.visibleAIDescription == nil && !panel.aiAnalysisInProgress,
+                                           AIAnalysisEngine.current == .gemmaPlugin
+                                            || AIServerManager.shared.setupState == .ready {
                                             panel.showAIAnnotations = true
-                                            model.triggerAIAnalysis(for: panel)
+                                            model.triggerPreferredAIAnalysis(for: panel)
                                         }
                                     }
                                 }) {
@@ -217,7 +222,7 @@ struct ContentView: View {
                     panel.clearAIAnnotations()
                     panel.showAIAnnotations = true
                     model.showAIInspector = true
-                    model.triggerAIAnalysis(for: panel)
+                    model.triggerPreferredAIAnalysis(for: panel)
                 }
                 return .handled
             }

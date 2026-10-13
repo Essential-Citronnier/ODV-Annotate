@@ -391,9 +391,18 @@ class DICOMModel: ObservableObject {
             return event
         }
 
+        // An error saying the model was not ready is stale once it is.
+        aiReadyObserver = NotificationCenter.default.addObserver(
+            forName: .odvAIServerReady, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.clearStaleAINotReadyErrors() }
+        }
     }
 
+    private var aiReadyObserver: NSObjectProtocol?
+
     deinit {
+        if let aiReadyObserver { NotificationCenter.default.removeObserver(aiReadyObserver) }
         if let monitor = flagsMonitor {
             NSEvent.removeMonitor(monitor)
         }
@@ -4414,14 +4423,35 @@ class DICOMModel: ObservableObject {
 
     /// Common gate for every built-in AI run: an image, no run already in
     /// flight on this panel, a ready server, and the one-time disclaimer.
+    ///
+    /// The server starts lazily. When it is not ready, this starts it (asking
+    /// once whether to enable local AI), shows the AI inspector with the
+    /// download / loading progress, and queues `retry` to run once the model
+    /// is ready, instead of failing with "not running".
     @MainActor
-    private func canStartAIRun(for panel: PanelState) -> Bool {
+    private func canStartAIRun(for panel: PanelState,
+                                retry: @escaping @MainActor () -> Void) -> Bool {
         guard panel.image != nil, !panel.aiAnalysisInProgress else { return false }
-        guard aiService.serverStatus.isReady else {
-            panel.aiError = "AI server is not running. Start it from the AI menu."
-            return false
+        showAIInspector = true
+        if aiService.serverStatus.isReady {
+            return aiService.confirmDisclaimerIfNeeded()
         }
-        return aiService.confirmDisclaimerIfNeeded()
+        let manager = AIServerManager.shared
+        guard manager.ensureStarted(), aiService.confirmDisclaimerIfNeeded() else { return false }
+        panel.aiError = nil
+        manager.runWhenReady {
+            MainActor.assumeIsolated { retry() }
+        }
+        return false
+    }
+
+    /// Clear "not ready" errors left on panels once the server is ready.
+    @MainActor
+    func clearStaleAINotReadyErrors() {
+        let stale = AIServiceError.serverNotReady.errorDescription
+        for panel in panels where panel.aiError != nil && panel.aiError == stale {
+            panel.aiError = nil
+        }
     }
 
     private func aiModality(for panel: PanelState) -> String {
@@ -4469,6 +4499,7 @@ class DICOMModel: ObservableObject {
                 }
                 switch outcome {
                 case .success(let result):
+                    AIServerManager.shared.noteUsed()
                     apply(result, slice)
                     panel.showAIAnnotations = true
                 case .failure(let error):
@@ -4481,7 +4512,10 @@ class DICOMModel: ObservableObject {
     /// Trigger AI analysis for the active panel's current image
     @MainActor
     func triggerAIAnalysis(for panel: PanelState) {
-        guard canStartAIRun(for: panel) else { return }
+        guard canStartAIRun(for: panel, retry: { [weak self, weak panel] in
+            guard let self, let panel else { return }
+            self.triggerAIAnalysis(for: panel)
+        }) else { return }
 
         let modality = aiModality(for: panel)
         let seriesDesc = allSeries.indices.contains(panel.seriesIndex)
@@ -4522,7 +4556,10 @@ class DICOMModel: ObservableObject {
     /// Trigger AI abnormality detection for the active panel
     @MainActor
     func triggerAIAbnormalityDetection(for panel: PanelState) {
-        guard canStartAIRun(for: panel) else { return }
+        guard canStartAIRun(for: panel, retry: { [weak self, weak panel] in
+            guard let self, let panel else { return }
+            self.triggerAIAbnormalityDetection(for: panel)
+        }) else { return }
 
         let modality = aiModality(for: panel)
         let service = aiService
@@ -4550,10 +4587,22 @@ class DICOMModel: ObservableObject {
     /// The most recent ROI Stats rectangle on the panel's current slice, in
     /// display-image pixel coordinates. This is the region "Describe ROI" sends.
     func latestROIForAIDescription(in panel: PanelState) -> CGRect? {
+        // Display-image pixel coordinates; see normalizedROIForAI for 0-1.
         for annotation in panel.visibleAnnotations.reversed() {
             if case .roiStats(let rect, _, _, _, _, _) = annotation.type { return rect }
         }
         return nil
+    }
+
+    /// `latestROIForAIDescription` normalized to 0-1, or nil when there is
+    /// none (or it is too small to describe).
+    func normalizedROIForAI(in panel: PanelState) -> CGRect? {
+        guard let roi = latestROIForAIDescription(in: panel) else { return nil }
+        let imgW = max(1, panel.displayImageWidth)
+        let imgH = max(1, panel.displayImageHeight)
+        return AIBoxSanitizer.normalizedRect(
+            x: roi.origin.x / imgW, y: roi.origin.y / imgH,
+            width: roi.width / imgW, height: roi.height / imgH)
     }
 
     /// Describe the most recent ROI Stats rectangle on the current slice.
@@ -4579,7 +4628,10 @@ class DICOMModel: ObservableObject {
             panel.aiError = "The selected region is too small to describe."
             return
         }
-        guard canStartAIRun(for: panel) else { return }
+        guard canStartAIRun(for: panel, retry: { [weak self, weak panel] in
+            guard let self, let panel else { return }
+            self.triggerAIDescribeROI(for: panel, roi: roi)
+        }) else { return }
 
         let context = allSeries.indices.contains(panel.seriesIndex)
             ? allSeries[panel.seriesIndex].seriesDescription : ""

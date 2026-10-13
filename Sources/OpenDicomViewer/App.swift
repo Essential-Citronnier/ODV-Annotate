@@ -25,6 +25,11 @@ struct OpenDicomViewerApp: App {
         WindowGroup {
             ContentView(model: model)
                 .task {
+                    // Adopt a server already running (launch.sh) and sweep one
+                    // orphaned by a crash. Runs once per process; it starts
+                    // nothing (the server starts on first AI use) and does not
+                    // wait for the update check below.
+                    aiServerManager.checkExistingServer()
                     // Auto-open directory if passed via --benchmark /path
                     if let benchIdx = CommandLine.arguments.firstIndex(of: "--benchmark"),
                        benchIdx + 1 < CommandLine.arguments.count {
@@ -35,8 +40,6 @@ struct OpenDicomViewerApp: App {
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
                         await updateChecker.checkForUpdates()
                     }
-                    // Check if AI server is already running (e.g., started via launch.sh)
-                    aiServerManager.checkExistingServer()
                 }
                 .alert(
                     updateAlertTitle,
@@ -174,27 +177,35 @@ struct OpenDicomViewerApp: App {
             }
 
             CommandMenu("AI") {
+                // Enabled whenever there is an image: the engine starts on
+                // demand (asking once to enable local AI), and the AI
+                // inspector opens to show progress, the result or the error.
                 Button("Analyze Image") {
                     if let panel = model.activePanel {
-                        model.triggerAIAnalysis(for: panel)
+                        model.showAIInspector = true
+                        model.triggerPreferredAIAnalysis(for: panel)
                     }
                 }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
-                .disabled(!aiService.serverStatus.isReady || model.activePanel?.image == nil)
+                .disabled(model.activePanel?.image == nil)
 
                 Button("Detect Abnormalities") {
                     if let panel = model.activePanel {
-                        model.triggerAIAbnormalityDetection(for: panel)
+                        model.showAIInspector = true
+                        model.triggerPreferredAIAbnormalityDetection(for: panel)
                     }
                 }
-                .disabled(!aiService.serverStatus.isReady || model.activePanel?.image == nil)
+                .disabled(model.activePanel?.image == nil)
 
                 Button("Describe ROI") {
                     if let panel = model.activePanel {
-                        model.triggerAIDescribeLatestROI(for: panel)
+                        model.showAIInspector = true
+                        model.triggerPreferredAIDescribeROI(for: panel)
                     }
                 }
-                .disabled(!aiService.serverStatus.isReady || model.activePanel?.image == nil)
+                .disabled(model.activePanel?.image == nil
+                          || model.activePanel.map { model.latestROIForAIDescription(in: $0) == nil } ?? true)
+                .help("Describes the latest ROI Stats rectangle (S) on this slice")
 
                 Divider()
 
@@ -234,6 +245,7 @@ struct OpenDicomViewerApp: App {
                 Divider()
 
                 Button(aiServerManager.isServerRunning ? "Restart AI Server" : "Start AI Server") {
+                    model.showAIInspector = true
                     if aiServerManager.isServerRunning {
                         aiServerManager.restartServer()
                     } else {

@@ -33,7 +33,14 @@ import threading
 import time
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
+
+# Plain HTTP downloads rather than Xet. Xet buffers a file's chunks and writes
+# it late, so the size of the hub cache -- the only download progress the
+# viewer can show -- stood still for minutes; over HTTP the .incomplete file
+# grows as bytes arrive. Must be set before huggingface_hub is imported.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -59,7 +66,9 @@ MODEL_REVISION = os.environ.get(
     "ODV_MODEL_REVISION", "475b9088d29754a3379866cf5aeb6b41acd313c2"
 )
 MAX_IMAGE_SIZE = 1120  # max dimension before resize
-MAX_TOKENS = 2048
+# Every response is a short JSON object; 768 tokens is ample for it, and a
+# lower cap bounds how long a run that loops or rambles can hold the model.
+MAX_TOKENS = 768
 # Low temperature: the same slice should give the same answer twice.
 TEMPERATURE = 0.2
 TOP_P = 0.95
@@ -99,6 +108,11 @@ _model = None
 _processor = None
 _load_error: str | None = None
 _model_lock = threading.Lock()
+# "starting" until load_model runs, then "downloading" (snapshot not cached
+# yet) and "loading" (reading weights into memory). Reported by /health.
+_phase = "starting"
+# Total size of the pinned snapshot per the Hub, when it could be asked.
+_expected_bytes: int | None = None
 
 # ---------------------------------------------------------------------------
 # Prompt templates
@@ -288,24 +302,106 @@ class HealthResponse(BaseModel):
     pid: int
     memory_usage_mb: float | None = None
     error: str | None = None
+    # While loading: "starting" | "downloading" | "loading".
+    phase: str | None = None
+    # First-run download progress: bytes in the hub cache for this model, and
+    # the snapshot's total size when the Hub could be asked for it.
+    download_bytes: int | None = None
+    download_total_bytes: int | None = None
 
 
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
+def _hub_cache_dir() -> Path:
+    """The Hugging Face hub cache, honouring HF_HUB_CACHE / HF_HOME."""
+    try:
+        from huggingface_hub import constants
+
+        return Path(constants.HF_HUB_CACHE)
+    except Exception:  # noqa: BLE001 - only used for progress reporting
+        if os.environ.get("HF_HUB_CACHE"):
+            return Path(os.environ["HF_HUB_CACHE"]).expanduser()
+        home = os.environ.get("HF_HOME") or os.path.join(
+            os.path.expanduser("~"), ".cache", "huggingface")
+        return Path(home).expanduser() / "hub"
+
+
+def _repo_cache_dir() -> Path:
+    return _hub_cache_dir() / ("models--" + MODEL_ID.replace("/", "--"))
+
+
+def snapshot_present() -> bool:
+    """Whether the pinned snapshot is already in the hub cache.
+
+    Files are linked into the snapshot as each finishes, so an interrupted
+    download can leave config.json without the weights.
+    """
+    snapshot = _repo_cache_dir() / "snapshots" / MODEL_REVISION
+    if not (snapshot / "config.json").is_file():
+        return False
+    return any(path.is_file() for path in snapshot.glob("*.safetensors"))
+
+
+def downloaded_bytes() -> int:
+    """Bytes of this model in the hub cache, partial downloads included.
+
+    The hub stages each file as blobs/<hash>.incomplete while it downloads,
+    so the size of the blobs directory tracks the download as it happens.
+    """
+    blobs = _repo_cache_dir() / "blobs"
+    total = 0
+    try:
+        for entry in os.scandir(blobs):
+            try:
+                if entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    except OSError:
+        return 0
+    return total
+
+
+def _fetch_expected_bytes() -> None:
+    """Ask the Hub how large the pinned snapshot is (best effort)."""
+    global _expected_bytes
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(MODEL_ID, revision=MODEL_REVISION, files_metadata=True)
+        total = sum((sibling.size or 0) for sibling in (info.siblings or []))
+        if total > 0:
+            _expected_bytes = total
+    except Exception as exc:  # noqa: BLE001 - progress is a nicety
+        logger.info("Could not read the snapshot size from the Hub: %s", exc)
+
+
 def load_model():
-    """Load the Gemma 4 E4B model via mlx-vlm.
+    """Download (first run) and load the Gemma 4 E4B model via mlx-vlm.
 
     Runs on a background thread so the port is bound (and /health answers
-    "loading") while the ~4.5 GB first-run download is in progress. Failure is
-    recorded, not raised: the viewer polls /health and needs a reachable
-    server reporting `error` with a reason.
+    "loading", with download progress) while the ~5 GB first-run download is
+    in progress. Failure is recorded, not raised: the viewer polls /health and
+    needs a reachable server reporting `error` with a reason.
     """
-    global _model, _processor, _load_error
+    global _model, _processor, _load_error, _phase
 
     logger.info(f"Loading model: {MODEL_ID} @ {MODEL_REVISION}")
     start = time.time()
     try:
+        if not snapshot_present():
+            _phase = "downloading"
+            # The size query runs beside the download rather than before it.
+            threading.Thread(target=_fetch_expected_bytes, name="snapshot-size",
+                             daemon=True).start()
+            logger.info("Downloading %s @ %s to %s", MODEL_ID, MODEL_REVISION,
+                        _hub_cache_dir())
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(MODEL_ID, revision=MODEL_REVISION)
+            logger.info(f"Download finished in {time.time() - start:.1f}s")
+        _phase = "loading"
         from mlx_vlm import load
 
         model, processor = load(MODEL_ID, revision=MODEL_REVISION)
@@ -316,6 +412,7 @@ def load_model():
 
     _processor = processor
     _model = model
+    _phase = "ready"
     logger.info(f"Model loaded in {time.time() - start:.1f}s")
 
 
@@ -686,7 +783,11 @@ async def health():
     if _load_error is not None:
         return HealthResponse(status="error", error=_load_error, **common)
     if _model is None:
-        return HealthResponse(status="loading", **common)
+        progress = {}
+        if _phase == "downloading":
+            progress = {"download_bytes": downloaded_bytes(),
+                        "download_total_bytes": _expected_bytes}
+        return HealthResponse(status="loading", phase=_phase, **progress, **common)
     return HealthResponse(status="ready", memory_usage_mb=_get_memory_usage_mb(),
                           **common)
 

@@ -68,6 +68,12 @@ extension Notification.Name {
 extension DICOMModel {
 
     /// Run a plugin task against a panel and render whatever it returns.
+    ///
+    /// Results and errors land in the same panel state the built-in AI uses,
+    /// and the AI inspector is opened so they are seen. Like the built-in
+    /// path, results are bound to the slice they were computed on, replace the
+    /// previous results of this task kind on that slice, and are dropped if a
+    /// different study was loaded meanwhile.
     func runPluginTask(_ ref: PluginTaskRef, for panel: PanelState) {
         guard !panel.aiAnalysisInProgress else { return }
 
@@ -77,6 +83,9 @@ extension DICOMModel {
             panel.aiError = PluginError.unknownTask(ref).localizedDescription
             return
         }
+        // Slice tasks report into the AI inspector; volumetric ones (a SEG)
+        // into the derived-object list, which needs no inspector.
+        if task.inputs.contains(.slice2d) { showAIInspector = true }
 
         let invocation: PluginInvocation
         let staged: URL?
@@ -86,27 +95,50 @@ extension DICOMModel {
             panel.aiError = error.localizedDescription
             return
         }
+        guard AIService.shared.confirmDisclaimerIfNeeded() else {
+            if let staged { PluginSeriesStaging.discard(staged) }
+            return
+        }
+
+        let slice = panel.currentSlice
+        let seriesID = allSeries.indices.contains(panel.seriesIndex)
+            ? allSeries[panel.seriesIndex].id : nil
 
         panel.aiAnalysisInProgress = true
         panel.aiError = nil
 
         Task {
             defer { if let staged { PluginSeriesStaging.discard(staged) } }
+            let outcome: Result<PluginResult, Error>
             do {
-                let result = try await runtime.invoke(ref, invocation)
-                await MainActor.run {
-                    self.apply(result, from: task, to: panel)
-                    panel.aiAnalysisInProgress = false
-                    self.objectWillChange.send()
-                }
+                outcome = .success(try await runtime.invoke(ref, invocation))
             } catch {
-                await MainActor.run {
+                outcome = .failure(error)
+            }
+            await MainActor.run {
+                panel.aiAnalysisInProgress = false
+                defer { self.objectWillChange.send() }
+                // A slice result describes nothing on screen once the study
+                // changed. A SEG is a file about its own series and is kept.
+                if task.inputs.contains(.slice2d),
+                   !Self.sameStudy(seriesIndex: slice.seriesIndex, seriesID: seriesID,
+                                   in: self.allSeries.map(\.id)) {
+                    return
+                }
+                switch outcome {
+                case .success(let result):
+                    self.apply(result, from: task, to: panel, slice: slice)
+                case .failure(let error):
                     panel.aiError = error.localizedDescription
-                    panel.aiAnalysisInProgress = false
-                    self.objectWillChange.send()
                 }
             }
         }
+    }
+
+    /// Whether the series a run started on is still the one at that index.
+    nonisolated static func sameStudy(seriesIndex: Int, seriesID: String?, in ids: [String]) -> Bool {
+        guard let seriesID, ids.indices.contains(seriesIndex) else { return false }
+        return ids[seriesIndex] == seriesID
     }
 
     // MARK: - Inputs
@@ -145,13 +177,30 @@ extension DICOMModel {
                 // what the viewer knows and the model cannot infer reliably.
                 invocation.text = clinicalContext(for: panel)
 
-            case .roi, .points, .box:
+            case .roi:
+                // A menu-driven run describes the region the built-in
+                // Describe ROI uses: the latest ROI Stats rectangle on the
+                // slice on screen. Without one the adapter could only fail.
+                guard let roi = normalizedROIForAI(in: panel) else {
+                    throw PluginError.notReady(
+                        "Draw a region with the ROI Stats tool (S) on this slice first, then run \(task.label).")
+                }
+                invocation.roi = roi
+
+            case .points, .box:
                 // Prompt inputs are supplied by the interaction tools, which
                 // call the runtime directly with a populated invocation. A
                 // menu-driven run leaves them empty and the adapter decides
                 // whether it can proceed.
                 continue
             }
+        }
+
+        // The analysis mode chosen in the AI inspector applies to the plugin
+        // too, when the task offers that option and the value.
+        if let option = task.options?["mode"], option.type == .enum,
+           option.values?.contains(AIService.shared.selectedMode) == true {
+            invocation.options["mode"] = .string(AIService.shared.selectedMode)
         }
 
         return (invocation, staged)
@@ -192,30 +241,51 @@ extension DICOMModel {
     // MARK: - Outputs
 
     /// Render a result according to the kinds its task declared.
-    func apply(_ result: PluginResult, from task: PluginTask, to panel: PanelState) {
+    ///
+    /// `slice` binds the result to the slice it was computed on (nil leaves
+    /// annotations unbound, for callers without one). Boxes go through the
+    /// same sanitizer as the built-in AI, and a new result replaces the AI
+    /// annotations of the same kind already on that slice instead of piling
+    /// up beside them.
+    func apply(_ result: PluginResult, from task: PluginTask, to panel: PanelState,
+               slice: AnnotationSlice? = nil) {
         for kind in task.outputs {
             switch kind {
             case .text:
                 if let text = result.text, !text.isEmpty {
                     panel.aiDescription = text
+                    panel.aiDescriptionSlice = slice
                 }
 
             case .bbox:
+                panel.annotations.removeAll { annotation in
+                    guard annotation.isAI, annotation.slice == slice else { return false }
+                    switch annotation.type {
+                    case .aiStructure, .aiFinding: return true
+                    default: return false
+                    }
+                }
                 for box in result.bboxes {
                     // AI annotations are stored normalized; the annotation layer
                     // scales them to pixels at draw time, as it does for the
                     // boxes the Gemma path already produces.
-                    let rect = CGRect(x: box.x, y: box.y,
-                                      width: box.width, height: box.height)
+                    guard let rect = AIBoxSanitizer.normalizedRect(
+                        x: box.x, y: box.y, width: box.width, height: box.height) else { continue }
                     let type: AnnotationType = box.severity.map {
-                        .aiFinding(rect: rect, description: box.label, severity: $0)
+                        .aiFinding(rect: rect, description: box.label,
+                                   severity: AISeverity(parsing: $0).rawValue)
                     } ?? .aiStructure(rect: rect, label: box.label,
-                                      confidence: box.confidence)
-                    panel.annotations.append(Annotation(type: type, isAI: true))
+                                      confidence: AIBoxSanitizer.confidence(box.confidence))
+                    panel.annotations.append(Annotation(type: type, isAI: true, slice: slice))
                 }
                 panel.showAIAnnotations = true
 
             case .mask2d:
+                panel.annotations.removeAll { annotation in
+                    guard annotation.isAI, annotation.slice == slice else { return false }
+                    if case .aiMask = annotation.type { return true }
+                    return false
+                }
                 for mask in result.masks {
                     guard let bitmap = mask.decodeMask() else { continue }
                     let bounds = Self.maskBounds(bitmap,
@@ -228,7 +298,8 @@ extension DICOMModel {
                                       bounds: bounds,
                                       label: mask.label ?? "Segmentation",
                                       confidence: mask.confidence ?? 0),
-                        isAI: true))
+                        isAI: true,
+                        slice: slice))
                 }
                 panel.showAIAnnotations = true
 

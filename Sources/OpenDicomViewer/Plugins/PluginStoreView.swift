@@ -214,8 +214,19 @@ private struct PluginGroupCard: View {
 
             Spacer(minLength: 8)
 
-            if group.canStart {
-                runtimeControl
+            VStack(alignment: .trailing, spacing: 6) {
+                let pending = store.installAllCandidates(for: group.id)
+                if pending.count > 1 {
+                    Button("Install All (\(pending.count))") {
+                        Task { await store.installAll(group.id) }
+                    }
+                    .controlSize(.small)
+                    .help("Install every task of \(group.name) in one go. They share one environment and download.")
+                    .accessibilityLabel("Install all tasks of \(group.name)")
+                }
+                if group.canStart {
+                    runtimeControl
+                }
             }
         }
         .padding(12)
@@ -264,7 +275,7 @@ private struct PluginGroupCard: View {
 
     private var runtimeText: String {
         switch group.runtimeState {
-        case .stopped: return "Stopped"
+        case .stopped: return "Stopped — starts on first use"
         case .starting: return "Starting…"
         case .ready: return "Running"
         case .stopping: return "Stopping…"
