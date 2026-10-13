@@ -17,6 +17,14 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 PID_FILE="$SCRIPT_DIR/.server.pid"
 PORT=8741
 
+# The server rejects requests without this per-launch token. Export the same
+# ODV_AI_TOKEN when launching the viewer so it adopts this server.
+if [ -z "${ODV_AI_TOKEN:-}" ]; then
+    ODV_AI_TOKEN="$(openssl rand -hex 32)"
+fi
+export ODV_AI_TOKEN
+AUTH_HEADER="X-ODV-Token: $ODV_AI_TOKEN"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -101,10 +109,14 @@ fi
 # ---------------------------------------------------------------------------
 # Check if server is already running
 # ---------------------------------------------------------------------------
-if curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH_HEADER" "http://127.0.0.1:$PORT/health" 2>/dev/null || true)
+if [ "$STATUS" = "200" ]; then
     warn "Server already running on port $PORT."
-    curl -s "http://127.0.0.1:$PORT/health" | python3 -m json.tool
+    curl -s -H "$AUTH_HEADER" "http://127.0.0.1:$PORT/health" | python3 -m json.tool
     exit 0
+elif [ -n "$STATUS" ] && [ "$STATUS" != "000" ]; then
+    error "Port $PORT is in use by another process (or a server started with a different ODV_AI_TOKEN)."
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -127,11 +139,12 @@ info "Waiting for model to load..."
 MAX_WAIT=300
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
-    HEALTH=$(curl -s "http://127.0.0.1:$PORT/health" 2>/dev/null || echo "")
+    HEALTH=$(curl -s -H "$AUTH_HEADER" "http://127.0.0.1:$PORT/health" 2>/dev/null || echo "")
     if echo "$HEALTH" | grep -q '"ready"'; then
         echo ""
         info "Server ready!"
         echo "$HEALTH" | python3 -m json.tool
+        info "To let the viewer use this server, start it with ODV_AI_TOKEN=$ODV_AI_TOKEN"
         exit 0
     fi
 
@@ -149,4 +162,4 @@ done
 
 echo ""
 warn "Server did not become ready within ${MAX_WAIT}s. It may still be loading the model."
-info "Check: curl http://127.0.0.1:$PORT/health"
+info "Check: curl -H \"X-ODV-Token: $ODV_AI_TOKEN\" http://127.0.0.1:$PORT/health"

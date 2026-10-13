@@ -4482,167 +4482,192 @@ class DICOMModel: ObservableObject {
 
     private let aiService = AIService.shared
 
-    /// Trigger AI analysis for the active panel's current image
-    func triggerAIAnalysis(for panel: PanelState) {
-        guard let image = panel.image else { return }
-        guard !panel.aiAnalysisInProgress else { return }
+    private static let modalityTag = DicomTag(group: 0x0008, element: 0x0060)
+
+    /// Common gate for every built-in AI run: an image, no run already in
+    /// flight on this panel, a ready server, and the one-time disclaimer.
+    @MainActor
+    private func canStartAIRun(for panel: PanelState) -> Bool {
+        guard panel.image != nil, !panel.aiAnalysisInProgress else { return false }
         guard aiService.serverStatus.isReady else {
             panel.aiError = "AI server is not running. Start it from the AI menu."
-            return
+            return false
         }
+        return aiService.confirmDisclaimerIfNeeded()
+    }
 
-        // Get modality and series description from current series
-        let modality: String
-        let seriesDesc: String
-        if panel.seriesIndex >= 0 && panel.seriesIndex < allSeries.count {
-            let series = allSeries[panel.seriesIndex]
-            seriesDesc = series.seriesDescription
-            // Extract modality from DICOM tags if available
-            if let modalityTag = panel.tags.first(where: { $0.tag == DicomTag(group: 0x0008, element: 0x0060) }) {
-                modality = modalityTag.stringValue ?? "Unknown"
-            } else {
-                modality = "Unknown"
-            }
-        } else {
-            modality = "Unknown"
-            seriesDesc = ""
-        }
+    private func aiModality(for panel: PanelState) -> String {
+        panel.tags.first(where: { $0.tag == Self.modalityTag })?.stringValue ?? "Unknown"
+    }
+
+    private func aiSeriesID(for panel: PanelState) -> String? {
+        allSeries.indices.contains(panel.seriesIndex) ? allSeries[panel.seriesIndex].id : nil
+    }
+
+    /// Run one AI request against the panel's current slice and hand the
+    /// result to `apply` on the main actor, together with the slice it was
+    /// computed on.
+    ///
+    /// Results stay bound to that slice: if the user scrolls away during
+    /// inference they appear when the user scrolls back, never on the slice
+    /// now on screen. If a different study was loaded meanwhile they are
+    /// discarded.
+    @MainActor
+    private func runAI<R>(
+        for panel: PanelState,
+        request: @escaping (NSImage) async throws -> R,
+        apply: @escaping @MainActor (R, AnnotationSlice) -> Void
+    ) {
+        guard let image = panel.image else { return }
+        let slice = panel.currentSlice
+        let seriesID = aiSeriesID(for: panel)
 
         panel.aiAnalysisInProgress = true
         panel.aiError = nil
 
         Task {
+            let outcome: Result<R, Error>
             do {
-                let result = try await aiService.analyzeImage(
-                    image,
-                    modality: modality,
-                    seriesDescription: seriesDesc,
-                    windowCenter: panel.windowCenter,
-                    windowWidth: panel.windowWidth
-                )
-
-                await MainActor.run {
-                    // Convert AI bounding boxes to annotations
-                    for box in result.bounding_boxes {
-                        let rect = CGRect(x: box.x, y: box.y, width: box.width, height: box.height)
-                        let annotation = Annotation(
-                            type: .aiStructure(rect: rect, label: box.label, confidence: box.confidence),
-                            isAI: true
-                        )
-                        panel.annotations.append(annotation)
-                    }
-
-                    panel.aiDescription = result.description
-                    panel.aiAnalysisInProgress = false
-                    self.objectWillChange.send()
-                }
+                outcome = .success(try await request(image))
             } catch {
-                await MainActor.run {
+                outcome = .failure(error)
+            }
+            await MainActor.run {
+                panel.aiAnalysisInProgress = false
+                defer { self.objectWillChange.send() }
+                guard self.allSeries.indices.contains(slice.seriesIndex),
+                      self.allSeries[slice.seriesIndex].id == seriesID else {
+                    return  // the study changed under us; the result describes nothing on screen
+                }
+                switch outcome {
+                case .success(let result):
+                    apply(result, slice)
+                    panel.showAIAnnotations = true
+                case .failure(let error):
                     panel.aiError = error.localizedDescription
-                    panel.aiAnalysisInProgress = false
-                    self.objectWillChange.send()
                 }
             }
         }
+    }
+
+    /// Trigger AI analysis for the active panel's current image
+    @MainActor
+    func triggerAIAnalysis(for panel: PanelState) {
+        guard canStartAIRun(for: panel) else { return }
+
+        let modality = aiModality(for: panel)
+        let seriesDesc = allSeries.indices.contains(panel.seriesIndex)
+            ? allSeries[panel.seriesIndex].seriesDescription : ""
+        let windowCenter = panel.windowCenter
+        let windowWidth = panel.windowWidth
+        let service = aiService
+
+        runAI(for: panel, request: { image in
+            try await service.analyzeImage(
+                image,
+                modality: modality,
+                seriesDescription: seriesDesc,
+                windowCenter: windowCenter,
+                windowWidth: windowWidth
+            )
+        }, apply: { result, slice in
+            for box in result.bounding_boxes {
+                guard let rect = AIBoxSanitizer.normalizedRect(
+                    x: box.x, y: box.y, width: box.width, height: box.height) else { continue }
+                panel.annotations.append(Annotation(
+                    type: .aiStructure(rect: rect, label: box.label,
+                                       confidence: AIBoxSanitizer.confidence(box.confidence)),
+                    isAI: true,
+                    slice: slice
+                ))
+            }
+            var description = result.description
+            if !result.findings.isEmpty {
+                let bullets = result.findings.map { "• \($0)" }.joined(separator: "\n")
+                description = description.isEmpty ? bullets : "\(description)\n\n\(bullets)"
+            }
+            panel.aiDescription = description
+            panel.aiDescriptionSlice = slice
+        })
     }
 
     /// Trigger AI abnormality detection for the active panel
+    @MainActor
     func triggerAIAbnormalityDetection(for panel: PanelState) {
-        guard let image = panel.image else { return }
-        guard !panel.aiAnalysisInProgress else { return }
-        guard aiService.serverStatus.isReady else {
-            panel.aiError = "AI server is not running. Start it from the AI menu."
-            return
-        }
+        guard canStartAIRun(for: panel) else { return }
 
-        let modality: String
-        if panel.seriesIndex >= 0 && panel.seriesIndex < allSeries.count,
-           let modalityTag = panel.tags.first(where: { $0.tag == DicomTag(group: 0x0008, element: 0x0060) }) {
-            modality = modalityTag.stringValue ?? "Unknown"
-        } else {
-            modality = "Unknown"
-        }
+        let modality = aiModality(for: panel)
+        let service = aiService
 
-        panel.aiAnalysisInProgress = true
-        panel.aiError = nil
-
-        Task {
-            do {
-                let result = try await aiService.detectAbnormalities(image, modality: modality)
-
-                await MainActor.run {
-                    for region in result.regions {
-                        let rect = CGRect(x: region.x, y: region.y, width: region.width, height: region.height)
-                        let annotation = Annotation(
-                            type: .aiFinding(rect: rect, description: region.label, severity: region.severity),
-                            isAI: true
-                        )
-                        panel.annotations.append(annotation)
-                    }
-                    panel.aiAnalysisInProgress = false
-                    self.objectWillChange.send()
-                }
-            } catch {
-                await MainActor.run {
-                    panel.aiError = error.localizedDescription
-                    panel.aiAnalysisInProgress = false
-                    self.objectWillChange.send()
-                }
+        runAI(for: panel, request: { image in
+            try await service.detectAbnormalities(image, modality: modality)
+        }, apply: { result, slice in
+            for region in result.regions {
+                guard let rect = AIBoxSanitizer.normalizedRect(
+                    x: region.x, y: region.y, width: region.width, height: region.height) else { continue }
+                panel.annotations.append(Annotation(
+                    type: .aiFinding(rect: rect, description: region.label,
+                                     severity: AISeverity(parsing: region.severity).rawValue),
+                    isAI: true,
+                    slice: slice
+                ))
             }
-        }
+            panel.aiDescription = result.regions.isEmpty
+                ? "No abnormalities flagged by the model."
+                : "\(result.regions.count) region(s) flagged by the model for review."
+            panel.aiDescriptionSlice = slice
+        })
     }
 
-    /// Trigger AI ROI description for a selected region
-    func triggerAIDescribeROI(for panel: PanelState, roi: CGRect) {
-        guard let image = panel.image else { return }
-        guard !panel.aiAnalysisInProgress else { return }
-        guard aiService.serverStatus.isReady else {
-            panel.aiError = "AI server is not running. Start it from the AI menu."
+    /// The most recent ROI Stats rectangle on the panel's current slice, in
+    /// display-image pixel coordinates. This is the region "Describe ROI" sends.
+    func latestROIForAIDescription(in panel: PanelState) -> CGRect? {
+        for annotation in panel.visibleAnnotations.reversed() {
+            if case .roiStats(let rect, _, _, _, _, _) = annotation.type { return rect }
+        }
+        return nil
+    }
+
+    /// Describe the most recent ROI Stats rectangle on the current slice.
+    @MainActor
+    func triggerAIDescribeLatestROI(for panel: PanelState) {
+        guard let roi = latestROIForAIDescription(in: panel) else {
+            panel.aiError = "Draw a region with the ROI Stats tool (S) first, then choose Describe ROI."
             return
         }
+        triggerAIDescribeROI(for: panel, roi: roi)
+    }
 
+    /// Trigger AI ROI description for a selected region (display-image pixel coordinates).
+    /// The server outlines the region on the image it sends to the model.
+    @MainActor
+    func triggerAIDescribeROI(for panel: PanelState, roi: CGRect) {
         // Normalize ROI to 0-1 coordinates
         let imgW = max(1, panel.displayImageWidth)
         let imgH = max(1, panel.displayImageHeight)
-        let normalizedROI = CGRect(
-            x: roi.origin.x / imgW,
-            y: roi.origin.y / imgH,
-            width: roi.width / imgW,
-            height: roi.height / imgH
-        )
-
-        let context: String
-        if panel.seriesIndex >= 0 && panel.seriesIndex < allSeries.count {
-            context = allSeries[panel.seriesIndex].seriesDescription
-        } else {
-            context = ""
+        guard let normalizedROI = AIBoxSanitizer.normalizedRect(
+            x: roi.origin.x / imgW, y: roi.origin.y / imgH,
+            width: roi.width / imgW, height: roi.height / imgH) else {
+            panel.aiError = "The selected region is too small to describe."
+            return
         }
+        guard canStartAIRun(for: panel) else { return }
 
-        panel.aiAnalysisInProgress = true
-        panel.aiError = nil
+        let context = allSeries.indices.contains(panel.seriesIndex)
+            ? allSeries[panel.seriesIndex].seriesDescription : ""
+        let service = aiService
 
-        Task {
-            do {
-                let result = try await aiService.describeROI(image, roi: normalizedROI, context: context)
-
-                await MainActor.run {
-                    let annotation = Annotation(
-                        type: .aiROILabel(rect: normalizedROI, label: result.label,
-                                         description: result.description, confidence: result.confidence),
-                        isAI: true
-                    )
-                    panel.annotations.append(annotation)
-                    panel.aiAnalysisInProgress = false
-                    self.objectWillChange.send()
-                }
-            } catch {
-                await MainActor.run {
-                    panel.aiError = error.localizedDescription
-                    panel.aiAnalysisInProgress = false
-                    self.objectWillChange.send()
-                }
-            }
-        }
+        runAI(for: panel, request: { image in
+            try await service.describeROI(image, roi: normalizedROI, context: context)
+        }, apply: { result, slice in
+            panel.annotations.append(Annotation(
+                type: .aiROILabel(rect: normalizedROI, label: result.label,
+                                  description: result.description,
+                                  confidence: AIBoxSanitizer.confidence(result.confidence)),
+                isAI: true,
+                slice: slice
+            ))
+        })
     }
 }
 

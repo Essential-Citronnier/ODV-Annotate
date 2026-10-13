@@ -6,25 +6,39 @@ Runs Gemma 4 E4B (4-bit quantized) on Apple Silicon via MLX.
 
 Endpoints:
     GET  /health               - Server/model status
+    GET  /modes                - Available analysis modes
     POST /analyze              - Full image analysis with structure detection
     POST /describe-roi         - Describe a user-selected region
     POST /detect-abnormalities - Highlight potential abnormalities
+
+Every request must carry the per-launch token in the `X-ODV-Token` header and
+a Host header naming the loopback interface. The viewer generates the token on
+each launch and hands it over through the ODV_AI_TOKEN environment variable;
+the Host check defeats DNS-rebinding pages that would otherwise reach a
+loopback port from the browser.
 """
 
 import asyncio
 import base64
+import binascii
+import hmac
 import io
 import json
 import logging
+import math
+import os
 import re
+import secrets
+import threading
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from threading import Lock
+from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from PIL import Image
+from PIL import Image, ImageDraw, UnidentifiedImageError
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -36,15 +50,55 @@ logging.basicConfig(
 logger = logging.getLogger("mlx-server")
 
 # ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+MODEL_ID = "mlx-community/gemma-4-E4B-it-4bit"
+# Pinned so a re-upload of the weights cannot silently change model output.
+# Override with ODV_MODEL_REVISION (e.g. "main") to try a newer snapshot.
+MODEL_REVISION = os.environ.get(
+    "ODV_MODEL_REVISION", "475b9088d29754a3379866cf5aeb6b41acd313c2"
+)
+MAX_IMAGE_SIZE = 1120  # max dimension before resize
+MAX_TOKENS = 2048
+# Low temperature: the same slice should give the same answer twice.
+TEMPERATURE = 0.2
+TOP_P = 0.95
+# Base64 of a 1120x1120 RGBA PNG is well under this; anything larger is abuse.
+MAX_IMAGE_B64_CHARS = 40_000_000
+# Boxes thinner than this (normalized) are noise, not findings.
+MIN_BOX_SIZE = 0.002
+
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("ODV_AI_PORT", "8741"))
+TOKEN_HEADER = "x-odv-token"
+ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
+
+SEVERITIES = ("normal", "mild", "moderate", "severe", "critical")
+
+
+def _load_token() -> str:
+    token = os.environ.get("ODV_AI_TOKEN", "").strip()
+    if token:
+        return token
+    # Standalone use (launch.sh without a token): generate one so the server is
+    # never open. Printed once so a developer can pass it to curl or the app.
+    token = secrets.token_hex(32)
+    logger.warning(
+        "ODV_AI_TOKEN not set; generated a one-off token. "
+        "Export ODV_AI_TOKEN=%s for the viewer to adopt this server.", token
+    )
+    return token
+
+
+API_TOKEN = _load_token()
+
+# ---------------------------------------------------------------------------
 # Global model state
 # ---------------------------------------------------------------------------
 _model = None
 _processor = None
-_model_lock = Lock()
-
-MODEL_ID = "mlx-community/gemma-4-E4B-it-4bit"
-MAX_IMAGE_SIZE = 1120  # max dimension before resize
-MAX_TOKENS = 2048
+_load_error: str | None = None
+_model_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Prompt templates
@@ -66,7 +120,8 @@ Respond in this exact JSON format:
   ],
   "description": "Brief overall description of the image"
 }}
-Coordinates are normalized (0.0 to 1.0) relative to image dimensions."""
+Coordinates are normalized (0.0 to 1.0) relative to image dimensions: x and y are \
+the top-left corner, width and height are fractions of the image size."""
 
 ANALYZE_MODES: dict[str, dict] = {
     "clinical": {
@@ -123,9 +178,9 @@ Return multiple bounding_boxes, one per structure.""",
 DEFAULT_ANALYZE_MODE = "clinical"
 
 DESCRIBE_ROI_PROMPT_TEMPLATE = """\
-Describe the highlighted region in this medical image.
-The region of interest is marked at normalized coordinates: \
-x={x:.3f}, y={y:.3f}, width={w:.3f}, height={h:.3f}.
+Describe the region of interest outlined by the red rectangle in this medical image.
+Its normalized coordinates are x={x:.3f}, y={y:.3f}, width={w:.3f}, height={h:.3f}.
+Describe only what is inside the rectangle; the red outline itself is not part of the image.
 Context: {context}
 
 Respond in this exact JSON format:
@@ -218,7 +273,7 @@ class AbnormalityRegion(BaseModel):
     height: float
     label: str
     confidence: float = 0.0
-    severity: str = "normal"
+    severity: str = "unknown"
 
 
 class DetectAbnormalitiesResponse(BaseModel):
@@ -227,46 +282,298 @@ class DetectAbnormalitiesResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    status: str
+    status: str  # "loading" | "ready" | "error"
     model: str
+    revision: str
+    pid: int
     memory_usage_mb: float | None = None
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
 def load_model():
-    """Load the Gemma 4 E4B model via mlx-vlm."""
-    global _model, _processor
+    """Load the Gemma 4 E4B model via mlx-vlm.
 
-    logger.info(f"Loading model: {MODEL_ID}")
+    Runs on a background thread so the port is bound (and /health answers
+    "loading") while the ~4.5 GB first-run download is in progress. Failure is
+    recorded, not raised: the viewer polls /health and needs a reachable
+    server reporting `error` with a reason.
+    """
+    global _model, _processor, _load_error
+
+    logger.info(f"Loading model: {MODEL_ID} @ {MODEL_REVISION}")
     start = time.time()
+    try:
+        from mlx_vlm import load
 
-    from mlx_vlm import load
+        model, processor = load(MODEL_ID, revision=MODEL_REVISION)
+    except BaseException as exc:  # noqa: BLE001
+        _load_error = f"{type(exc).__name__}: {exc}"
+        logger.error("Model load failed: %s", _load_error)
+        return
 
-    _model, _processor = load(MODEL_ID)
+    _processor = processor
+    _model = model
+    logger.info(f"Model loaded in {time.time() - start:.1f}s")
 
-    elapsed = time.time() - start
-    logger.info(f"Model loaded in {elapsed:.1f}s")
+
+def _watch_parent():
+    """Exit when the viewer that launched us goes away.
+
+    The viewer terminates the server on quit, but a crash or force-quit skips
+    that; without this the ~5 GB process would outlive it.
+    """
+    try:
+        parent = int(os.environ.get("ODV_PARENT_PID", "0"))
+    except ValueError:
+        return
+    if parent <= 1:
+        return
+    while True:
+        if os.getppid() != parent:
+            logger.info("Parent process %d is gone; exiting.", parent)
+            os._exit(0)
+        time.sleep(2)
 
 
 # ---------------------------------------------------------------------------
-# Inference helpers
+# Input decoding
 # ---------------------------------------------------------------------------
 def _decode_image(base64_str: str) -> Image.Image:
-    """Decode a base64 PNG string to a PIL Image."""
-    image_bytes = base64.b64decode(base64_str)
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    """Decode a base64 PNG string to a PIL Image. Raises 400 on bad input."""
+    if len(base64_str) > MAX_IMAGE_B64_CHARS:
+        raise HTTPException(413, "Image payload too large")
+    try:
+        image_bytes = base64.b64decode(base64_str, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(400, "image is not valid base64") from None
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise HTTPException(400, f"image is not a readable image: {exc}") from None
 
     # Resize if too large (preserve aspect ratio)
     w, h = image.size
     if max(w, h) > MAX_IMAGE_SIZE:
         scale = MAX_IMAGE_SIZE / max(w, h)
-        image = image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        image = image.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                             Image.LANCZOS)
 
     return image
 
 
+def _mark_roi(image: Image.Image, roi: tuple[float, float, float, float]) -> Image.Image:
+    """Return a copy of `image` with the normalized ROI outlined in red."""
+    x, y, w, h = roi
+    width, height = image.size
+    marked = image.copy()
+    draw = ImageDraw.Draw(marked)
+    line = max(2, round(max(width, height) / 300))
+    draw.rectangle(
+        [x * width, y * height, (x + w) * width, (y + h) * height],
+        outline=(255, 0, 0), width=line,
+    )
+    return marked
+
+
+# ---------------------------------------------------------------------------
+# Model output coercion
+# ---------------------------------------------------------------------------
+def _extract_json(text: str) -> Any:
+    """Recover a JSON value (object or array) from model output, or None."""
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    match = re.search(r"```(?:json)?\s*([\[{].*?[\]}])\s*```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    for pattern in (r"\{.*\}", r"\[.*\]"):
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+    return None
+
+
+def _as_object(parsed: Any, list_key: str) -> dict | None:
+    """Normalize parsed model output to a dict.
+
+    A bare array is read as the response's primary list (the model sometimes
+    drops the wrapper object); scalars are unusable.
+    """
+    if isinstance(parsed, Mapping):
+        return dict(parsed)
+    if isinstance(parsed, list):
+        return {list_key: parsed}
+    return None
+
+
+def _finite(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _coerce_confidence(value: Any) -> float:
+    """Confidence as a float in [0, 1]; accepts "85%" and 0-100 scales."""
+    if isinstance(value, str):
+        value = value.strip().rstrip("%")
+    number = _finite(value)
+    if number is None:
+        return 0.0
+    if 1.0 < number <= 100.0:
+        number /= 100.0
+    return min(max(number, 0.0), 1.0)
+
+
+def _coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Mapping):
+        for key in ("finding", "label", "description", "text", "name"):
+            if isinstance(value.get(key), str):
+                return value[key].strip()
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def _coerce_findings(value: Any) -> list[str]:
+    items = value if isinstance(value, list) else [value] if value else []
+    findings = [_coerce_text(item) for item in items]
+    return [f for f in findings if f]
+
+
+def _coerce_severity(value: Any) -> str:
+    """Lower-cased known severity, or "unknown" -- never silently "normal"."""
+    severity = _coerce_text(value).lower()
+    return severity if severity in SEVERITIES else "unknown"
+
+
+def _raw_corners(item: Mapping) -> tuple[float, float, float, float] | None:
+    """(x0, y0, x1, y1) in whatever unit the model used, or None."""
+    box_2d = item.get("box_2d")
+    if isinstance(box_2d, (list, tuple)) and len(box_2d) == 4:
+        # Gemma's native grounding format: [ymin, xmin, ymax, xmax].
+        values = [_finite(v) for v in box_2d]
+        if any(v is None for v in values):
+            return None
+        y0, x0, y1, x1 = values
+        return x0, y0, x1, y1
+
+    x = _finite(item.get("x"))
+    y = _finite(item.get("y"))
+    w = _finite(item.get("width", item.get("w")))
+    h = _finite(item.get("height", item.get("h")))
+    if None in (x, y, w, h):
+        return None
+    return x, y, x + w, y + h
+
+
+def _detect_scale(corners: list[tuple[float, float, float, float]],
+                  image_size: tuple[int, int] | None) -> tuple[float, float] | None:
+    """Divisors that map the model's units onto [0, 1].
+
+    The prompt asks for normalized coordinates, but the model does not always
+    comply. Decided once per response, from the largest coordinate:
+      * <= 2        -> already normalized, overshooting the edge (clamped
+                       below). A 0-1000 or pixel box this small would be
+                       sub-pixel noise anyway.
+      * <= 1000     -> Gemma's native 0-1000 grid. Pixel units are
+                       indistinguishable here unless they exceed 1000, and the
+                       model's trained convention is the likelier explanation.
+      * otherwise   -> pixel units of the image the model saw, if they fit it.
+    Returns None when no reading fits, so the caller drops every box rather
+    than drawing them in the wrong place.
+    """
+    if not corners:
+        return (1.0, 1.0)
+    largest = max(max(abs(v) for v in c) for c in corners)
+    if largest <= 2.0:
+        return (1.0, 1.0)
+    if largest <= 1000.0 + 1e-3:
+        return (1000.0, 1000.0)
+    if image_size is not None:
+        width, height = image_size
+        fits = all(max(c[0], c[2]) <= width * 1.02 and max(c[1], c[3]) <= height * 1.02
+                   for c in corners)
+        if fits:
+            return (float(width), float(height))
+    return None
+
+
+def _coerce_boxes(raw: Any, image_size: tuple[int, int] | None = None,
+                  with_severity: bool = False) -> list[dict]:
+    """Keep only well-formed boxes, normalized and clamped to [0, 1].
+
+    A malformed box among several good ones is dropped rather than failing the
+    request: the model is the unreliable component here, and a partial overlay
+    is more useful than an error.
+    """
+    items = [item for item in (raw if isinstance(raw, list) else [])
+             if isinstance(item, Mapping)]
+    parsed = [(item, _raw_corners(item)) for item in items]
+    parsed = [(item, c) for item, c in parsed if c is not None]
+
+    scale = _detect_scale([c for _, c in parsed], image_size)
+    if scale is None:
+        return []
+    sx, sy = scale
+
+    boxes: list[dict] = []
+    for item, (x0, y0, x1, y1) in parsed:
+        # Order the corners (negative width/height) then clamp to the image.
+        left = min(max(min(x0, x1) / sx, 0.0), 1.0)
+        right = min(max(max(x0, x1) / sx, 0.0), 1.0)
+        top = min(max(min(y0, y1) / sy, 0.0), 1.0)
+        bottom = min(max(max(y0, y1) / sy, 0.0), 1.0)
+        if right - left < MIN_BOX_SIZE or bottom - top < MIN_BOX_SIZE:
+            continue
+        box = {
+            "x": left,
+            "y": top,
+            "width": right - left,
+            "height": bottom - top,
+            "label": _coerce_text(item.get("label")),
+            "confidence": _coerce_confidence(item.get("confidence")),
+        }
+        if with_severity:
+            box["severity"] = _coerce_severity(item.get("severity"))
+        boxes.append(box)
+    return boxes
+
+
+def _coerce_roi(roi: Mapping) -> tuple[float, float, float, float]:
+    """Validate a requested ROI; raises 400 when it is not a usable region."""
+    corners = _raw_corners(roi)
+    if corners is None:
+        raise HTTPException(400, "roi needs numeric x, y, width, height")
+    boxes = _coerce_boxes([{"x": corners[0], "y": corners[1],
+                            "width": corners[2] - corners[0],
+                            "height": corners[3] - corners[1]}])
+    if not boxes or max(abs(v) for v in corners) > 1.0 + 1e-3:
+        raise HTTPException(400, "roi must be a non-empty normalized (0-1) rectangle")
+    b = boxes[0]
+    return b["x"], b["y"], b["width"], b["height"]
+
+
+# ---------------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------------
 def _generate(image: Image.Image, prompt: str) -> str:
     """Run inference with the model. Thread-safe via lock."""
     from mlx_vlm import generate
@@ -293,46 +600,29 @@ def _generate(image: Image.Image, prompt: str) -> str:
             formatted_prompt,
             image=[image],
             max_tokens=MAX_TOKENS,
-            temperature=1.0,
-            top_p=0.95,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
         )
 
     return response.text if hasattr(response, 'text') else str(response)
 
 
-def _extract_json(text: str) -> dict | None:
-    """Try to extract a JSON object from model output."""
-    # Try direct parse
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+async def _run_generate(image: Image.Image, prompt: str) -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _generate, image, prompt)
 
-    # Try to find JSON block in markdown code fences
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
 
-    # Try to find any JSON object
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-
-    return None
+def _require_model():
+    if _model is None:
+        raise HTTPException(503, _load_error or "Model not loaded yet")
 
 
 def _get_memory_usage_mb() -> float | None:
     """Get current MLX memory usage in MB."""
     try:
         import mlx.core as mx
-        peak = mx.metal.get_peak_memory() / (1024 * 1024)
-        return round(peak, 1)
+        getter = getattr(mx, "get_peak_memory", None) or mx.metal.get_peak_memory
+        return round(getter() / (1024 * 1024), 1)
     except Exception:
         return None
 
@@ -342,8 +632,9 @@ def _get_memory_usage_mb() -> float | None:
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load model on startup."""
-    load_model()
+    """Start the model load in the background so the port binds immediately."""
+    threading.Thread(target=load_model, name="model-load", daemon=True).start()
+    threading.Thread(target=_watch_parent, name="parent-watch", daemon=True).start()
     yield
     logger.info("Server shutting down")
 
@@ -354,16 +645,35 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ODV-Annotate MLX Server",
     description="Local Gemma 4 E4B inference for DICOM annotation",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # localhost only via bind address
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+def _host_allowed(host_header: str | None) -> bool:
+    if not host_header:
+        return False
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        return False  # IPv6 literal: we only bind IPv4 loopback
+    return host.rsplit(":", 1)[0] in ALLOWED_HOSTS
+
+
+@app.middleware("http")
+async def require_local_caller(request: Request, call_next):
+    """Reject requests not addressed to loopback or lacking the launch token.
+
+    No CORS headers are ever sent, so browsers cannot read responses either.
+    """
+    if not _host_allowed(request.headers.get("host")):
+        return JSONResponse({"detail": "Forbidden host"}, status_code=403)
+    supplied = request.headers.get(TOKEN_HEADER, "")
+    if not hmac.compare_digest(supplied.encode(), API_TOKEN.encode()):
+        return JSONResponse({"detail": "Missing or invalid token"}, status_code=401)
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -372,13 +682,13 @@ app.add_middleware(
 @app.get("/health", response_model=HealthResponse)
 async def health():
     """Check server and model status."""
+    common = {"model": MODEL_ID, "revision": MODEL_REVISION, "pid": os.getpid()}
+    if _load_error is not None:
+        return HealthResponse(status="error", error=_load_error, **common)
     if _model is None:
-        return HealthResponse(status="loading", model=MODEL_ID)
-    return HealthResponse(
-        status="ready",
-        model=MODEL_ID,
-        memory_usage_mb=_get_memory_usage_mb(),
-    )
+        return HealthResponse(status="loading", **common)
+    return HealthResponse(status="ready", memory_usage_mb=_get_memory_usage_mb(),
+                          **common)
 
 
 @app.get("/modes")
@@ -393,11 +703,47 @@ async def list_modes():
     }
 
 
+def build_analyze_response(raw: str, image_size: tuple[int, int]) -> AnalyzeResponse:
+    parsed = _as_object(_extract_json(raw), "bounding_boxes")
+    if parsed is None:
+        return AnalyzeResponse(description=raw.strip(), raw_response=raw)
+    return AnalyzeResponse(
+        findings=_coerce_findings(parsed.get("findings")),
+        bounding_boxes=[BoundingBox(**b) for b in
+                        _coerce_boxes(parsed.get("bounding_boxes"), image_size)],
+        description=_coerce_text(parsed.get("description")),
+        raw_response=raw,
+    )
+
+
+def build_roi_response(raw: str) -> ROIDescription:
+    parsed = _as_object(_extract_json(raw), "items")
+    if parsed is None or "items" in parsed:
+        return ROIDescription(description=raw.strip(), raw_response=raw)
+    return ROIDescription(
+        label=_coerce_text(parsed.get("label")),
+        description=_coerce_text(parsed.get("description")),
+        confidence=_coerce_confidence(parsed.get("confidence")),
+        raw_response=raw,
+    )
+
+
+def build_abnormality_response(raw: str,
+                               image_size: tuple[int, int]) -> DetectAbnormalitiesResponse:
+    parsed = _as_object(_extract_json(raw), "regions")
+    if parsed is None:
+        return DetectAbnormalitiesResponse(raw_response=raw)
+    regions = _coerce_boxes(parsed.get("regions"), image_size, with_severity=True)
+    return DetectAbnormalitiesResponse(
+        regions=[AbnormalityRegion(**r) for r in regions],
+        raw_response=raw,
+    )
+
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest):
     """Analyze a full DICOM image for anatomical structures and findings."""
-    if _model is None:
-        raise HTTPException(503, "Model not loaded yet")
+    _require_model()
 
     mode_key = request.mode if request.mode in ANALYZE_MODES else DEFAULT_ANALYZE_MODE
     mode = ANALYZE_MODES[mode_key]
@@ -411,71 +757,31 @@ async def analyze(request: AnalyzeRequest):
         json_format=ANALYZE_JSON_FORMAT,
     )
 
-    loop = asyncio.get_event_loop()
-    raw = await loop.run_in_executor(None, _generate, image, prompt)
-
-    parsed = _extract_json(raw)
-    if parsed is None:
-        return AnalyzeResponse(
-            description=raw.strip(),
-            raw_response=raw,
-        )
-
-    boxes = []
-    for b in parsed.get("bounding_boxes", []):
-        try:
-            boxes.append(BoundingBox(**b))
-        except Exception:
-            continue
-
-    return AnalyzeResponse(
-        findings=parsed.get("findings", []),
-        bounding_boxes=boxes,
-        description=parsed.get("description", ""),
-        raw_response=raw,
-    )
+    raw = await _run_generate(image, prompt)
+    return build_analyze_response(raw, image.size)
 
 
 @app.post("/describe-roi", response_model=ROIDescription)
 async def describe_roi(request: DescribeROIRequest):
     """Describe a user-selected region of interest."""
-    if _model is None:
-        raise HTTPException(503, "Model not loaded yet")
+    _require_model()
 
-    image = _decode_image(request.image)
-    roi = request.roi
+    roi = _coerce_roi(request.roi)
+    image = _mark_roi(_decode_image(request.image), roi)
 
     prompt = DESCRIBE_ROI_PROMPT_TEMPLATE.format(
-        x=roi.get("x", 0),
-        y=roi.get("y", 0),
-        w=roi.get("width", 0),
-        h=roi.get("height", 0),
-        context=request.context,
+        x=roi[0], y=roi[1], w=roi[2], h=roi[3],
+        context=request.context or "none",
     )
 
-    loop = asyncio.get_event_loop()
-    raw = await loop.run_in_executor(None, _generate, image, prompt)
-
-    parsed = _extract_json(raw)
-    if parsed is None:
-        return ROIDescription(
-            description=raw.strip(),
-            raw_response=raw,
-        )
-
-    return ROIDescription(
-        label=parsed.get("label", ""),
-        description=parsed.get("description", ""),
-        confidence=parsed.get("confidence", 0.0),
-        raw_response=raw,
-    )
+    raw = await _run_generate(image, prompt)
+    return build_roi_response(raw)
 
 
 @app.post("/detect-abnormalities", response_model=DetectAbnormalitiesResponse)
 async def detect_abnormalities(request: DetectAbnormalitiesRequest):
     """Detect potential abnormalities in a DICOM image."""
-    if _model is None:
-        raise HTTPException(503, "Model not loaded yet")
+    _require_model()
 
     image = _decode_image(request.image)
 
@@ -483,24 +789,8 @@ async def detect_abnormalities(request: DetectAbnormalitiesRequest):
         modality=request.modality,
     )
 
-    loop = asyncio.get_event_loop()
-    raw = await loop.run_in_executor(None, _generate, image, prompt)
-
-    parsed = _extract_json(raw)
-    if parsed is None:
-        return DetectAbnormalitiesResponse(raw_response=raw)
-
-    regions = []
-    for r in parsed.get("regions", []):
-        try:
-            regions.append(AbnormalityRegion(**r))
-        except Exception:
-            continue
-
-    return DetectAbnormalitiesResponse(
-        regions=regions,
-        raw_response=raw,
-    )
+    raw = await _run_generate(image, prompt)
+    return build_abnormality_response(raw, image.size)
 
 
 # ---------------------------------------------------------------------------
@@ -510,9 +800,9 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        "server:app",
-        host="127.0.0.1",
-        port=8741,
+        app,
+        host=HOST,
+        port=PORT,
         log_level="info",
         workers=1,  # single worker — MLX model is not fork-safe
     )

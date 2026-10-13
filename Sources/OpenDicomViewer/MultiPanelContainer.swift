@@ -2081,15 +2081,22 @@ struct AIInspectorView: View {
 
     private var panel: PanelState? { model.activePanel }
 
+    /// AI annotations computed on the slice currently on screen.
     private var aiAnnotations: [Annotation] {
-        panel?.annotations.filter { $0.isAI } ?? []
+        panel?.visibleAnnotations.filter { $0.isAI } ?? []
+    }
+
+    /// AI annotations bound to other slices of this panel.
+    private var offSliceAIAnnotationCount: Int {
+        guard let panel else { return 0 }
+        return panel.annotations.filter { $0.isAI }.count - aiAnnotations.count
     }
 
     private var statusText: String {
         switch aiServerManager.setupState {
         case .notSetup:    return "Setup required"
         case .installingDeps: return "Setting up…"
-        case .failed:      return "Setup failed"
+        case .failed:      return "Failed"
         default: break
         }
         if panel?.aiAnalysisInProgress == true { return "Analyzing…" }
@@ -2181,6 +2188,19 @@ struct AIInspectorView: View {
                     .disabled(panel?.image == nil || panel?.aiAnalysisInProgress == true || !aiService.serverStatus.isReady)
                     .help("⌘G")
 
+                    Button(action: {
+                        if let panel = panel {
+                            model.triggerAIDescribeLatestROI(for: panel)
+                        }
+                    }) {
+                        Label("Describe ROI", systemImage: "text.viewfinder")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(panel?.image == nil || panel?.aiAnalysisInProgress == true || !aiService.serverStatus.isReady)
+                    .help("Describe the most recent ROI Stats rectangle (S) on this slice")
+
                     Spacer()
 
                     Button(action: {
@@ -2192,10 +2212,17 @@ struct AIInspectorView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .disabled(aiAnnotations.isEmpty && panel?.aiDescription == nil)
+                    .disabled(panel?.annotations.contains(where: { $0.isAI }) != true && panel?.aiDescription == nil)
                 }
                 .padding(.horizontal)
-                .padding(.vertical, 8)
+                .padding(.top, 8)
+
+                Text("Research use only — not for diagnosis. Findings and confidence values are model-generated and unvalidated.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
             }
         }
     }
@@ -2233,7 +2260,7 @@ struct AIInspectorView: View {
                 }
                 .padding()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if aiAnnotations.isEmpty && panel.aiDescription == nil {
+            } else if aiAnnotations.isEmpty && panel.visibleAIDescription == nil {
                 // Server is starting/loading — may be downloading model on first run
                 if aiService.serverStatus == .starting || aiServerManager.isFirstRun {
                     AIModelLoadingView()
@@ -2241,13 +2268,17 @@ struct AIInspectorView: View {
                     ContentUnavailableView {
                         Label("No Analysis", systemImage: "brain")
                     } description: {
-                        Text("Press G or ⌘G to analyze the current image")
+                        if offSliceAIAnnotationCount > 0 {
+                            Text("AI results on this panel belong to other slices. Press G or ⌘G to analyze this one.")
+                        } else {
+                            Text("Press G or ⌘G to analyze the current image")
+                        }
                     }
                 }
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
-                        if let desc = panel.aiDescription, !desc.isEmpty {
+                        if let desc = panel.visibleAIDescription, !desc.isEmpty {
                             Text(desc)
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(.white)
@@ -2396,20 +2427,35 @@ private struct AISetupFailedView: View {
                 .font(.system(size: 30))
                 .foregroundStyle(.red)
 
-            Text("Setup Failed")
+            Text(manager.isSetupComplete ? "AI Server Failed" : "Setup Failed")
                 .font(.headline)
 
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 8)
-
-            Button(action: { manager.retrySetup() }) {
-                Label("Retry Setup", systemImage: "arrow.clockwise")
+            ScrollView {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 8)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .frame(maxHeight: 160)
+
+            HStack {
+                Button(action: { manager.retrySetup() }) {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                if manager.isSetupComplete {
+                    Button(action: { manager.reinstallEnvironment() }) {
+                        Label("Reinstall", systemImage: "arrow.down.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Recreate the Python environment and reinstall dependencies")
+                }
+            }
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2417,31 +2463,34 @@ private struct AISetupFailedView: View {
 }
 
 /// Shown when the venv is ready but the server process is not running.
-/// Auto-starts the server on appear if it was never manually stopped.
+/// Deliberately does not auto-start: launch and setup already start the
+/// server, and restarting from here would loop on a server that keeps dying.
 private struct AIServerStoppedView: View {
     let isFirstRun: Bool
     @ObservedObject private var manager = AIServerManager.shared
+    @ObservedObject private var aiService = AIService.shared
 
     var body: some View {
         VStack(spacing: 14) {
-            ProgressView()
-                .tint(.yellow)
-                .scaleEffect(1.2)
+            Image(systemName: "pause.circle")
+                .font(.system(size: 30))
+                .foregroundStyle(.secondary)
 
-            Text("Starting AI Server…")
+            Text("AI Server Stopped")
                 .font(.headline)
 
-            if isFirstRun {
-                Text("First launch: downloading Gemma 4 (~4.5 GB) from Hugging Face.\nKeep the app open — this takes 10–30 minutes.")
+            if case .error(let message) = aiService.serverStatus {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 8)
+            } else if isFirstRun {
+                Text("First launch downloads Gemma 4 (~4.5 GB) from Hugging Face.\nKeep the app open — this takes 10–30 minutes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 8)
-            } else {
-                Text("Loading model into memory…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
             }
 
             Button(action: { manager.startServer() }) {
@@ -2451,16 +2500,9 @@ private struct AIServerStoppedView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)
             .tint(.yellow)
-            .opacity(0)  // Hidden — auto-start already triggered; shown only as fallback
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear {
-            // Auto-start if not already starting/running
-            if !manager.isServerRunning {
-                manager.startServer()
-            }
-        }
     }
 }
 
@@ -2566,19 +2608,14 @@ struct AIAnnotationRow: View {
                 .padding(.vertical, 2)
                 .background(annotationColor.opacity(0.15))
                 .cornerRadius(4)
+                .help("Model-generated confidence — not a calibrated probability")
         }
     }
 
     private var annotationColor: Color {
         switch annotation.type {
         case .aiStructure: return .yellow
-        case .aiFinding(_, _, let severity):
-            switch severity.lowercased() {
-            case "severe": return .red
-            case "moderate": return .orange
-            case "mild": return .yellow
-            default: return .green
-            }
+        case .aiFinding(_, _, let severity): return AISeverity(parsing: severity).color
         case .aiROILabel: return .blue
         default: return .gray
         }
@@ -2587,7 +2624,7 @@ struct AIAnnotationRow: View {
     private var annotationLabel: String {
         switch annotation.type {
         case .aiStructure(_, let label, _): return label
-        case .aiFinding(_, _, let severity): return severity.capitalized
+        case .aiFinding(_, _, let severity): return AISeverity(parsing: severity).displayName
         case .aiROILabel(_, let label, _, _): return label
         default: return ""
         }
@@ -2604,8 +2641,8 @@ struct AIAnnotationRow: View {
 
     private var confidenceText: String {
         switch annotation.type {
-        case .aiStructure(_, _, let confidence): return "\(Int(confidence * 100))%"
-        case .aiROILabel(_, _, _, let confidence): return "\(Int(confidence * 100))%"
+        case .aiStructure(_, _, let confidence): return "model \(Int(confidence * 100))%"
+        case .aiROILabel(_, _, _, let confidence): return "model \(Int(confidence * 100))%"
         default: return ""
         }
     }
@@ -2618,8 +2655,8 @@ struct AnnotationOverlay: View {
 
     var body: some View {
         GeometryReader { geo in
-            // Finalized annotations
-            ForEach(panel.annotations) { annotation in
+            // Finalized annotations (AI results only on the slice they were computed on)
+            ForEach(panel.visibleAnnotations) { annotation in
                 annotationView(for: annotation, viewSize: geo.size)
             }
 
@@ -2833,7 +2870,7 @@ struct AnnotationOverlay: View {
                             .padding(.vertical, 1)
                             .background(Color.yellow)
                             .cornerRadius(2)
-                        Text("\(label) (\(Int(confidence * 100))%)")
+                        Text("\(label) (model \(Int(confidence * 100))%)")
                             .font(.system(.caption2, design: .monospaced))
                             .foregroundStyle(.yellow)
                     }
@@ -2847,7 +2884,8 @@ struct AnnotationOverlay: View {
         case .aiFinding(let rect, let description, let severity):
             if panel.showAIAnnotations {
                 let sr = aiScreenRect(rect, viewSize: viewSize)
-                let severityColor = aiFindingSeverityColor(severity)
+                let parsedSeverity = AISeverity(parsing: severity)
+                let severityColor = parsedSeverity.color
                 let isSelected = panel.selectedAnnotationID == annotation.id
                 ZStack {
                     Rectangle()
@@ -2867,7 +2905,7 @@ struct AnnotationOverlay: View {
                             .padding(.vertical, 1)
                             .background(severityColor)
                             .cornerRadius(2)
-                        Text(severity.uppercased())
+                        Text(parsedSeverity.rawValue.uppercased())
                             .font(.system(.caption2, weight: .bold))
                             .foregroundStyle(severityColor)
                         Text(description)
@@ -2907,7 +2945,7 @@ struct AnnotationOverlay: View {
                                 .padding(.vertical, 1)
                                 .background(Color.blue)
                                 .cornerRadius(2)
-                            Text("\(label) (\(Int(confidence * 100))%)")
+                            Text("\(label) (model \(Int(confidence * 100))%)")
                                 .font(.system(.caption2, weight: .semibold))
                                 .foregroundStyle(.blue)
                         }
@@ -2944,15 +2982,6 @@ struct AnnotationOverlay: View {
             width: abs(bottomRight.x - topLeft.x),
             height: abs(bottomRight.y - topLeft.y)
         )
-    }
-
-    private func aiFindingSeverityColor(_ severity: String) -> Color {
-        switch severity.lowercased() {
-        case "severe": return .red
-        case "moderate": return .orange
-        case "mild": return .yellow
-        default: return .green
-        }
     }
 
     private func pixelToScreen(_ pixel: CGPoint, viewSize: CGSize) -> CGPoint {

@@ -148,10 +148,30 @@ enum AnnotationType {
                 label: String, confidence: Double)
 }
 
+/// Identifies the exact pixels a panel displays, so an AI result computed on
+/// one slice is never drawn over another.
+struct AnnotationSlice: Equatable, Hashable {
+    let seriesIndex: Int
+    let panelMode: PanelMode
+    /// Image index (2D), voxel index (MPR) or slab centre (MIP).
+    let index: Int
+    /// Frame within a multi-frame image; 0 otherwise.
+    let frame: Int
+    /// MIP slab thickness; 0 for other modes.
+    let slab: Int
+}
+
 struct Annotation: Identifiable {
     let id = UUID()
     let type: AnnotationType
     var isAI: Bool = false
+    /// The slice this annotation was computed on. nil means it is not bound
+    /// to a slice and shows wherever the panel is (manual measurements).
+    var slice: AnnotationSlice? = nil
+
+    func isVisible(on current: AnnotationSlice) -> Bool {
+        slice == nil || slice == current
+    }
 }
 
 // MARK: - Panel State
@@ -293,6 +313,8 @@ class PanelState: ObservableObject, Identifiable {
     @Published var aiAnalysisInProgress: Bool = false
     @Published var aiError: String? = nil
     @Published var aiDescription: String? = nil
+    /// The slice `aiDescription` was computed on.
+    @Published var aiDescriptionSlice: AnnotationSlice? = nil
     @Published var showAIAnnotations: Bool = false
     /// Scalar measurements returned by a plugin task declaring `metrics`.
     @Published var pluginMetrics: [String: Double] = [:]
@@ -368,14 +390,49 @@ class PanelState: ObservableObject, Identifiable {
         aiAnalysisInProgress = false
         aiError = nil
         aiDescription = nil
+        aiDescriptionSlice = nil
         showAIAnnotations = false
         selectedAnnotationID = nil
+    }
+
+    /// The slice currently on screen, for binding and filtering AI annotations.
+    var currentSlice: AnnotationSlice {
+        switch panelMode {
+        case .slice2D:
+            return AnnotationSlice(seriesIndex: seriesIndex, panelMode: panelMode,
+                                   index: imageIndex,
+                                   frame: isMultiFrame ? currentFrameIndex : 0, slab: 0)
+        case .mprSagittal, .mprCoronal:
+            return AnnotationSlice(seriesIndex: seriesIndex, panelMode: panelMode,
+                                   index: mprSliceIndex, frame: 0, slab: 0)
+        case .mip:
+            return AnnotationSlice(seriesIndex: seriesIndex, panelMode: panelMode,
+                                   index: mipSlabPosition, frame: 0, slab: mipSlabThickness)
+        }
+    }
+
+    /// Annotations to draw on the slice currently displayed.
+    /// During cine playback `currentFrameIndex` is not updated per frame, so
+    /// slice-bound annotations are hidden rather than shown on the wrong frame.
+    var visibleAnnotations: [Annotation] {
+        let current = currentSlice
+        return annotations.filter {
+            $0.slice == nil || (!isPlaying && $0.isVisible(on: current))
+        }
+    }
+
+    /// The AI description, if it belongs to the slice on screen.
+    var visibleAIDescription: String? {
+        guard let description = aiDescription,
+              aiDescriptionSlice == nil || aiDescriptionSlice == currentSlice else { return nil }
+        return description
     }
 
     /// Remove only AI-generated annotations
     func clearAIAnnotations() {
         annotations.removeAll(where: { $0.isAI })
         aiDescription = nil
+        aiDescriptionSlice = nil
         aiError = nil
     }
 }
