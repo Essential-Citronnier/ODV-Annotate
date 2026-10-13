@@ -154,6 +154,14 @@ struct PanelView: View {
                         }
                         Spacer()
                     }
+                    // Non-blocking notice about the volume behind MPR/MIP
+                    if panel.panelMode != .slice2D && !panel.volumeWarnings.isEmpty {
+                        HStack {
+                            VolumeWarningBadge(warnings: panel.volumeWarnings)
+                                .padding(.horizontal, 6)
+                            Spacer()
+                        }
+                    }
                     Spacer()
                 }
                 .zIndex(5)
@@ -347,6 +355,49 @@ struct PanelView: View {
             }
         )
         .clipped()
+    }
+}
+
+// MARK: - Volume Warning Badge
+
+/// Compact, non-blocking notice on MPR/MIP panels when the volume was built
+/// from imperfect geometry. Collapsed it shows a count; clicking expands the
+/// explanations.
+struct VolumeWarningBadge: View {
+    let warnings: [String]
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button(action: { isExpanded.toggle() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(warnings.count == 1 ? "Volume geometry notice" : "\(warnings.count) volume geometry notices")
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                }
+                .font(.system(.caption2, design: .rounded))
+                .foregroundStyle(.yellow)
+            }
+            .buttonStyle(.plain)
+            .help(warnings.joined(separator: "\n"))
+
+            if isExpanded {
+                ForEach(warnings, id: \.self) { warning in
+                    Text("• " + warning)
+                        .font(.caption2)
+                        .foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("Reformats and projections may not match the acquired slices exactly.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .frame(maxWidth: 360, alignment: .leading)
+        .background(Color.black.opacity(0.7))
+        .cornerRadius(6)
     }
 }
 
@@ -843,8 +894,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                         // (they differ for aspect-corrected MPR/MIP images).
                         let start = rulerStartPixel!
                         let distance = panel.pixelDisplayMapping.distance(from: start, to: px, pixelSpacing: panel.pixelSpacing)
-                        let annotation = Annotation(type: .ruler(start: start, end: px, distanceMM: distance))
-                        panel.annotations.append(annotation)
+                        panel.addMeasurement(.ruler(start: start, end: px, distanceMM: distance))
                         // Clear preview
                         rulerStartPixel = nil
                         panel.rulerPreviewStart = nil
@@ -863,8 +913,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                         let arm2 = anglePoints[2]
                         let degrees = panel.pixelDisplayMapping.angle(vertex: vertex, arm1: arm1, arm2: arm2,
                                                                       pixelSpacing: panel.pixelSpacing)
-                        let annotation = Annotation(type: .angle(vertex: vertex, arm1: arm1, arm2: arm2, degrees: degrees))
-                        panel.annotations.append(annotation)
+                        panel.addMeasurement(.angle(vertex: vertex, arm1: arm1, arm2: arm2, degrees: degrees))
                         // Clear preview
                         anglePoints = []
                         panel.anglePreviewPoints = []
@@ -873,19 +922,19 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
 
             case .eraser:
                 if let px = screenToPixel(event) {
-                    // Find nearest annotation and remove it
+                    // Find the nearest annotation drawn on this slice and remove it
                     let threshold: CGFloat = 15.0
-                    var bestIdx: Int? = nil
+                    var bestID: UUID? = nil
                     var bestDist: CGFloat = .infinity
-                    for (i, ann) in panel.annotations.enumerated() {
+                    for ann in panel.visibleAnnotations {
                         let dist = distanceToAnnotation(ann, from: px)
                         if dist < bestDist {
                             bestDist = dist
-                            bestIdx = i
+                            bestID = ann.id
                         }
                     }
-                    if let idx = bestIdx, bestDist < threshold {
-                        panel.annotations.remove(at: idx)
+                    if let id = bestID, bestDist < threshold {
+                        panel.annotations.removeAll { $0.id == id }
                     }
                 }
 
@@ -1231,12 +1280,11 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             case .roiStats:
                 if let rect = panel.roiRect, rect.width > 1 && rect.height > 1 {
                     if let stats = model.computeROIStats(panel: panel, rect: rect) {
-                        let annotation = Annotation(type: .roiStats(
+                        panel.addMeasurement(.roiStats(
                             rect: rect,
                             mean: stats.mean, max: stats.max, min: stats.min,
                             stdDev: stats.stdDev, count: stats.count
                         ))
-                        panel.annotations.append(annotation)
                     }
                 }
                 roiStartPixel = nil
@@ -1339,6 +1387,9 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             if let data = panel.rawPixelData,
                let v = PixelValues.value(in: data, index: py * panel.imageWidth + px,
                                          bits: panel.bitDepth, isSigned: panel.isSigned, samples: panel.samples) {
+                huValue = v
+            } else if let v = model?.projectionReadout(for: panel, x: px, y: py) {
+                // GPU projection: no pixel buffer, read the voxel along the ray
                 huValue = v
             }
 
@@ -2935,9 +2986,9 @@ struct AnnotationOverlay: View {
 
                 // Stats label below the rectangle
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(String(format: "Mean: %.1f", mean))
-                    Text(String(format: "SD: %.1f", stdDev))
-                    Text(String(format: "Min: %.0f  Max: %.0f", minV, maxV))
+                    Text("Mean: \(PixelValues.format(mean))")
+                    Text("SD: \(PixelValues.format(stdDev))")
+                    Text("Min: \(PixelValues.format(minV))  Max: \(PixelValues.format(maxV))")
                     Text("N: \(count)")
                 }
                 .font(.system(.caption2, design: .monospaced))
@@ -3230,8 +3281,7 @@ struct CursorInfoOverlay: View {
                         Text(String(format: "x: %.1f  y: %.1f  z: %.1f",
                              panel.cursorPatientX, panel.cursorPatientY, panel.cursorPatientZ))
                     }
-                    Text(String(format: "HU: %.0f  [%d, %d]",
-                        panel.cursorHU, panel.cursorPixelX, panel.cursorPixelY))
+                    Text("HU: \(PixelValues.format(panel.cursorHU))  [\(panel.cursorPixelX), \(panel.cursorPixelY)]")
                 }
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.white)

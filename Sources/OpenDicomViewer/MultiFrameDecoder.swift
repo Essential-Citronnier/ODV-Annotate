@@ -49,8 +49,9 @@ class MultiFrameDecoder {
     /// How frames are turned into images
     enum DecodePath: Equatable {
         case raw        // uncompressed: Swift decode with a fixed window
-        case imageIO    // baseline JPEG / JPEG 2000 via ImageIO
+        case imageIO    // baseline JPEG, color JPEG 2000 via ImageIO
         case dcmtk      // JPEG Lossless, JPEG-LS, RLE, 12-bit JPEG, ... via DCMTK
+        case openJPEG   // monochrome JPEG 2000 via the wrapper's OpenJPEG decoder
     }
     let decodePath: DecodePath
     /// Window applied to every frame (modality units); nil for ImageIO frames
@@ -87,10 +88,20 @@ class MultiFrameDecoder {
         "1.2.840.10008.1.2.1.99",   // Deflated Explicit VR LE
     ]
 
-    static func decodePath(transferSyntax ts: String, bitsStored: Int) -> DecodePath {
+    /// JPEG 2000 (lossless, lossy). DCMTK 3.6.8 has no JPEG 2000 codec, so
+    /// monochrome frames go through the wrapper's OpenJPEG decoder, which
+    /// keeps 16-bit precision and applies the Modality LUT; ImageIO would
+    /// tone-map them without DICOM windowing.
+    static let jpeg2000TransferSyntaxes: Set<String> = [
+        "1.2.840.10008.1.2.4.90",
+        "1.2.840.10008.1.2.4.91",
+    ]
+
+    static func decodePath(transferSyntax ts: String, bitsStored: Int, isColor: Bool = false) -> DecodePath {
         let uncompressed: Set<String> = ["", "1.2.840.10008.1.2", "1.2.840.10008.1.2.1", "1.2.840.10008.1.2.2"]
         if uncompressed.contains(ts) { return .raw }
         if dcmtkTransferSyntaxes.contains(ts) { return .dcmtk }
+        if jpeg2000TransferSyntaxes.contains(ts) && !isColor { return .openJPEG }
         // Baseline JPEG declared with >8-bit data can't be shown by ImageIO
         if ts == "1.2.840.10008.1.2.4.50" && bitsStored > 8 { return .dcmtk }
         return .imageIO
@@ -149,7 +160,8 @@ class MultiFrameDecoder {
         let photo = attributes.photometric.uppercased()
         self.isColor = photo.contains("RGB") || photo.contains("YBR") || photo.contains("PALETTE")
 
-        let path = MultiFrameDecoder.decodePath(transferSyntax: transferSyntax, bitsStored: attributes.bitsStored)
+        let path = MultiFrameDecoder.decodePath(transferSyntax: transferSyntax, bitsStored: attributes.bitsStored,
+                                                isColor: isColor || attributes.samplesPerPixel > 1)
         self.decodePath = path
         self.isEncapsulated = path != .raw
 
@@ -176,7 +188,7 @@ class MultiFrameDecoder {
         let parseStart = CFAbsoluteTimeGetCurrent()
         var table: [[(offset: Int, length: Int)]] = []
         switch path {
-        case .imageIO:
+        case .imageIO, .openJPEG:
             guard let frames = MultiFrameDecoder.encapsulatedFrameTable(
                 data: data, pixelDataTagOffset: pixelDataOffset, numberOfFrames: nf,
                 transferSyntax: transferSyntax, fileURL: url) else {
@@ -244,6 +256,18 @@ class MultiFrameDecoder {
             } else {
                 self.window = nil
             }
+        case .openJPEG:
+            if let w = attributes.windowWidth, w > 0, let c = attributes.windowCenter {
+                self.window = (w, c)
+            } else if let decoded = MultiFrameDecoder.decodeJPEG2000(
+                        MultiFrameDecoder.joinedFrame(table.first ?? [], in: data), attributes: attributes),
+                      decoded.samples == 1 {
+                let w = PixelValues.defaultWindow(storedWidth: nil, storedCenter: nil, data: decoded.data,
+                                                  bits: decoded.bitDepth, isSigned: decoded.isSigned)
+                self.window = (w.width, w.center)
+            } else {
+                self.window = nil
+            }
         case .imageIO:
             self.window = nil
         }
@@ -273,16 +297,32 @@ class MultiFrameDecoder {
     /// Compressed bytes of a frame: a zero-copy slice for single-fragment
     /// frames, concatenated fragments otherwise.
     private func frameBytes(at index: Int) -> Data? {
-        let fragments = frameTable[index]
+        MultiFrameDecoder.joinedFrame(frameTable[index], in: mappedData)
+    }
+
+    private static func joinedFrame(_ fragments: [(offset: Int, length: Int)], in data: Data) -> Data? {
         guard !fragments.isEmpty,
-              fragments.allSatisfy({ $0.offset >= 0 && $0.offset + $0.length <= mappedData.count }) else { return nil }
+              fragments.allSatisfy({ $0.offset >= 0 && $0.offset + $0.length <= data.count }) else { return nil }
         if fragments.count == 1 {
             let f = fragments[0]
-            return mappedData[f.offset..<(f.offset + f.length)]
+            return data[f.offset..<(f.offset + f.length)]
         }
         var joined = Data(capacity: fragments.reduce(0) { $0 + $1.length })
-        for f in fragments { joined.append(mappedData[f.offset..<(f.offset + f.length)]) }
+        for f in fragments { joined.append(data[f.offset..<(f.offset + f.length)]) }
         return joined
+    }
+
+    /// Decode one JPEG 2000 frame to modality values via OpenJPEG
+    /// (sign extension per PixelRepresentation, RescaleSlope/Intercept).
+    static func decodeJPEG2000(_ codestream: Data?, attributes: DicomPixelAttributes) -> DecodedPixelBuffer? {
+        guard let codestream = codestream, !codestream.isEmpty else { return nil }
+        var w = 0, h = 0, bits = 0, spp = 0
+        var signed: ObjCBool = false
+        guard let data = DCMTKHelper.decodeJPEG2000Frame(
+            Data(codestream), pixelRepresentation: attributes.pixelRepresentation,
+            rescaleSlope: attributes.rescaleSlope, rescaleIntercept: attributes.rescaleIntercept,
+            width: &w, height: &h, bitDepth: &bits, samples: &spp, isSigned: &signed) else { return nil }
+        return DecodedPixelBuffer(data: data, width: w, height: h, bitDepth: bits, samples: spp, isSigned: signed.boolValue)
     }
 
     /// Decode a frame directly to CGImage (faster than NSImage for display pipeline)
@@ -295,6 +335,10 @@ class MultiFrameDecoder {
             return renderRawFrame(frameData)
         case .dcmtk:
             return dcmtkFrame(at: index)
+        case .openJPEG:
+            guard let decoded = MultiFrameDecoder.decodeJPEG2000(frameBytes(at: index), attributes: pixelAttributes),
+                  decoded.width == frameWidth, decoded.height == frameHeight else { return nil }
+            return renderDecodedFrame(decoded)
         case .imageIO:
             if let frameData = frameBytes(at: index),
                let source = CGImageSourceCreateWithData(frameData as CFData, nil),
@@ -480,7 +524,15 @@ class MultiFrameDecoder {
         guard frameWidth > 0, frameHeight > 0,
               let decoded = PlainPixelDecoder.decode(pixelData: frameData, attributes: pixelAttributes, bigEndian: isBigEndian)
         else { return nil }
+        return renderDecodedFrame(decoded)
+    }
+
+    /// Render a decoded frame (modality values or 8-bit RGB) to an 8-bit
+    /// CGImage with the decoder-wide window and MONOCHROME1 inversion.
+    private func renderDecodedFrame(_ decoded: DecodedPixelBuffer) -> CGImage? {
+        guard frameWidth > 0, frameHeight > 0 else { return nil }
         let totalPixels = frameWidth * frameHeight
+        guard decoded.data.count >= totalPixels * decoded.samples * PixelValues.bytesPerSample(bits: decoded.bitDepth) else { return nil }
 
         if decoded.samples == 3 {
             guard let provider = CGDataProvider(data: decoded.data as CFData) else { return nil }

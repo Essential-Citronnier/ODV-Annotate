@@ -1382,7 +1382,23 @@ class DICOMModel: ObservableObject {
             let range = maxVal - minVal
             if range <= 0 { return }
             
-            if bits > 16 { // 32-bit
+            if PixelValues.isFloat(bits: bits) {
+                 let count = data.count / 4
+                 let stride = max(1, count / 50000)
+                 data.withUnsafeBytes { raw in
+                     var i = 0
+                     while i < count {
+                         if let v = PixelValues.value(in: raw, index: i, bits: bits, isSigned: isSigned) {
+                             let bin = Int((v - minVal) / range * 255.0)
+                             if bin >= 0 && bin < 256 {
+                                 bins[bin] += 1
+                                 totalCount += 1
+                             }
+                         }
+                         i += stride
+                     }
+                 }
+            } else if bits > 16 { // 32-bit
                  data.withUnsafeBytes { rawBuffer in
                      if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt32.self) {
                          let count = data.count / 4
@@ -1602,7 +1618,18 @@ class DICOMModel: ObservableObject {
         let c = wc
         let windowBottom = c - (w / 2.0)
 
-        if bits > 16 {
+        if PixelValues.isFloat(bits: bits) {
+             // Float32 modality values (fractional rescale, e.g. PET)
+             pixelData.withUnsafeBytes { rawBuffer in
+                 guard pixelData.count >= totalPixels * 4 else { return }
+                 let ptr = rawBuffer.bindMemory(to: Float32.self)
+                 for i in 0..<totalPixels {
+                     var norm = (Double(ptr[i]) - windowBottom) / w * 255.0
+                     if mono1 { norm = 255.0 - norm }
+                     destBuffer[i] = norm.isFinite ? UInt8(max(0, min(255, norm))) : 0
+                 }
+             }
+        } else if bits > 16 {
              // 32-bit
              pixelData.withUnsafeBytes { rawBuffer in
                  if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt32.self) {
@@ -3354,7 +3381,7 @@ class DICOMModel: ObservableObject {
                 let slabMM = Float(panel.mipSlabThickness) * Float(volume.spacingZ)
                 let center = SIMD3<Float>(Float(volume.width) / 2.0, Float(volume.height) / 2.0, Float(panel.mipSlabPosition))
                 if let newImg = renderer.renderProjection(
-                    volume: volume, mode: .mip,
+                    volume: volume, mode: panel.projectionMode,
                     viewMatrix: matrix_identity_float4x4,
                     outputWidth: volume.width, outputHeight: volume.height,
                     windowWidth: Float(volume.storedWindow(width: panel.windowWidth, center: panel.windowCenter).width),
@@ -3383,12 +3410,41 @@ class DICOMModel: ObservableObject {
 
     /// Auto W/L for a specific panel
     func autoWindowLevelForPanel(_ panel: PanelState) {
-        if let data = panel.rawPixelData {
-            let (minVal, maxVal) = computeMinMax(data: data, isSigned: panel.isSigned, bits: panel.bitDepth)
+        if let px = modalityPixels(for: panel) {
+            let (minVal, maxVal) = computeMinMax(data: px.data, isSigned: px.isSigned, bits: px.bits, samples: px.samples)
             let newWW = maxVal - minVal
             let newWC = minVal + (newWW / 2.0)
             adjustWindowLevelForPanel(panel, deltaWidth: newWW - panel.windowWidth, deltaCenter: newWC - panel.windowCenter)
         }
+    }
+
+    /// Modality-unit pixels of what the panel shows. A GPU-rendered MIP panel
+    /// has no CPU buffer, so its projection is computed from the volume on
+    /// demand (same slab and mode as on screen).
+    func modalityPixels(for panel: PanelState) -> (data: Data, bits: Int, isSigned: Bool, samples: Int)? {
+        if let data = panel.rawPixelData {
+            return (data, panel.bitDepth, panel.isSigned, panel.samples)
+        }
+        guard panel.panelMode == .mip,
+              let seriesID = allSeries[safe: panel.seriesIndex]?.id,
+              let volume = volumeCacheGet(seriesID),
+              let slice = MPREngine(volume: volume).axialSlabProjection(
+                  mode: panel.projectionMode, slabCenter: panel.mipSlabPosition,
+                  slabThickness: panel.mipSlabThickness) else { return nil }
+        let px = slice.modalityPixels
+        return (px.data, px.bits, px.isSigned, 1)
+    }
+
+    /// Cursor readout for a GPU-rendered projection (no CPU pixel buffer):
+    /// the voxel the projection picks along the ray at raw pixel (x, y) —
+    /// the maximum for MIP, minimum for MinIP, mean for Average.
+    func projectionReadout(for panel: PanelState, x: Int, y: Int) -> Double? {
+        guard panel.panelMode == .mip, panel.rawPixelData == nil,
+              let seriesID = allSeries[safe: panel.seriesIndex]?.id,
+              let volume = volumeCacheGet(seriesID) else { return nil }
+        return MPREngine(volume: volume).slabProjectionValue(
+            mode: panel.projectionMode, x: x, y: y,
+            slabCenter: panel.mipSlabPosition, slabThickness: panel.mipSlabThickness)
     }
 
     /// Compute min/max pixel values within a rectangular subregion of the image data.
@@ -3402,57 +3458,16 @@ class DICOMModel: ObservableObject {
         let startRow = max(0, Int(rect.minY))
         guard endCol > startCol else { return (0, 0) }
 
-        if bits > 16 { // 32-bit
-            let bytesPerPixel = 4
-            let totalPixels = data.count / bytesPerPixel
-            let height = totalPixels / max(1, width)
-            let endRow = min(height, Int(ceil(rect.maxY)))
-            guard endRow > startRow else { return (0, 0) }
-            data.withUnsafeBytes { rawBuffer in
-                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt32.self) else { return }
-                for row in startRow..<endRow {
-                    for col in startCol..<endCol {
-                        let i = row * width + col
-                        guard i >= 0, i < totalPixels else { continue }
-                        let v: Double = isSigned ? Double(Int32(bitPattern: ptr[i])) : Double(ptr[i])
-                        if v < minVal { minVal = v }
-                        if v > maxVal { maxVal = v }
-                    }
-                }
-            }
-        } else if bits > 8 { // 16-bit
-            let bytesPerPixel = 2
-            let totalPixels = data.count / bytesPerPixel
-            let height = totalPixels / max(1, width)
-            let endRow = min(height, Int(ceil(rect.maxY)))
-            guard endRow > startRow else { return (0, 0) }
-            data.withUnsafeBytes { rawBuffer in
-                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt16.self) else { return }
-                for row in startRow..<endRow {
-                    for col in startCol..<endCol {
-                        let i = row * width + col
-                        guard i >= 0, i < totalPixels else { continue }
-                        let v: Double = isSigned ? Double(Int16(bitPattern: ptr[i])) : Double(ptr[i])
-                        if v < minVal { minVal = v }
-                        if v > maxVal { maxVal = v }
-                    }
-                }
-            }
-        } else { // 8-bit
-            let totalPixels = data.count
-            let height = totalPixels / max(1, width)
-            let endRow = min(height, Int(ceil(rect.maxY)))
-            guard endRow > startRow else { return (0, 0) }
-            data.withUnsafeBytes { rawBuffer in
-                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-                for row in startRow..<endRow {
-                    for col in startCol..<endCol {
-                        let i = row * width + col
-                        guard i >= 0, i < totalPixels else { continue }
-                        let v = Double(ptr[i])
-                        if v < minVal { minVal = v }
-                        if v > maxVal { maxVal = v }
-                    }
+        let totalPixels = data.count / PixelValues.bytesPerSample(bits: bits)
+        let height = totalPixels / width
+        let endRow = min(height, Int(ceil(rect.maxY)))
+        guard endRow > startRow else { return (0, 0) }
+        data.withUnsafeBytes { raw in
+            for row in startRow..<endRow {
+                for col in startCol..<endCol {
+                    guard let v = PixelValues.value(in: raw, index: row * width + col, bits: bits, isSigned: isSigned) else { continue }
+                    if v < minVal { minVal = v }
+                    if v > maxVal { maxVal = v }
                 }
             }
         }
@@ -3463,11 +3478,11 @@ class DICOMModel: ObservableObject {
 
     /// Auto W/L from a rectangular ROI in pixel coordinates
     func autoWindowLevelForPanelROI(_ panel: PanelState, rect: CGRect) {
-        guard let data = panel.rawPixelData, panel.imageWidth > 0 else { return }
+        guard let px = modalityPixels(for: panel), panel.imageWidth > 0 else { return }
         let rawRect = PixelDisplayMapping(rawWidth: panel.imageWidth, rawHeight: panel.imageHeight,
                                           displayWidth: panel.displayImageWidth, displayHeight: panel.displayImageHeight)
             .displayRectToRaw(rect)
-        let (minVal, maxVal) = computeMinMaxInRect(data: data, width: panel.imageWidth, rect: rawRect, isSigned: panel.isSigned, bits: panel.bitDepth)
+        let (minVal, maxVal) = computeMinMaxInRect(data: px.data, width: panel.imageWidth, rect: rawRect, isSigned: px.isSigned, bits: px.bits)
         let newWW = max(1.0, maxVal - minVal)
         let newWC = minVal + (newWW / 2.0)
         adjustWindowLevelForPanel(panel, deltaWidth: newWW - panel.windowWidth, deltaCenter: newWC - panel.windowCenter)
@@ -3475,7 +3490,8 @@ class DICOMModel: ObservableObject {
 
     /// Compute HU statistics for a pixel-coordinate rectangle on a panel
     func computeROIStats(panel: PanelState, rect: CGRect) -> (mean: Double, max: Double, min: Double, stdDev: Double, count: Int)? {
-        guard let data = panel.rawPixelData else { return nil }
+        guard let px = modalityPixels(for: panel) else { return nil }
+        let data = px.data
         let w = panel.imageWidth
         let h = panel.imageHeight
         // Scale ROI rect from display-image space to raw-pixel space
@@ -3491,7 +3507,7 @@ class DICOMModel: ObservableObject {
         var values: [Double] = []
         values.reserveCapacity((maxX - minX + 1) * (maxY - minY + 1))
 
-        let bits = panel.bitDepth, signed = panel.isSigned, spp = panel.samples
+        let bits = px.bits, signed = px.isSigned, spp = px.samples
         data.withUnsafeBytes { raw in
             for py in minY...maxY {
                 for px in minX...maxX {
@@ -3846,6 +3862,7 @@ class DICOMModel: ObservableObject {
                 return
             }
 
+            panel.volumeWarnings = volume.warnings
             let engine = MPREngine(volume: volume)
             var slice: MPRSlice?
 
@@ -3980,6 +3997,8 @@ class DICOMModel: ObservableObject {
         // Cancel any pending 2D loads to prevent them from overwriting MPR/MIP panel state
         panel.loadingQueue.cancelAllOperations()
 
+        if mode == .slice2D { panel.volumeWarnings = [] }
+
         switch mode {
         case .slice2D:
             // Reload current 2D slice
@@ -4014,8 +4033,12 @@ class DICOMModel: ObservableObject {
 
     /// Generate a clinical axial slab-MIP for a panel.
     /// Projects N consecutive axial slices via max intensity, scroll moves the slab.
-    func loadMIPForPanel(_ panel: PanelState, mode: ProjectionMode = .mip) {
+    /// `mode` switches the panel's projection; nil keeps the current one
+    /// (scrolling, slab changes and W/L re-renders must not reset it to MIP).
+    func loadMIPForPanel(_ panel: PanelState, mode: ProjectionMode? = nil) {
         guard panel.seriesIndex >= 0, panel.seriesIndex < allSeries.count else { return }
+        if let mode = mode { panel.projectionMode = mode }
+        let mode = panel.projectionMode
         panel.isLoading = true
         panel.errorMessage = nil
 
@@ -4031,6 +4054,8 @@ class DICOMModel: ObservableObject {
                 }
                 return
             }
+
+            panel.volumeWarnings = volume.warnings
 
             // Initialize slab position to center if not set
             if panel.mipSlabPosition < 0 || panel.mipSlabPosition >= volume.depth {

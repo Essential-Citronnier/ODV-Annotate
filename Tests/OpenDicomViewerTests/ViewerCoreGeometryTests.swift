@@ -198,7 +198,7 @@ final class ViewerCoreGeometryTests: XCTestCase {
             .init(data: SyntheticDICOM.le32([0, 100_000]), width: w, height: h, bits: 32, isSigned: true),
             .init(data: SyntheticDICOM.le16([-1000, 500]), width: w, height: h, bits: 16, isSigned: true),
         ]
-        let (voxels, slope, intercept) = try VolumeBuilder.assemble(width: w, height: h, depth: 2) { slices[$0] }
+        let (voxels, slope, intercept, _) = try VolumeBuilder.assemble(width: w, height: h, depth: 2) { slices[$0] }
         defer { voxels.deallocate() }
         func value(_ i: Int) -> Double { Double(voxels[i]) * slope + intercept }
         XCTAssertGreaterThan(slope, 1)
@@ -213,18 +213,19 @@ final class ViewerCoreGeometryTests: XCTestCase {
             .init(data: SyntheticDICOM.le32([-1024, 3071]), width: 2, height: 1, bits: 32, isSigned: true),
             .init(data: Data([7, 200]), width: 2, height: 1, bits: 8, isSigned: false),
         ]
-        let (voxels, slope, intercept) = try VolumeBuilder.assemble(width: 2, height: 1, depth: 2) { slices[$0] }
+        let (voxels, slope, intercept, _) = try VolumeBuilder.assemble(width: 2, height: 1, depth: 2) { slices[$0] }
         defer { voxels.deallocate() }
         XCTAssertEqual(slope, 1); XCTAssertEqual(intercept, 0)
         XCTAssertEqual(Array(voxels), [-1024, 3071, 7, 200])
     }
 
-    func testAssembleRejectsMismatchedDimensions() {
+    func testAssembleRejectsMostlyMismatchedDimensions() {
         let slices: [VolumeBuilder.SliceRaw] = [
             .init(data: SyntheticDICOM.le16([1, 2]), width: 2, height: 1, bits: 16, isSigned: true),
             .init(data: SyntheticDICOM.le16([1, 2, 3]), width: 3, height: 1, bits: 16, isSigned: true),
+            .init(data: SyntheticDICOM.le16([1, 2, 3]), width: 3, height: 1, bits: 16, isSigned: true),
         ]
-        XCTAssertThrowsError(try VolumeBuilder.assemble(width: 2, height: 1, depth: 2) { slices[$0] })
+        XCTAssertThrowsError(try VolumeBuilder.assemble(width: 2, height: 1, depth: 3) { slices[$0] })
     }
 
     // MARK: - Item 8: volume geometry validation

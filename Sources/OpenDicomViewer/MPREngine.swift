@@ -56,6 +56,8 @@ struct VolumeGeometry {
     let sliceSpacing: Double
     let pixelSpacing: SIMD2<Double>
     let origin: SIMD3<Double>
+    /// Angle between the stacking direction and the slice normal (degrees)
+    var tiltDegrees: Double = 0
     let warnings: [String]
 }
 
@@ -153,7 +155,7 @@ struct VolumeBuilder {
         let cosTilt = min(1, max(-1, simd_dot(stackDir, normal)))
         let tiltDegrees = acos(cosTilt) * 180 / .pi
         if tiltDegrees > tiltWarnDegrees {
-            warnings.append(String(format: "Gantry tilt of %.1f° detected; reformats are sheared along the stacking direction.", tiltDegrees))
+            warnings.append(String(format: "Gantry tilt of %.1f° detected.", tiltDegrees))
         }
         let sliceSpacing = medianGap / max(cosTilt, 1e-3)
 
@@ -165,6 +167,7 @@ struct VolumeBuilder {
             sliceSpacing: sliceSpacing,
             pixelSpacing: spacing,
             origin: firstPos,
+            tiltDegrees: tiltDegrees,
             warnings: warnings
         )
     }
@@ -179,31 +182,58 @@ struct VolumeBuilder {
     }
 
     /// Fill an Int16 voxel buffer from decoded slices (modality units).
-    /// 8/16-bit slices are stored as-is. When 32-bit slices hold values that
-    /// don't fit Int16, the whole volume is stored with a linear encoding
-    /// (stored = (value − intercept) / slope) instead of clamping.
-    /// Missing slices (nil) are zero-filled.
+    /// 8/16-bit slices are stored as-is. When slices hold values that Int16
+    /// can't represent — 32-bit values outside its range, or fractional
+    /// Float32 values (PET SUV-scaled, Philips MR) — the whole volume is
+    /// stored with a linear encoding (stored = (value − intercept) / slope)
+    /// spanning the data range, instead of clamping or rounding to integers.
+    /// Missing slices (nil) are zero-filled. Slices whose dimensions differ
+    /// from the volume's are left blank and reported in `mismatched`; when
+    /// more than half differ the series is rejected.
     static func assemble(
         width: Int, height: Int, depth: Int,
         slice: (Int) throws -> SliceRaw?
-    ) throws -> (voxels: UnsafeMutableBufferPointer<Int16>, slope: Double, intercept: Double) {
+    ) throws -> (voxels: UnsafeMutableBufferPointer<Int16>, slope: Double, intercept: Double, mismatched: [Int]) {
         let stride = width * height
         let buffer = UnsafeMutableBufferPointer<Int16>.allocate(capacity: stride * depth)
         buffer.initialize(repeating: 0)
         var success = false
         defer { if !success { buffer.deallocate() } }
 
-        var wide: [(index: Int, values: [Int32])] = []
-        var lo = Int64(Int16.max), hi = Int64(Int16.min)
+        enum WideSlice {
+            case int([Int32])
+            case float([Float])
+        }
+        var wide: [(index: Int, values: WideSlice)] = []
+        var lo = Double(Int16.max), hi = Double(Int16.min)
         var any = false
+        var anyFractional = false
+        var mismatched: [Int] = []
 
         for z in 0..<depth {
             guard let s = try slice(z) else { continue }
-            guard s.width == width, s.height == height else { throw VolumeBuilderError.inconsistentDimensions }
+            guard s.width == width, s.height == height else {
+                mismatched.append(z)
+                continue
+            }
             let bps = PixelValues.bytesPerSample(bits: s.bits)
             guard s.data.count >= stride * bps else { continue }
             let offset = z * stride
-            if bps == 4 {
+            if PixelValues.isFloat(bits: s.bits) {
+                var values = [Float](repeating: 0, count: stride)
+                s.data.withUnsafeBytes { raw in
+                    for i in 0..<stride {
+                        var v = raw.loadUnaligned(fromByteOffset: i * 4, as: Float32.self)
+                        if !v.isFinite { v = 0 }
+                        values[i] = v
+                        let d = Double(v)
+                        lo = min(lo, d); hi = max(hi, d)
+                        if !anyFractional && !PixelValues.isIntegral(d) { anyFractional = true }
+                    }
+                }
+                any = true
+                wide.append((z, .float(values)))
+            } else if bps == 4 {
                 var values = [Int32](repeating: 0, count: stride)
                 s.data.withUnsafeBytes { raw in
                     for i in 0..<stride {
@@ -211,29 +241,33 @@ struct VolumeBuilder {
                         let v = s.isSigned ? Int64(Int32(bitPattern: u)) : Int64(u)
                         let c = Int32(clamping: v)
                         values[i] = c
-                        lo = min(lo, Int64(c)); hi = max(hi, Int64(c))
+                        lo = min(lo, Double(c)); hi = max(hi, Double(c))
                     }
                 }
                 any = true
-                wide.append((z, values))
+                wide.append((z, .int(values)))
             } else {
                 s.data.withUnsafeBytes { raw in
                     for i in 0..<stride {
                         let v = Int64(PixelValues.value(in: raw, index: i, bits: s.bits, isSigned: s.isSigned) ?? 0)
                         let c = Int16(clamping: v)
                         buffer[offset + i] = c
-                        lo = min(lo, Int64(c)); hi = max(hi, Int64(c))
+                        lo = min(lo, Double(c)); hi = max(hi, Double(c))
                     }
                 }
                 any = true
             }
         }
+        if mismatched.count * 2 > depth { throw VolumeBuilderError.inconsistentDimensions }
 
         var slope = 1.0, intercept = 0.0
-        if any && (lo < Int64(Int16.min) || hi > Int64(Int16.max)) {
-            // Map [lo, hi] onto the full Int16 range
-            slope = max(1.0, Double(hi - lo) / 65535.0)
-            intercept = Double(lo) + 32768.0 * slope
+        if any && (anyFractional || lo < Double(Int16.min) || hi > Double(Int16.max)) {
+            // Map [lo, hi] onto the full Int16 range. Integer data keeps a
+            // slope of at least 1; fractional data uses whatever step the
+            // range needs (e.g. 0.0003 SUV for a 0–20 SUV range).
+            let span = (hi - lo) / 65535.0
+            slope = anyFractional ? (span > 0 ? span : 1) : max(1.0, span)
+            intercept = lo + 32768.0 * slope
             // Re-encode slices already stored as identity
             let wideIndices = Set(wide.map(\.index))
             for z in 0..<depth where !wideIndices.contains(z) {
@@ -244,12 +278,15 @@ struct VolumeBuilder {
         }
         for (z, values) in wide {
             let offset = z * stride
-            for i in 0..<stride {
-                buffer[offset + i] = encode(Double(values[i]), slope: slope, intercept: intercept)
+            switch values {
+            case .int(let v):
+                for i in 0..<stride { buffer[offset + i] = encode(Double(v[i]), slope: slope, intercept: intercept) }
+            case .float(let v):
+                for i in 0..<stride { buffer[offset + i] = encode(Double(v[i]), slope: slope, intercept: intercept) }
             }
         }
         success = true
-        return (buffer, slope, intercept)
+        return (buffer, slope, intercept, mismatched)
     }
 
     @inline(__always)
@@ -296,18 +333,25 @@ struct VolumeBuilder {
             dcmtkCache.removeObject(forKey: img.url as NSURL)
         }
 
-        let (buffer, slope, intercept) = try assemble(width: firstW, height: firstH, depth: depth) { z in
+        var missing = 0
+        let (buffer, slope, intercept, mismatched) = try assemble(width: firstW, height: firstH, depth: depth) { z in
             progress?(Double(z) / Double(depth))
             guard let info = loadRawDataWithInfo(sorted[z], rawDataCache: rawDataCache, dcmtkCache: dcmtkCache),
-                  info.samples == 1 else { return nil }
+                  info.samples == 1 else { missing += 1; return nil }
             return SliceRaw(data: info.data, width: info.width, height: info.height, bits: info.bits, isSigned: info.isSigned)
         }
 
         progress?(1.0)
 
-        for w in geo.warnings { print("Volume build warning (\(series.seriesDescription)): \(w)") }
+        var warnings = geo.warnings
+        if !mismatched.isEmpty {
+            warnings.append("\(mismatched.count) of \(depth) slices have different dimensions from the rest and are left blank.")
+        }
+        if missing > 0 {
+            warnings.append("\(missing) of \(depth) slices could not be decoded and are left blank.")
+        }
 
-        return VolumeData(
+        let volume = VolumeData(
             voxels: buffer,
             width: firstW,
             height: firstH,
@@ -322,8 +366,126 @@ struct VolumeBuilder {
             rescaleSlope: slope,
             rescaleIntercept: intercept,
             seriesUID: volumeID ?? series.id,
-            warnings: geo.warnings
+            warnings: warnings
         )
+        guard geo.tiltDegrees > tiltWarnDegrees else { return volume }
+        return correctGantryTilt(volume)
+    }
+
+    /// Resample a gantry-tilted stack onto an orthogonal grid.
+    ///
+    /// With gantry tilt every slice is an ordinary row × column plane, but
+    /// successive slices are offset in-plane (the stacking direction is not
+    /// the slice normal), so the voxel grid is sheared. The output grid keeps
+    /// the row and column directions and stacks along the true normal, so its
+    /// affine is orthonormal. Each output voxel is mapped back into the
+    /// sheared grid through the exact patient-space affine and sampled
+    /// trilinearly; the in-plane extent grows to hold every shifted slice and
+    /// uncovered voxels are filled with the volume minimum (air for CT).
+    /// Returns the input unchanged if the corrected grid would exceed the
+    /// memory limit.
+    static func correctGantryTilt(_ src: VolumeData) -> VolumeData {
+        let normal = simd_normalize(simd_cross(src.rowDirection, src.colDirection))
+        let s = src.sliceDirection
+        let cosTilt = simd_dot(s, normal)
+        guard cosTilt > 1e-3, src.depth > 1 else { return src }
+
+        let W = src.width, H = src.height, D = src.depth
+        // Distance between slice planes along the normal
+        let dz = src.spacingZ * cosTilt
+        // In-plane shift per slice, in source pixels
+        let a = src.spacingZ * simd_dot(s, src.rowDirection) / src.spacingX
+        let b = src.spacingZ * simd_dot(s, src.colDirection) / src.spacingY
+        let lastK = Double(D - 1)
+        let minA = min(0, a * lastK), maxA = max(0, a * lastK)
+        let minB = min(0, b * lastK), maxB = max(0, b * lastK)
+        let outW = W + Int(ceil(maxA - minA - 1e-9))
+        let outH = H + Int(ceil(maxB - minB - 1e-9))
+
+        if outW * outH * D * MemoryLayout<Int16>.stride > maxMemoryBytes {
+            src.warnings.append("Shear correction skipped (resampled volume would exceed the memory limit); reformats are sheared.")
+            return src
+        }
+
+        let outOrigin = src.origin
+            + minA * src.spacingX * src.rowDirection
+            + minB * src.spacingY * src.colDirection
+
+        var pad = Int16.max
+        for v in src.voxels where v < pad { pad = v }
+        if src.voxels.isEmpty { pad = 0 }
+
+        let out = UnsafeMutableBufferPointer<Int16>.allocate(capacity: outW * outH * D)
+        // Source voxel coordinates of output voxel (i, j, k) via the affines.
+        // Both affines are linear, so step per output index instead of
+        // multiplying a matrix per voxel.
+        let worldToSrc = src.worldToVoxelMatrix
+        func srcCoord(_ world: SIMD3<Double>) -> SIMD3<Double> {
+            let v = worldToSrc * SIMD4<Double>(world.x, world.y, world.z, 1)
+            return SIMD3(v.x, v.y, v.z)
+        }
+        let o = srcCoord(outOrigin)
+        let di = srcCoord(outOrigin + src.spacingX * src.rowDirection) - o
+        let dj = srcCoord(outOrigin + src.spacingY * src.colDirection) - o
+        let dk = srcCoord(outOrigin + dz * normal) - o
+        let eps = 1e-6
+        let maxX = Double(W - 1) + eps, maxY = Double(H - 1) + eps, maxZ = Double(D - 1) + eps
+
+        DispatchQueue.concurrentPerform(iterations: D) { k in
+            let sliceBase = k * outW * outH
+            for j in 0..<outH {
+                var p = o + Double(k) * dk + Double(j) * dj
+                let rowBase = sliceBase + j * outW
+                for i in 0..<outW {
+                    if p.x < -eps || p.y < -eps || p.z < -eps || p.x > maxX || p.y > maxY || p.z > maxZ {
+                        out[rowBase + i] = pad
+                    } else {
+                        out[rowBase + i] = Int16(clamping: Int(trilinear(src, p).rounded()))
+                    }
+                    p += di
+                }
+            }
+        }
+
+        let warnings = src.warnings.map {
+            $0.hasPrefix("Gantry tilt") ? $0 + " Slices were resampled onto an orthogonal grid to remove the shear." : $0
+        }
+        return VolumeData(
+            voxels: out,
+            width: outW, height: outH, depth: D,
+            spacingX: src.spacingX, spacingY: src.spacingY, spacingZ: dz,
+            origin: outOrigin,
+            rowDirection: src.rowDirection,
+            colDirection: src.colDirection,
+            sliceDirection: normal,
+            rescaleSlope: src.rescaleSlope,
+            rescaleIntercept: src.rescaleIntercept,
+            seriesUID: src.seriesUID,
+            warnings: warnings
+        )
+    }
+
+    /// Trilinear sample of stored voxels at continuous coordinates already
+    /// known to lie inside [0, dim − 1] (edges clamp instead of reading 0).
+    @inline(__always)
+    private static func trilinear(_ v: VolumeData, _ p: SIMD3<Double>) -> Double {
+        let x = min(max(p.x, 0), Double(v.width - 1))
+        let y = min(max(p.y, 0), Double(v.height - 1))
+        let z = min(max(p.z, 0), Double(v.depth - 1))
+        let x0 = Int(x), y0 = Int(y), z0 = Int(z)
+        let x1 = min(x0 + 1, v.width - 1), y1 = min(y0 + 1, v.height - 1), z1 = min(z0 + 1, v.depth - 1)
+        let fx = x - Double(x0), fy = y - Double(y0), fz = z - Double(z0)
+        let w = v.width, plane = v.width * v.height
+        @inline(__always) func at(_ xi: Int, _ yi: Int, _ zi: Int) -> Double {
+            Double(v.voxels[zi * plane + yi * w + xi])
+        }
+        let c00 = at(x0, y0, z0) * (1 - fx) + at(x1, y0, z0) * fx
+        let c10 = at(x0, y1, z0) * (1 - fx) + at(x1, y1, z0) * fx
+        let c01 = at(x0, y0, z1) * (1 - fx) + at(x1, y0, z1) * fx
+        let c11 = at(x0, y1, z1) * (1 - fx) + at(x1, y1, z1) * fx
+        let c0 = c00 * (1 - fy) + c10 * fy
+        let c1 = c01 * (1 - fy) + c11 * fy
+        return c0 * (1 - fz) + c1 * fz
     }
 
     // MARK: - Private Helpers
@@ -408,10 +570,14 @@ struct MPRSlice {
 
     /// Pixel data in modality units for consumers that read raw values
     /// (HU readout, ROI stats): Int16 when the volume stores modality values
-    /// directly, otherwise decoded to Int32.
+    /// directly, Int32 for wide integer encodings, Float32 when the encoding
+    /// has a fractional slope or intercept (e.g. PET).
     var modalityPixels: (data: Data, bits: Int, isSigned: Bool) {
         if rescaleSlope == 1 && rescaleIntercept == 0 { return (pixelData, 16, true) }
-        return (PixelValues.int16ToModalityInt32(pixelData, slope: rescaleSlope, intercept: rescaleIntercept), 32, true)
+        if PixelValues.isIntegralRescale(slope: rescaleSlope, intercept: rescaleIntercept) {
+            return (PixelValues.int16ToModalityInt32(pixelData, slope: rescaleSlope, intercept: rescaleIntercept), 32, true)
+        }
+        return (PixelValues.int16ToModalityFloat(pixelData, slope: rescaleSlope, intercept: rescaleIntercept), PixelValues.floatBits, true)
     }
 }
 
@@ -670,15 +836,47 @@ extension MPREngine {
     /// This is the clinical slab-MIP workflow used in CTA/MRA angiography:
     /// take N slices centered at `slabCenter`, max-project them into one 2D image.
     /// Output has the same width×height as a native axial slice.
+    /// Axial slice range a slab covers (clamped to the volume), or nil.
+    func slabRange(center: Int, thickness: Int) -> ClosedRange<Int>? {
+        let halfSlab = thickness / 2
+        let zStart = max(0, center - halfSlab)
+        let zEnd = min(volume.depth - 1, center + halfSlab)
+        return zStart <= zEnd ? zStart...zEnd : nil
+    }
+
+    /// Modality value an axial slab projection shows at voxel column `x`,
+    /// row `y`: the maximum (MIP), minimum (MinIP) or mean (Average) voxel
+    /// along the projection ray through the slab. Used for the cursor
+    /// readout of GPU-rendered projections, which have no CPU pixel buffer.
+    func slabProjectionValue(mode: ProjectionMode, x: Int, y: Int,
+                             slabCenter: Int, slabThickness: Int) -> Double? {
+        guard x >= 0, x < volume.width, y >= 0, y < volume.height,
+              let range = slabRange(center: slabCenter, thickness: slabThickness) else { return nil }
+        var result: Double
+        switch mode {
+        case .mip: result = -Double.greatestFiniteMagnitude
+        case .minip: result = Double.greatestFiniteMagnitude
+        case .average: result = 0
+        }
+        for z in range {
+            let v = Double(volume.voxelAt(x: x, y: y, z: z))
+            switch mode {
+            case .mip: result = max(result, v)
+            case .minip: result = min(result, v)
+            case .average: result += v
+            }
+        }
+        if mode == .average { result /= Double(range.count) }
+        return result * volume.rescaleSlope + volume.rescaleIntercept
+    }
+
     func axialSlabProjection(
         mode: ProjectionMode,
         slabCenter: Int,
         slabThickness: Int
     ) -> MPRSlice? {
-        let halfSlab = slabThickness / 2
-        let zStart = max(0, slabCenter - halfSlab)
-        let zEnd = min(volume.depth - 1, slabCenter + halfSlab)
-        guard zStart <= zEnd else { return nil }
+        guard let range = slabRange(center: slabCenter, thickness: slabThickness) else { return nil }
+        let zStart = range.lowerBound, zEnd = range.upperBound
 
         let w = volume.width
         let h = volume.height

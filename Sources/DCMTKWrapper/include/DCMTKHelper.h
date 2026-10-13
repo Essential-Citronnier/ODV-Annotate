@@ -10,6 +10,9 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 
+/// Decoded monochrome buffers hold modality values (RescaleSlope/Intercept
+/// applied) as 8/16/32-bit integers, or as Float32 when the rescale yields
+/// fractional values; bitDepth is then -32 (isSigned is meaningless).
 @interface DCMTKHelper : NSObject
 
 + (NSImage *)convertDICOMToNSImage:(NSString *)path;
@@ -22,6 +25,20 @@
 
 /// Returns a human-readable error string for the last failed DICOM load, or nil if no error.
 + (NSString *)lastErrorForPath:(NSString *)path;
+
+/// Decode one JPEG 2000 codestream (one frame of a multi-frame file) with
+/// OpenJPEG, using the same conventions as decodeJPEG2000DICOM: monochrome
+/// stored values are sign-extended per PixelRepresentation and rescaled to
+/// modality units; color is 8-bit interleaved RGB.
++ (NSData *)decodeJPEG2000Frame:(NSData *)codestream
+            pixelRepresentation:(NSInteger)pixelRepresentation
+                   rescaleSlope:(double)rescaleSlope
+               rescaleIntercept:(double)rescaleIntercept
+                          width:(NSInteger *)width
+                         height:(NSInteger *)height
+                       bitDepth:(NSInteger *)bitDepth
+                        samples:(NSInteger *)samples
+                       isSigned:(BOOL *)isSigned;
 
 /// Attempts to decode a JPEG2000-compressed DICOM file using OpenJPEG.
 /// Returns the first frame's pixel data, or nil on failure. Monochrome data
