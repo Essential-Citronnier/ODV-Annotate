@@ -35,6 +35,7 @@ from starlette.concurrency import run_in_threadpool
 # importing this module costs the whole web stack and argument parsing must
 # work before that stack is installed.
 from .cli import parse_server_args
+from .lifeline import start_parent_watch
 from .protocol import (
     ErrorCode,
     PluginError,
@@ -46,7 +47,8 @@ from .protocol import (
     success_payload,
 )
 
-__all__ = ["Adapter", "build_app", "run_adapter", "parse_server_args"]
+__all__ = ["Adapter", "build_app", "run_adapter", "parse_server_args",
+           "start_parent_watch"]
 
 
 class Adapter(Protocol):
@@ -208,6 +210,10 @@ def run_adapter(adapter: Adapter, args, on_startup: Callable[[], None] | None = 
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         raise SystemExit("refusing to bind a non-loopback address")
+
+    # Section 4d: a server whose host has crashed exits instead of holding
+    # its model in memory indefinitely.
+    start_parent_watch()
 
     uvicorn.run(
         build_app(adapter, on_startup=on_startup),

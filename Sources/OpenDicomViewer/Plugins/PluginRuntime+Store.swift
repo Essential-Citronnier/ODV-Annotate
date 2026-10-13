@@ -15,20 +15,42 @@ import Foundation
 // MARK: - Install cancellation
 
 /// Tracks in-flight installs so the store's Cancel action has something to act
-/// on. The installer itself is structured-concurrency based, so cancelling the
-/// task is sufficient; the record is left in whatever state the installer wrote
-/// last, and `reverify()` demotes a half-built environment on next launch.
+/// on, and serializes installs that share a virtualenv.
+///
+/// Cancelling the task is sufficient to stop the work: the process runner
+/// terminates pip and the weight hook when its task is cancelled. The record is
+/// left in whatever state the installer wrote last, and `reverify()` demotes a
+/// half-built environment on next launch.
+///
+/// Every task of a plugin installs into the plugin's one venv, so two of them
+/// running at once had two pips writing the same site-packages. Installs are
+/// therefore chained per plugin: a second one waits for the first to finish
+/// (or to unwind after a cancel) and then finds the venv and shared weights
+/// already in place.
 @MainActor
 private final class InstallTaskRegistry {
     private var tasks: [PluginTaskRef: Task<Void, Never>] = [:]
+    /// The most recently queued install per plugin; the next one waits on it.
+    private var tails: [String: Task<Void, Never>] = [:]
 
-    func register(_ ref: PluginTaskRef, task: Task<Void, Never>) {
+    func enqueue(_ ref: PluginTaskRef,
+                 work: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
+        // Re-installing the same task supersedes the earlier attempt.
         tasks[ref]?.cancel()
+        let previous = tails[ref.pluginID]
+        let task = Task { @MainActor in
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await work()
+        }
         tasks[ref] = task
+        tails[ref.pluginID] = task
+        return task
     }
 
-    func finish(_ ref: PluginTaskRef) {
-        tasks[ref] = nil
+    func finish(_ ref: PluginTaskRef, task: Task<Void, Never>) {
+        if tasks[ref] == task { tasks[ref] = nil }
+        if tails[ref.pluginID] == task { tails[ref.pluginID] = nil }
     }
 
     func cancel(_ ref: PluginTaskRef) {
@@ -73,13 +95,11 @@ extension PluginRuntime: PluginRuntimeFacade {
     /// Runs the install as a cancellable task so the store's Cancel action has
     /// a handle on it. The work itself lives in `performInstall`.
     func install(_ ref: PluginTaskRef, licenseKey: String?) async {
-        let task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.performInstall(ref, licenseKey: licenseKey)
-            installRegistry.finish(ref)
+        let task = installRegistry.enqueue(ref) { [weak self] in
+            await self?.performInstall(ref, licenseKey: licenseKey)
         }
-        installRegistry.register(ref, task: task)
         await task.value
+        installRegistry.finish(ref, task: task)
     }
 
     func cancelInstall(_ ref: PluginTaskRef) async {

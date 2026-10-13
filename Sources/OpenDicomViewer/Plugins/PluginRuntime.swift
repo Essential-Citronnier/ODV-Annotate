@@ -340,10 +340,22 @@ final class PluginRuntime: ObservableObject {
     private var locator: PluginEnvironmentLocator
     private var ports: PluginPortAllocator
     private var processes: [String: Process] = [:]
+    /// The start in progress per plugin. Concurrent callers await this one
+    /// task rather than each racing to spawn and health-poll their own server.
+    private var startTasks: [String: InFlightStart] = [:]
+    /// Pids this runtime terminated on purpose, so their exit is reported as
+    /// a stop rather than as a crash.
+    private var deliberateStops: Set<Int32> = []
     private var logs: [String: PluginLogBuffer] = [:]
     private var lastUsed: [String: Date] = [:]
-    /// Plugins with work in flight. These are not evicted out from under the user.
-    private var busy: Set<String> = []
+    /// Invocations in flight per plugin. These are not evicted out from under
+    /// the user.
+    ///
+    /// A count rather than a set: two overlapping invocations of one plugin (a
+    /// prompt decode while an analysis runs, say) each mark it busy, and with a
+    /// set the first to finish cleared the flag while the second was still
+    /// running, making a working plugin evictable.
+    private var busyCounts: [String: Int] = [:]
     /// Task id of the one-shot invocation currently running for a plugin.
     ///
     /// Needed because a one-shot's declared footprint is per task, and residency
@@ -506,7 +518,7 @@ final class PluginRuntime: ObservableObject {
     /// The arbiter's view of what currently holds memory.
     ///
     /// Includes plugins with an in-flight one-shot invocation. A one-shot never
-    /// enters `runtimeStates` — it is spawned, tracked in `busy`, and reaped
+    /// enters `runtimeStates` — it is spawned, counted in `busyCounts`, and reaped
     /// without ever becoming `.ready` — so filtering on runtime state alone hid
     /// it from admission, and the heaviest process on the machine was the one
     /// the arbiter could not see. On a memory-constrained machine that allowed a
@@ -520,7 +532,7 @@ final class PluginRuntime: ObservableObject {
         manifest.plugins.compactMap { plugin -> PluginResidency? in
             guard plugin.id != pluginID else { return nil }
 
-            let oneShotRunning = plugin.execution == .oneShot && busy.contains(plugin.id)
+            let oneShotRunning = plugin.execution == .oneShot && isBusy(plugin.id)
             guard runtimeState(plugin.id) != .stopped || oneShotRunning else { return nil }
 
             // A one-shot's footprint is the task's, which can exceed the
@@ -535,9 +547,44 @@ final class PluginRuntime: ObservableObject {
                 declaredRamGB: declared,
                 lastUsed: lastUsed[plugin.id] ?? .distantPast,
                 isEvictable: !oneShotRunning
-                    && !busy.contains(plugin.id)
+                    && !isBusy(plugin.id)
                     && (sessions[plugin.id]?.order.isEmpty ?? true))
         }
+    }
+
+    /// What a one-shot invocation of `pluginID` must be admitted against.
+    ///
+    /// By the time admission runs, `invoke` has already marked the requester
+    /// busy, so `residentSet()` reports it as an in-flight one-shot holding its
+    /// declared peak. Admitting it against that set charged the declaration
+    /// twice -- for TotalSegmentator 47 GB for a 23.5 GB job, refused on every
+    /// machine below 96 GB. The requester is excluded unless another run of the
+    /// same plugin was already in flight, which genuinely holds that memory.
+    func oneShotAdmissionResidents(for pluginID: String) -> [PluginResidency] {
+        busyCount(pluginID) > 1 ? residentSet() : residentSet(excluding: pluginID)
+    }
+
+    // MARK: Busy accounting
+
+    func isBusy(_ pluginID: String) -> Bool {
+        busyCount(pluginID) > 0
+    }
+
+    func busyCount(_ pluginID: String) -> Int {
+        busyCounts[pluginID] ?? 0
+    }
+
+    /// Mark an invocation of `ref` as started. Paired with `endInvocation`.
+    func beginInvocation(_ ref: PluginTaskRef, execution: PluginExecution) {
+        busyCounts[ref.pluginID, default: 0] += 1
+        if execution == .oneShot { runningOneShotTasks[ref.pluginID] = ref.taskID }
+    }
+
+    func endInvocation(_ ref: PluginTaskRef) {
+        let remaining = max(0, busyCount(ref.pluginID) - 1)
+        busyCounts[ref.pluginID] = remaining == 0 ? nil : remaining
+        if remaining == 0 { runningOneShotTasks.removeValue(forKey: ref.pluginID) }
+        lastUsed[ref.pluginID] = Date()
     }
 
     /// Apply an admission decision, stopping whatever it names.
@@ -556,22 +603,61 @@ final class PluginRuntime: ObservableObject {
 
     /// Start a resident plugin and wait until it reports ready.
     ///
+    /// Concurrent calls for one plugin share a single start: the second caller
+    /// used to find a process already spawned and return at once, before the
+    /// server was ready or even had a port, and its request then failed with
+    /// "no assigned port". The shared start is an unstructured task, so a
+    /// caller that is cancelled (a prompt superseded by the next click, say)
+    /// stops waiting for it without tearing down a server that other callers
+    /// -- and the user's next click -- still want. Only `stop` cancels a start.
+    ///
     /// See `removeTask` on the naming.
     func startPlugin(_ pluginID: String) async throws {
         let plugin = try self.plugin(pluginID)
         guard plugin.execution.isResident else { return }
-        if runtimeState(pluginID) == .ready { return }
-        guard processes[pluginID] == nil else { return }
+        if runtimeState(pluginID) == .ready, processes[pluginID] != nil { return }
+
+        let start: Task<Void, Error>
+        if let inFlight = startTasks[pluginID] {
+            start = inFlight.task
+        } else {
+            let token = UUID()
+            start = Task { @MainActor [weak self] in
+                guard let self else { throw CancellationError() }
+                // Cleared only if still ours: a stop drops a cancelled start
+                // at once, and a restart may already have replaced it.
+                defer {
+                    if self.startTasks[pluginID]?.token == token { self.startTasks[pluginID] = nil }
+                }
+                try await self.launch(plugin)
+            }
+            startTasks[pluginID] = InFlightStart(token: token, task: start)
+        }
+        try await start.value
+        try Task.checkCancellation()
+    }
+
+    /// The body of a start. Runs inside the shared task `startPlugin` creates.
+    private func launch(_ plugin: PluginDescriptor) async throws {
+        let pluginID = plugin.id
+        if runtimeState(pluginID) == .ready, processes[pluginID] != nil { return }
 
         guard store.records(forPlugin: pluginID).contains(where: { $0.phase == .ready }) else {
             throw PluginError.notInstalled(
                 PluginTaskRef(pluginID: pluginID, taskID: plugin.tasks.first?.id ?? ""))
         }
 
+        // A process left over from a failed or wedged start is not ours to
+        // reuse; clear it before admission counts it.
+        if processes[pluginID] != nil { await stop(pluginID, cancelStart: false) }
+
         let decision = arbiter.admit(
             PluginResidency(pluginID: pluginID, declaredRamGB: plugin.ramGB),
             residents: residentSet(excluding: pluginID))
         try await applyAdmission(decision, requester: pluginID)
+        // Evictions await; a stop issued meanwhile must not be undone by
+        // spawning anyway.
+        try Task.checkCancellation()
 
         let port = try ports.port(for: pluginID)
         assignedPorts[pluginID] = port
@@ -582,6 +668,8 @@ final class PluginRuntime: ObservableObject {
         guard FileManager.default.fileExists(atPath: entry.path) else {
             let message = "Adapter entry point not found at \(entry.path)."
             runtimeStates[pluginID] = .error(message)
+            assignedPorts[pluginID] = nil
+            ports.release(pluginID)
             throw PluginError.notReady(message)
         }
 
@@ -589,7 +677,12 @@ final class PluginRuntime: ObservableObject {
         process.executableURL = paths.venvPython(pluginID)
         process.arguments = [entry.path, "--port", String(port)]
         process.currentDirectoryURL = locator.adapterDirectory(for: plugin)
-        process.environment = locator.processEnvironment(for: pluginID)
+        var environment = locator.processEnvironment(for: pluginID)
+        // Invariant 3: a running adapter loads from the installed weights and
+        // never reaches the hub, whatever its library would otherwise try.
+        environment["HF_HUB_OFFLINE"] = "1"
+        environment["TRANSFORMERS_OFFLINE"] = "1"
+        process.environment = environment
 
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -606,8 +699,14 @@ final class PluginRuntime: ObservableObject {
         process.terminationHandler = { [weak self] proc in
             outPipe.fileHandleForReading.readabilityHandler = nil
             errPipe.fileHandleForReading.readabilityHandler = nil
+            outAssembler.flush()
+            errAssembler.flush()
+            let pid = proc.processIdentifier
             let code = proc.terminationStatus
-            Task { @MainActor in self?.handleExit(pluginID: pluginID, code: code) }
+            let signalled = proc.terminationReason == .uncaughtSignal
+            Task { @MainActor in
+                self?.handleExit(pluginID: pluginID, pid: pid, code: code, signalled: signalled)
+            }
         }
 
         do {
@@ -615,6 +714,8 @@ final class PluginRuntime: ObservableObject {
         } catch {
             let message = "Could not start \(plugin.name): \(error.localizedDescription)"
             runtimeStates[pluginID] = .error(message)
+            assignedPorts[pluginID] = nil
+            ports.release(pluginID)
             throw PluginError.transport(message)
         }
 
@@ -625,38 +726,76 @@ final class PluginRuntime: ObservableObject {
             try await waitUntilReady(pluginID: pluginID, port: port)
             runtimeStates[pluginID] = .ready
             lastUsed[pluginID] = Date()
+        } catch is CancellationError {
+            // Only `stop` cancels a start, and it is already taking the
+            // process down; stopping again here would race it.
+            throw CancellationError()
         } catch {
+            await stop(pluginID, cancelStart: false)
+            // Set after the stop, which leaves `.stopped`: the store must show
+            // why the plugin is not running.
             runtimeStates[pluginID] = .error(error.localizedDescription)
-            await stop(pluginID)
             throw error
         }
     }
 
-    private func handleExit(pluginID: String, code: Int32) {
+    /// Bookkeeping for a server process that has exited.
+    ///
+    /// Keyed on the pid as well as the plugin: a termination handler can fire
+    /// after the plugin has been stopped and started again, and an exit from
+    /// the previous process must not tear down the state of its replacement.
+    private func handleExit(pluginID: String, pid: Int32, code: Int32, signalled: Bool) {
+        let deliberate = deliberateStops.remove(pid) != nil
+        guard let current = processes[pluginID], current.processIdentifier == pid else {
+            log(for: pluginID).line(
+                deliberate ? "Stopped (pid \(pid))." : "Earlier process \(pid) exited.")
+            return
+        }
+
         processes[pluginID] = nil
         assignedPorts[pluginID] = nil
         ports.release(pluginID)
         sessions[pluginID]?.removeAll()
-        busy.remove(pluginID)
-        if case .stopping = runtimeState(pluginID) {
+
+        // A stop the host asked for is not an error, whatever status SIGTERM
+        // or SIGKILL left behind; neither is a clean exit.
+        if deliberate || code == 0 {
             runtimeStates[pluginID] = .stopped
-        } else if code == 0 {
+            log(for: pluginID).line(deliberate ? "Stopped." : "Process exited.")
+        } else if case .stopping = runtimeState(pluginID) {
             runtimeStates[pluginID] = .stopped
+            log(for: pluginID).line("Stopped.")
         } else {
-            runtimeStates[pluginID] = .error("Exited with code \(code).")
+            let reason = signalled ? "was terminated by signal \(code)" : "exited with code \(code)"
+            runtimeStates[pluginID] = .error("The plugin process \(reason).")
+            log(for: pluginID).line("Process \(reason).")
         }
-        log(for: pluginID).line("Process exited with code \(code).")
     }
 
     /// Stop a resident plugin, escalating to SIGKILL if it will not leave.
     func stop(_ pluginID: String) async {
+        await stop(pluginID, cancelStart: true)
+    }
+
+    private func stop(_ pluginID: String, cancelStart: Bool) async {
+        // A start in progress would otherwise carry on polling a process that
+        // is being killed and then report it as a failed start.
+        // Dropped as well as cancelled, so a start requested after this stop
+        // gets a fresh attempt instead of joining the one being torn down.
+        if cancelStart, let inFlight = startTasks.removeValue(forKey: pluginID) {
+            inFlight.task.cancel()
+        }
+
         guard let process = processes[pluginID], process.isRunning else {
             processes[pluginID] = nil
             runtimeStates[pluginID] = .stopped
             assignedPorts[pluginID] = nil
             ports.release(pluginID)
+            sessions[pluginID]?.removeAll()
             return
         }
+        let pid = process.processIdentifier
+        deliberateStops.insert(pid)
         runtimeStates[pluginID] = .stopping
         log(for: pluginID).line("Stopping…")
         process.terminate()
@@ -664,33 +803,88 @@ final class PluginRuntime: ObservableObject {
         // A model mid-load ignores SIGTERM until it returns from a native call,
         // so give it a bounded grace period before forcing the issue. The arbiter
         // has already promised this memory to someone else.
-        for _ in 0..<30 {
-            if !process.isRunning { break }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        if process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
+        //
+        // The wait must not be cut short by the caller's cancellation: stop is
+        // routinely reached from a task that has just been cancelled (a
+        // superseded prompt evicting a plugin, a cancelled start), and a
+        // cancelled `Task.sleep` returns at once, which turned the grace
+        // period into an immediate SIGKILL.
+        let exited = await Self.waitForExit(process, timeout: 3)
+        if !exited {
+            kill(pid, SIGKILL)
             log(for: pluginID).line("Did not exit in time; terminated.")
         }
-        processes[pluginID] = nil
-        assignedPorts[pluginID] = nil
-        ports.release(pluginID)
-        runtimeStates[pluginID] = .stopped
+
+        // Only clear state that still belongs to this process: the exit
+        // handler may already have run, and a new start may have begun.
+        if processes[pluginID] === process {
+            processes[pluginID] = nil
+            assignedPorts[pluginID] = nil
+            ports.release(pluginID)
+            sessions[pluginID]?.removeAll()
+            runtimeStates[pluginID] = .stopped
+        }
     }
 
-    /// Stop everything. Called when the application quits.
+    /// Poll for a process to exit, immune to the caller's cancellation.
+    ///
+    /// The polling runs in a detached task, which does not inherit
+    /// cancellation, and awaiting its value does not propagate it either.
+    nonisolated private static func waitForExit(_ process: Process, timeout: TimeInterval) async -> Bool {
+        let handle = UncheckedProcess(process)
+        return await Task.detached {
+            let deadline = Date().addingTimeInterval(timeout)
+            while handle.process.isRunning && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            return !handle.process.isRunning
+        }.value
+    }
+
+    /// Stop everything.
     func stopAll() async {
-        for pluginID in processes.keys { await stop(pluginID) }
+        for pluginID in Array(processes.keys) { await stop(pluginID) }
+    }
+
+    /// Stop everything synchronously, for application quit.
+    ///
+    /// `stopAll` is asynchronous, and nothing asynchronous scheduled from a
+    /// `willTerminate` observer is guaranteed to run before the process exits.
+    /// This signals every server at once, waits a short bounded time for all of
+    /// them together, and kills whatever remains, all before returning.
+    /// Adapters that outlive even this (a crash skips it entirely) are caught by
+    /// their own parent-death watch (PLUGIN_PROTOCOL.md section 4d).
+    func terminateAllForQuit(grace: TimeInterval = 2) {
+        for inFlight in startTasks.values { inFlight.task.cancel() }
+        let running = processes.values.filter(\.isRunning)
+        for process in running {
+            deliberateStops.insert(process.processIdentifier)
+            process.terminate()
+        }
+        let deadline = Date().addingTimeInterval(grace)
+        while running.contains(where: \.isRunning) && Date() < deadline {
+            usleep(50_000)
+        }
+        for process in running where process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+        }
     }
 
     // MARK: Health
 
     /// Poll `GET /health` until the adapter reports ready.
+    ///
+    /// Cancellation ends the poll at once with `CancellationError`. It used to
+    /// be swallowed twice over -- a cancelled `Task.sleep` returned early and
+    /// the cancelled request was filed as a transport error meaning "not bound
+    /// yet" -- so a cancelled start spun on the main actor, issuing requests
+    /// back to back until the five-minute deadline.
     private func waitUntilReady(pluginID: String, port: Int, timeout: TimeInterval = 300) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         var lastDetail = "no response yet"
 
         while Date() < deadline {
+            try Task.checkCancellation()
             if let process = processes[pluginID], !process.isRunning {
                 throw PluginError.notReady("The plugin process exited during startup.")
             }
@@ -702,14 +896,18 @@ final class PluginRuntime: ObservableObject {
                 case .loading: lastDetail = health.detail ?? "loading"
                 case .error: throw PluginError.notReady(health.detail ?? "The plugin reported an error.")
                 }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch let error as PluginError {
                 // A protocol mismatch or a reported error is terminal; a transport
                 // failure just means the server has not bound yet.
-                if case .transport = error {} else { throw error }
-            } catch {
-                lastDetail = error.localizedDescription
+                if case .transport(let detail) = error {
+                    lastDetail = detail
+                } else {
+                    throw error
+                }
             }
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try await Task.sleep(nanoseconds: 500_000_000)
         }
         throw PluginError.notReady("Timed out waiting for the plugin to become ready (\(lastDetail)).")
     }
@@ -794,13 +992,8 @@ final class PluginRuntime: ObservableObject {
             throw PluginError.notInstalled(ref)
         }
 
-        busy.insert(plugin.id)
-        runningOneShotTasks[plugin.id] = ref.taskID
-        defer {
-            busy.remove(plugin.id)
-            runningOneShotTasks.removeValue(forKey: plugin.id)
-            lastUsed[plugin.id] = Date()
-        }
+        beginInvocation(ref, execution: plugin.execution)
+        defer { endInvocation(ref) }
 
         switch plugin.execution {
         case .residentServer, .session:
@@ -832,7 +1025,7 @@ final class PluginRuntime: ObservableObject {
         let decision = arbiter.admitOneShot(
             PluginResidency(pluginID: plugin.id,
                             declaredRamGB: plugin.declaredRAMGB(forTask: ref.taskID)),
-            residents: residentSet())
+            residents: oneShotAdmissionResidents(for: plugin.id))
         try await applyAdmission(decision, requester: plugin.id)
 
         let outputDirectory = paths.newRunDirectory(pluginID: plugin.id)
@@ -850,7 +1043,7 @@ final class PluginRuntime: ObservableObject {
             executable: paths.venvPython(plugin.id),
             arguments: arguments,
             workingDirectory: locator.adapterDirectory(for: plugin),
-            environment: locator.processEnvironment(for: plugin.id),
+            environment: oneShotEnvironment(for: plugin.id),
             onStdoutLine: { [weak self] line in
                 Task { @MainActor in
                     guard let self else { return }
@@ -878,6 +1071,13 @@ final class PluginRuntime: ObservableObject {
         return try PluginPayloadCoder.decodeResult(data, ref: ref, relativeTo: outputDirectory)
     }
 
+    private func oneShotEnvironment(for pluginID: String) -> [String: String] {
+        var environment = locator.processEnvironment(for: pluginID)
+        environment["HF_HUB_OFFLINE"] = "1"
+        environment["TRANSFORMERS_OFFLINE"] = "1"
+        return environment
+    }
+
     // MARK: HTTP
 
     private func url(path: String, port: Int) -> URL {
@@ -892,6 +1092,9 @@ final class PluginRuntime: ObservableObject {
             let (data, _) = try await urlSession.data(for: request)
             return data
         } catch {
+            // URLSession reports a cancelled task as URLError.cancelled; that
+            // is the caller's cancellation, not a server that is not up yet.
+            if Task.isCancelled { throw CancellationError() }
             throw PluginError.transport(error.localizedDescription)
         }
     }
@@ -907,6 +1110,7 @@ final class PluginRuntime: ObservableObject {
         do {
             (data, response) = try await urlSession.data(for: request)
         } catch {
+            if Task.isCancelled { throw CancellationError() }
             throw PluginError.transport(error.localizedDescription)
         }
 
@@ -924,4 +1128,18 @@ final class PluginRuntime: ObservableObject {
         }
         return data
     }
+}
+
+/// A start shared by concurrent callers, tagged so its cleanup cannot clear a
+/// newer start that replaced it.
+private struct InFlightStart {
+    let token: UUID
+    let task: Task<Void, Error>
+}
+
+/// Carries a `Process` into a detached task. `Process` predates Sendable;
+/// the only use is reading `isRunning`, which is thread-safe.
+private struct UncheckedProcess: @unchecked Sendable {
+    let process: Process
+    init(_ process: Process) { self.process = process }
 }

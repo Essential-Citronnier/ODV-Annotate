@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -38,15 +39,23 @@ from _shared.protocol import (  # noqa: E402
 )
 from _shared.bench import bench_arg_present, run_resident_bench  # noqa: E402
 from _shared.cli import parse_server_args  # noqa: E402
+from _shared.lifeline import start_parent_watch  # noqa: E402
 from _shared.weights import (  # noqa: E402
+    WEIGHTS_DIR_ENV,
     download_huggingface,
     install_arg_present,
+    installed_weight_dir,
     parse_install_args,
     run_install,
 )
 
 PLUGIN_ID = "gemma-4-e4b"
 MODEL_ID = "mlx-community/gemma-4-E4B-it-4bit"
+
+# The weight id plugins.json declares for MODEL_ID. The host installs it into
+# $ODV_WEIGHTS_DIR/<this id>/ (PLUGIN_PROTOCOL.md section 4d).
+WEIGHT_ID = "gemma-4-e4b-it-4bit"
+WEIGHTS_OVERRIDE_ENV = "ODV_GEMMA_WEIGHTS"
 
 # Larger inputs are downsampled before the vision tower sees them; the model's
 # own preprocessing would do it anyway, and doing it here bounds the memory a
@@ -179,6 +188,31 @@ If no abnormalities are found, return {{"regions": []}}.
 # ---------------------------------------------------------------------------
 
 
+def model_source() -> str:
+    """What to hand `mlx_vlm.load`: the installed directory, normally.
+
+    Loading by hub id, as the legacy server did, ignored the weights the store
+    downloaded and fetched (or looked up in the shared hub cache) a second
+    copy, which also broke invariant 3 at inference time. Under the host --
+    ODV_WEIGHTS_DIR set -- the installed directory is the only acceptable
+    source, and its absence is reported rather than papered over by a
+    download. Started by hand with neither variable set and nothing installed,
+    the adapter falls back to the hub id so it remains usable for development.
+    """
+    directory = installed_weight_dir(PLUGIN_ID, WEIGHT_ID,
+                                     override_env=WEIGHTS_OVERRIDE_ENV)
+    if (directory / "config.json").is_file():
+        return str(directory)
+    if os.environ.get(WEIGHTS_DIR_ENV) or os.environ.get(WEIGHTS_OVERRIDE_ENV):
+        raise PluginError(
+            ErrorCode.NOT_READY,
+            f"Weights for {MODEL_ID} are not present at {directory}. "
+            "Install the plugin from the store.",
+            recoverable=False,
+        )
+    return MODEL_ID
+
+
 class GemmaModel:
     """Holds the MLX model and serializes generation.
 
@@ -205,12 +239,17 @@ class GemmaModel:
         """Load weights. Failure is recorded, not raised: the host polls
         /health and needs a reachable server reporting `error` with a reason,
         not a process that exited before it could answer."""
-        logger.info("Loading %s", MODEL_ID)
         started = time.time()
         try:
+            source = model_source()
+            logger.info("Loading %s from %s", MODEL_ID, source)
             from mlx_vlm import load
 
-            self._model, self._processor = load(MODEL_ID)
+            self._model, self._processor = load(source)
+        except PluginError as exc:
+            self._load_error = exc.message
+            logger.error("Model load failed: %s", self._load_error)
+            return
         except BaseException as exc:  # noqa: BLE001
             self._load_error = f"{type(exc).__name__}: {exc}"
             logger.error("Model load failed: %s", self._load_error)
@@ -576,6 +615,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         raise SystemExit("refusing to bind a non-loopback address")
+    # Started before uvicorn, whose startup hook spends tens of seconds
+    # loading the model: a host that crashes meanwhile must still be noticed.
+    start_parent_watch()
     uvicorn.run(app, host=args.host, port=args.port,
                 log_level=args.log_level, workers=1)
     return 0

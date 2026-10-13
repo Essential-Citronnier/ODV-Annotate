@@ -170,6 +170,25 @@ struct ResourceArbiter: Sendable {
     /// decompressed CT volume, none of which declare themselves to the arbiter.
     var residentFraction: Double
 
+    /// Share of physical memory a one-shot job may claim when it cannot fit
+    /// `residentFraction` at all.
+    ///
+    /// The co-residency share exists to stop models that each nominally fit
+    /// from crowding out the viewer and each other. A one-shot is different in
+    /// kind: it is transient, it owns no resident slot, and it can run with
+    /// everything evictable stopped. Holding it to half the machine made
+    /// TotalSegmentator's measured 23.5 GB peak unrunnable below 47 GB of
+    /// physical memory -- every 32 GB Mac included -- while that same machine
+    /// can host the job alone. A job too large for the shared share is
+    /// therefore budgeted against this larger one instead, and still has to
+    /// clear live headroom, so a loaded machine continues to refuse it.
+    ///
+    /// Only jobs too large for the shared share take this path, so everything
+    /// that fits the shared share behaves exactly as before: on 16 GB, Gemma is
+    /// still evicted for a 3.5 GB job rather than the two being squeezed into
+    /// three quarters of the machine.
+    var oneShotFraction: Double
+
     /// Held back from live availability so that admitting a plugin never takes
     /// the machine to the edge. Sized to roughly one large series plus the
     /// window server's working set.
@@ -178,9 +197,11 @@ struct ResourceArbiter: Sendable {
     var probe: @Sendable () -> MemoryStatus
 
     init(residentFraction: Double = 0.5,
+         oneShotFraction: Double = 0.75,
          safetyMarginGB: Double = 2.0,
          probe: @escaping @Sendable () -> MemoryStatus = { MemoryProbe.system() }) {
         self.residentFraction = residentFraction
+        self.oneShotFraction = max(oneShotFraction, residentFraction)
         self.safetyMarginGB = safetyMarginGB
         self.probe = probe
     }
@@ -189,7 +210,11 @@ struct ResourceArbiter: Sendable {
 
     /// Aggregate declared-RAM ceiling for all plugins together.
     func declaredBudgetGB(_ status: MemoryStatus) -> Double {
-        max(0, status.physicalGB * residentFraction)
+        declaredBudgetGB(status, fraction: residentFraction)
+    }
+
+    private func declaredBudgetGB(_ status: MemoryStatus, fraction: Double) -> Double {
+        max(0, status.physicalGB * fraction)
     }
 
     /// Memory the arbiter is willing to commit to a newcomer right now.
@@ -210,9 +235,10 @@ struct ResourceArbiter: Sendable {
         return decide(request, residents: residents.filter { $0.pluginID != request.pluginID })
     }
 
-    private func decide(_ request: PluginResidency, residents: [PluginResidency]) -> AdmissionDecision {
+    private func decide(_ request: PluginResidency, residents: [PluginResidency],
+                        fraction: Double? = nil) -> AdmissionDecision {
         let status = probe()
-        let budget = declaredBudgetGB(status)
+        let budget = declaredBudgetGB(status, fraction: fraction ?? residentFraction)
         let headroom = liveHeadroomGB(status)
 
         var remaining = residents
@@ -252,8 +278,20 @@ struct ResourceArbiter: Sendable {
     /// already running under the same identifier is not a reason to skip the
     /// check. The subprocess needs its own peak on top of whatever is held, and
     /// that sibling is as evictable as any other.
+    ///
+    /// A job whose declaration exceeds the shared budget on its own is then
+    /// re-decided against `oneShotFraction`; see there.
+    ///
+    /// The caller passes the residents *other than* this invocation: a one-shot
+    /// already in flight for the same plugin belongs in the set, the request
+    /// itself does not (see `PluginRuntime.oneShotAdmissionResidents`).
     func admitOneShot(_ request: PluginResidency, residents: [PluginResidency]) -> AdmissionDecision {
-        decide(request, residents: residents)
+        let shared = decide(request, residents: residents)
+        guard case .refuse = shared,
+              oneShotFraction > residentFraction,
+              request.declaredRamGB > declaredBudgetGB(probe()) + Self.epsilon
+        else { return shared }
+        return decide(request, residents: residents, fraction: oneShotFraction)
     }
 
     /// Plugins to stop before `request` runs, without deciding admission — used

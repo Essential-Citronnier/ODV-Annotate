@@ -9,6 +9,7 @@
 // click re-decodes against the cached embedding.
 // Licensed under the MIT License. See LICENSE for details.
 
+import Combine
 import CoreGraphics
 import Foundation
 
@@ -62,6 +63,13 @@ final class PromptSession: ObservableObject {
     /// Serialises prompts: a click arriving mid-decode would otherwise race, and
     /// the later mask could be overwritten by the earlier one's completion.
     private var inFlight: Task<Void, Never>?
+    /// Bumped whenever the current session is abandoned. A session whose
+    /// open completes after its slice was left is closed instead of adopted;
+    /// otherwise the old slice's embedding would be bound to the new slice's
+    /// prompts, producing a plausible mask of the wrong pixels.
+    private var generation = 0
+    /// Subscriptions to the owning panel, released with the session.
+    private var observers: Set<AnyCancellable> = []
 
     /// `runtime` has no default: `PluginRuntime.shared` is main-actor isolated,
     /// and a default argument is evaluated in the caller's (nonisolated) context,
@@ -109,6 +117,17 @@ final class PromptSession: ObservableObject {
         state.reset(sliceKey: state.sliceKey)
         lastError = nil
         closeSession()
+    }
+
+    /// Keep a subscription alive for as long as this session is.
+    func observe(_ cancellable: AnyCancellable) {
+        observers.insert(cancellable)
+    }
+
+    /// Release everything: the panel went away.
+    func tearDown() {
+        observers.removeAll()
+        clear()
     }
 
     /// Called when the panel's slice changes.
@@ -180,15 +199,24 @@ final class PromptSession: ObservableObject {
 
     private func ensureSession(slicePNG: String) async throws -> String {
         if let sessionID { return sessionID }
+        let openedFor = generation
         var opening = PluginInvocation()
         opening.slice2d = slicePNG
         let opened = try await runtime.openSession(pluginID: pluginID,
                                                   invocation: opening)
+        guard openedFor == generation, !Task.isCancelled else {
+            // The slice changed (or the panel closed) while the encoder ran.
+            let runtime = self.runtime
+            let pluginID = self.pluginID
+            Task { try? await runtime.closeSession(pluginID: pluginID, sessionID: opened) }
+            throw CancellationError()
+        }
         sessionID = opened
         return opened
     }
 
     private func closeSession() {
+        generation += 1
         guard let sessionID else { return }
         self.sessionID = nil
         let runtime = self.runtime

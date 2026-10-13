@@ -44,7 +44,9 @@ from _shared.bench import bench_arg_present, run_oneshot_bench  # noqa: E402
 from _shared.progress import ProgressReporter  # noqa: E402
 from _shared.protocol import ErrorCode, PluginError  # noqa: E402
 from _shared.weights import (  # noqa: E402
+    WEIGHTS_DIR_ENV,
     install_arg_present,
+    installed_weight_dir,
     license_key,
     parse_install_args,
     run_install,
@@ -158,6 +160,52 @@ def _totalseg_home(override: Path | None = None) -> Path:
     return override or Path(
         os.environ.get("TOTALSEG_HOME_DIR", Path.home() / ".totalsegmentator")
     )
+
+
+def _configure_home(task_id: str) -> Path:
+    """Point TotalSegmentator at the weights the store installed for this task.
+
+    Each weight id is installed with TOTALSEG_HOME_DIR set to its own --dest
+    (`install_weights`), so that directory holds both the nnU-Net results and,
+    for a licensed task, the config.json carrying the licence number that
+    `_register_license` wrote. At run time the same variable must name the
+    same directory, or TotalSegmentator looks in ~/.totalsegmentator, finds no
+    weights and no licence, and either refuses or starts a download.
+
+    Under the host (ODV_WEIGHTS_DIR set) the installed directory always wins,
+    even over a TOTALSEG_HOME_DIR inherited from the user's shell. Run by hand,
+    an explicit TOTALSEG_HOME_DIR is respected, and otherwise the app's layout
+    is used when the store has installed the task.
+    """
+    weight_id = TASK_WEIGHTS.get(task_id)
+    if weight_id is not None:
+        installed = installed_weight_dir(PLUGIN_ID, weight_id)
+        if os.environ.get(WEIGHTS_DIR_ENV) or (
+                not os.environ.get("TOTALSEG_HOME_DIR") and installed.is_dir()):
+            os.environ["TOTALSEG_HOME_DIR"] = str(installed)
+    return _totalseg_home()
+
+
+def _require_single_series(series_dir: Path) -> None:
+    """Refuse a directory that holds more than one DICOM series.
+
+    TotalSegmentator converts a whole directory and does not say which series
+    it chose, so a folder with a scout, a contrast phase, and a reformat yields
+    a segmentation of whichever it picked -- and the SEG export, which picks
+    independently, can reference a different one. The host stages exactly the
+    selected series' files (PluginSeriesStaging); this check is what keeps a
+    caller that does not from getting a silently wrong result.
+    """
+    import SimpleITK as sitk
+
+    series_ids = sitk.ImageSeriesReader.GetGDCMSeriesIDs(str(series_dir))
+    if len(series_ids) > 1:
+        raise PluginError(
+            ErrorCode.BAD_INPUT,
+            f"{series_dir} contains {len(series_ids)} DICOM series; pass a "
+            "directory holding only the series to segment.",
+            recoverable=False,
+        )
 
 
 def _license_registered(home: Path | None = None) -> bool:
@@ -453,6 +501,7 @@ def pipeline(args: argparse.Namespace, out_dir: Path,
         raise PluginError(ErrorCode.BAD_INPUT, f"Series directory not found: {series_dir}")
 
     reporter.stage(0.0, 0.05, "Checking model environment")
+    _configure_home(args.task)
     _require_totalsegmentator()
     if args.task in LICENSE_REQUIRED_TASKS and not _license_registered():
         raise PluginError(
@@ -466,6 +515,7 @@ def pipeline(args: argparse.Namespace, out_dir: Path,
             f"Weights for the '{args.task}' task are not downloaded yet. "
             "Install the task from the plugin store.",
         )
+    _require_single_series(series_dir)
 
     with tempfile.TemporaryDirectory(prefix="odv-totalseg-") as tmp:
         seg_out = Path(tmp) / "masks"

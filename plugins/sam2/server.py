@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import threading
 from pathlib import Path
@@ -33,6 +32,7 @@ from _shared.sam_session import SamSessionAdapter, select_device  # noqa: E402
 from _shared.weights import (  # noqa: E402
     download_huggingface,
     install_arg_present,
+    installed_weight_dir,
     parse_install_args,
     run_install,
 )
@@ -42,6 +42,10 @@ PLUGIN_ID = "sam2"
 # Apache-2.0, ~180 MB. Declared in plugins.json under the same repo id, and
 # downloaded by the store into the plugin's weight directory at install time.
 MODEL_REPO = "facebook/sam2.1-hiera-small"
+
+# The weight id plugins.json declares for that repo. The host installs it into
+# $ODV_WEIGHTS_DIR/<this id>/ (PLUGIN_PROTOCOL.md section 4d).
+WEIGHT_ID = "sam2.1-hiera-small"
 
 # Matches `max_sessions` in plugins.json. Duplicated rather than read from the
 # manifest because the adapter must bound its own memory even when launched
@@ -55,16 +59,14 @@ logger = logging.getLogger(PLUGIN_ID)
 
 
 def weights_dir() -> Path:
-    """Where the store places this plugin's weights.
+    """Where the store placed this plugin's checkpoint.
 
-    Overridable so the adapter can be exercised against a checkout of the
-    weights outside an installed plugin environment.
+    The directory the install hook was given as --dest, as the host reports it
+    through ODV_WEIGHTS_DIR. `ODV_SAM2_WEIGHTS` still overrides it, so the
+    adapter can be exercised against a checkout of the weights outside an
+    installed plugin environment.
     """
-    override = os.environ.get("ODV_SAM2_WEIGHTS")
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / "Library" / "Application Support" / "OpenDicomViewer" / \
-        "plugins" / PLUGIN_ID / "weights"
+    return installed_weight_dir(PLUGIN_ID, WEIGHT_ID, override_env="ODV_SAM2_WEIGHTS")
 
 
 class Sam2Backend:

@@ -10,8 +10,62 @@
 // Licensed under the MIT License. See LICENSE for details.
 
 import AppKit
+import Combine
 import CoreGraphics
 import Foundation
+
+/// Identifies the pixels a panel is displaying, for prompt-session invalidation.
+///
+/// Everything that changes which pixels are on screen belongs in the key. The
+/// series and image indices alone describe only the axial view: in a sagittal
+/// or coronal panel the visible slice is `mprSliceIndex`, and in a MIP panel it
+/// is the slab, so scrolling an MPR or MIP panel left the key unchanged and the
+/// next prompt was decoded against the embedding of an image no longer shown.
+/// Window/level and zoom are deliberately absent: they change the rendering,
+/// not the anatomy a mask is drawn on.
+enum PromptSliceKey {
+    static func make(seriesIndex: Int, imageIndex: Int, mode: PanelMode,
+                     mprSliceIndex: Int, mipSlabPosition: Int,
+                     mipSlabThickness: Int) -> String {
+        let base = "s\(seriesIndex)"
+        switch mode {
+        case .slice2D:
+            return "\(base)/axial/i\(imageIndex)"
+        case .mprSagittal:
+            return "\(base)/sagittal/m\(mprSliceIndex)"
+        case .mprCoronal:
+            return "\(base)/coronal/m\(mprSliceIndex)"
+        case .mip:
+            return "\(base)/mip/p\(mipSlabPosition)x\(mipSlabThickness)"
+        }
+    }
+
+    static func make(for panel: PanelState) -> String {
+        make(seriesIndex: panel.seriesIndex, imageIndex: panel.imageIndex,
+             mode: panel.panelMode, mprSliceIndex: panel.mprSliceIndex,
+             mipSlabPosition: panel.mipSlabPosition,
+             mipSlabThickness: panel.mipSlabThickness)
+    }
+
+    /// Fires whenever any input to the key may have changed.
+    ///
+    /// `@Published` emits before the property is written, so subscribers read
+    /// the panel on the next main-queue turn rather than from inside the sink.
+    static func changes(of panel: PanelState) -> AnyPublisher<Void, Never> {
+        Publishers.MergeMany(
+            panel.$seriesIndex.map { _ in () }.eraseToAnyPublisher(),
+            panel.$imageIndex.map { _ in () }.eraseToAnyPublisher(),
+            panel.$panelMode.map { _ in () }.eraseToAnyPublisher(),
+            panel.$mprSliceIndex.map { _ in () }.eraseToAnyPublisher(),
+            panel.$mipSlabPosition.map { _ in () }.eraseToAnyPublisher(),
+            panel.$mipSlabThickness.map { _ in () }.eraseToAnyPublisher()
+        )
+        // Each @Published replays its current value on subscribe; those
+        // arrive with an unchanged key, which `sliceChanged` ignores.
+        .receive(on: DispatchQueue.main)
+        .eraseToAnyPublisher()
+    }
+}
 
 @MainActor
 extension DICOMModel {
@@ -38,11 +92,18 @@ extension DICOMModel {
     /// Used to invalidate a cached embedding when the user scrolls: a mask
     /// decoded against a stale embedding would look plausible and be wrong.
     func sliceKey(for panel: PanelState) -> String {
-        "\(panel.seriesIndex)#\(panel.imageIndex)"
+        PromptSliceKey.make(for: panel)
     }
 
     /// The session for a panel, created on first use.
+    ///
+    /// A new session watches its panel, and the panel list, from the moment it
+    /// exists. Before, a session learned of a slice change only when the next
+    /// prompt arrived, so a user who clicked once and scrolled away left the
+    /// adapter's embedding cached -- and, holding an open session, the plugin
+    /// non-evictable -- until they happened to prompt again.
     func promptSession(for panel: PanelState) -> PromptSession? {
+        prunePromptSessions()
         if let existing = promptSessions[panel.id] {
             existing.sliceChanged(to: sliceKey(for: panel))
             return existing
@@ -52,7 +113,41 @@ extension DICOMModel {
                                     pluginID: pluginID,
                                     sliceKey: sliceKey(for: panel))
         promptSessions[panel.id] = session
+
+        let panelID = panel.id
+        session.observe(
+            PromptSliceKey.changes(of: panel).sink { [weak self, weak panel, weak session] in
+                guard let panel, let session else { return }
+                // A panel that has been dropped from the layout is torn down
+                // rather than tracked.
+                guard self?.panels.contains(where: { $0.id == panelID }) ?? false else {
+                    self?.discardPromptSession(for: panelID)
+                    return
+                }
+                session.sliceChanged(to: PromptSliceKey.make(for: panel))
+            })
+        session.observe(
+            $panels.receive(on: DispatchQueue.main).sink { [weak self] _ in
+                self?.prunePromptSessions()
+            })
         return session
+    }
+
+    /// Close the sessions of panels that are no longer in the layout.
+    ///
+    /// Layout changes replace `panels` wholesale without notifying anything
+    /// prompt-related, so the session of a removed panel kept its adapter-side
+    /// embedding and kept its plugin pinned against eviction indefinitely.
+    func prunePromptSessions() {
+        let live = Set(panels.map(\.id))
+        for panelID in promptSessions.keys where !live.contains(panelID) {
+            discardPromptSession(for: panelID)
+        }
+    }
+
+    private func discardPromptSession(for panelID: UUID) {
+        guard let session = promptSessions.removeValue(forKey: panelID) else { return }
+        session.tearDown()
     }
 
     /// Add a click prompt at a pixel location in the panel's image.
