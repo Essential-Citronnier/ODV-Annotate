@@ -34,9 +34,25 @@ First run will:
 # Stop server
 ./launch.sh --stop
 
-# Health check
-curl http://127.0.0.1:8741/health
+# Health check (every request needs the token the server was started with)
+curl -H "X-ODV-Token: $ODV_AI_TOKEN" http://127.0.0.1:8741/health
+
+# Tests (no model download needed)
+.venv/bin/python -m unittest test_server
 ```
+
+## Security
+
+The server binds to `127.0.0.1` only, sends no CORS headers, and rejects any
+request that lacks the `X-ODV-Token` header or whose `Host` header is not
+`127.0.0.1`/`localhost`. The viewer generates a fresh token on every launch
+and passes it to the server it spawns via `ODV_AI_TOKEN`; a server it did not
+start is never adopted unless it was started with the same token (export
+`ODV_AI_TOKEN` for both the viewer and `launch.sh` during development).
+
+The model revision is pinned in `server.py` (`MODEL_REVISION`, overridable
+with the `ODV_MODEL_REVISION` environment variable) and Python dependencies
+are pinned exactly in `requirements.txt`.
 
 ## API Endpoints
 
@@ -56,6 +72,7 @@ IMAGE_B64=$(base64 -i sample.png)
 # Send request
 curl -X POST http://127.0.0.1:8741/analyze \
   -H "Content-Type: application/json" \
+  -H "X-ODV-Token: $ODV_AI_TOKEN" \
   -d "{
     \"image\": \"$IMAGE_B64\",
     \"window_info\": {
