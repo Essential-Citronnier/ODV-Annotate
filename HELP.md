@@ -251,15 +251,50 @@ If you choose **Not Now**, open the AI inspector (brain button) and press
 | Flag possible abnormalities | **AI ▸ Detect Abnormalities** |
 | Describe a region | Draw a rectangle with the **ROI Stats** tool (`S`) on the slice, then **AI ▸ Describe ROI** (or **Describe ROI** in the AI inspector) |
 | Change what the analysis focuses on | **Mode** in the AI inspector, or **AI ▸ Analysis Mode** |
-| Hide or clear results | **AI ▸ Show AI Annotations** / **Clear AI Annotations** |
+| Hide results | **AI ▸ Show AI Annotations** |
+| Clear results | **Clear** in the AI inspector, or **AI ▸ Clear AI Annotations on This Slice**. To clear every slice, use the arrow beside **Clear** or **AI ▸ Clear AI Annotations on All Slices**. Measurements you drew are never cleared |
 
 Describe ROI always uses the most recent ROI Stats rectangle on the slice you
 are looking at; without one it is unavailable. Results belong to the slice
 they were computed on: scroll away and back to see them again.
 
+### Choosing the engine
+
 If the **Gemma plugin** is installed from the Plugin Store, the AI inspector
-offers a choice between the built-in engine and the plugin. Only one of them
-holds the model in memory at a time.
+shows an **Engine** switch: **Built-in** (the AI server that ships with the
+app) or **Gemma plugin**. Both run the same model and give the same kind of
+results. Only one of them holds the model in memory at a time; switching stops
+the other.
+
+Both engines share one copy of the model on disk. Whichever you set up first
+downloads it; the other reuses it:
+
+- Built-in first: `~/.cache/huggingface/hub/models--mlx-community--gemma-4-E4B-it-4bit/`
+- Plugin first: `~/Library/Application Support/OpenDicomViewer/plugins/gemma-4-e4b/weights/gemma-4-e4b-it-4bit/`
+
+If a plugin will not start because the Mac is short of free memory right now,
+the app asks whether to **Start Anyway**. Starting anyway may make the Mac slow
+while it pages memory; quitting other apps first is better. A plugin that needs
+more memory than the Mac can give plugins at all is refused without that
+choice.
+
+### Troubleshooting
+
+- **Setup failed:** open the AI inspector; it shows the end of the log. Check
+  your internet connection or proxy, then press **Retry** (the download
+  resumes where it stopped). **Reinstall** rebuilds the Python environment
+  from scratch.
+- **Not enough disk space:** free about 8 GB (about 2 GB if the model is
+  already downloaded), then **Retry**.
+- **The model takes a long time to appear:** the first download is 5.2 GB;
+  the inspector shows its progress. Later launches load in seconds.
+- **Describe ROI is unavailable:** draw a rectangle with **ROI Stats** (`S`)
+  on the slice you are looking at first.
+- **No results on this slice:** results belong to the slice they were computed
+  on. Scroll back, or press `G` to analyze this slice.
+- **Requires Apple Silicon:** the local model runs only on M-series Macs.
+- **Still stuck:** **AI ▸ Restart AI Server**; expand **Server
+  log** in the inspector for details.
 
 ### Disclaimer
 
