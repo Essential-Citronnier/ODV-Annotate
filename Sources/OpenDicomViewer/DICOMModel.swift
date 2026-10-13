@@ -947,16 +947,10 @@ class DICOMModel: ObservableObject {
                     ww = sw
                     wc = sc
                 } else {
-                    // Try File Defaults
-                    ww = dcmObj.getWindowWidth()
-                    wc = dcmObj.getWindowCenter()
-                    
-                    // If invalid/missing, Auto-Calculate from Min/Max
-                    if ww <= 0 {
-                        let (minVal, maxVal) = self.computeMinMax(data: rawData as Data, isSigned: isSigned.boolValue, bits: depth)
-                        ww = maxVal - minVal
-                        wc = minVal + (ww / 2.0)
-                    }
+                    // File's stored window, else the data range
+                    (ww, wc) = PixelValues.defaultWindow(
+                        storedWidth: dcmObj.getWindowWidth(), storedCenter: dcmObj.getWindowCenter(),
+                        data: rawData, bits: depth, isSigned: isSigned.boolValue, samples: samples)
                 }
                 
                 // 6. Render
@@ -965,7 +959,7 @@ class DICOMModel: ObservableObject {
                     self.dcmtkCache.setObject(dcmObj, forKey: url as NSURL)
                     self.imageCacheParamsLock.lock()
                     self.imageCacheParams[url as NSURL] = (ww, wc)
-                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: width, height: height, bitDepth: depth, samples: samples, isSigned: isSigned.boolValue, isMonochrome1: false)
+                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: width, height: height, bitDepth: depth, samples: samples, isSigned: isSigned.boolValue, isMonochrome1: dcmObj.isMonochrome1())
                     self.imageCacheParamsLock.unlock()
                     self.rawDataCache.setObject(rawData as NSData, forKey: url as NSURL)
 
@@ -978,6 +972,7 @@ class DICOMModel: ObservableObject {
                         self.bitDepth = depth
                         self.samples = samples
                         self.isSigned = isSigned.boolValue
+                        self.isMonochrome1 = dcmObj.isMonochrome1()
                         
                         // Update W/L State
                         self.windowWidth = ww
@@ -1017,20 +1012,27 @@ class DICOMModel: ObservableObject {
                     samples: &j2kSamples,
                     isSigned: &j2kSigned
                 ) {
-                    // Successfully decoded JPEG2000 — render using raw data path
-                    let (minVal, maxVal) = self.computeMinMax(data: j2kData, isSigned: j2kSigned.boolValue, bits: j2kDepth)
-                    let autoWW = maxVal - minVal
-                    let autoWC = minVal + (autoWW / 2.0)
+                    // Successfully decoded JPEG2000 (modality units) — render using raw data path
+                    let attrs = DicomPixelAttributes.read(url: url) ?? DicomPixelAttributes()
+                    let j2kMono1 = j2kSamples == 1 && attrs.isMonochrome1
+                    let (autoWW, autoWC) = PixelValues.defaultWindow(
+                        storedWidth: attrs.windowWidth, storedCenter: attrs.windowCenter,
+                        data: j2kData, bits: j2kDepth, isSigned: j2kSigned.boolValue, samples: j2kSamples)
 
                     self.rawDataCache.setObject(j2kData as NSData, forKey: url as NSURL)
+                    self.imageCacheParamsLock.lock()
+                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: j2kWidth, height: j2kHeight, bitDepth: j2kDepth, samples: j2kSamples, isSigned: j2kSigned.boolValue, isMonochrome1: j2kMono1)
+                    self.imageCacheParamsLock.unlock()
 
                     DispatchQueue.main.async {
+                        self.dcmtkImage = nil
                         self.rawPixelData = j2kData
                         self.imageWidth = j2kWidth
                         self.imageHeight = j2kHeight
                         self.bitDepth = j2kDepth
                         self.samples = j2kSamples
                         self.isSigned = j2kSigned.boolValue
+                        self.isMonochrome1 = j2kMono1
                         self.windowWidth = autoWW
                         self.windowCenter = autoWC
 
@@ -1057,9 +1059,9 @@ class DICOMModel: ObservableObject {
                         let rawMono1 = rawResult.isMonochrome1
                         let rawData = rawResult.pixelData
 
-                        let (minVal, maxVal) = self.computeMinMax(data: rawData, isSigned: rawSigned, bits: rawD)
-                        let autoWW = maxVal - minVal
-                        let autoWC = minVal + (autoWW / 2.0)
+                        let (autoWW, autoWC) = PixelValues.defaultWindow(
+                            storedWidth: rawResult.windowWidth, storedCenter: rawResult.windowCenter,
+                            data: rawData, bits: rawD, isSigned: rawSigned, samples: rawS)
 
                         self.rawDataCache.setObject(rawData as NSData, forKey: url as NSURL)
                         self.imageCacheParamsLock.lock()
@@ -1170,15 +1172,24 @@ class DICOMModel: ObservableObject {
                 
                 // Load DCMTK Object
                 if let dcmObj = DCMTKImageObject(path: imageFile.url.path) {
-                    // Use Target W/L if set, otherwise file defaults
+                    // Same window choice as the direct load path: series W/L if
+                    // set, else the file's stored window, else the data range.
+                    var w: Int = 0, h: Int = 0, d: Int = 0, s: Int = 0
+                    var isSigned: ObjCBool = false
+                    let raw = dcmObj.getRawDataWidth(&w, height: &h, bitDepth: &d, samples: &s, isSigned: &isSigned)
                     var renderWW = targetWW
                     var renderWC = targetWC
-                    
-                    if renderWW == 0 {
-                        renderWW = dcmObj.getWindowWidth()
-                        renderWC = dcmObj.getWindowCenter()
+                    if renderWW <= 0 {
+                        if let raw = raw {
+                            (renderWW, renderWC) = PixelValues.defaultWindow(
+                                storedWidth: dcmObj.getWindowWidth(), storedCenter: dcmObj.getWindowCenter(),
+                                data: raw, bits: d, isSigned: isSigned.boolValue, samples: s)
+                        } else {
+                            renderWW = dcmObj.getWindowWidth()
+                            renderWC = dcmObj.getWindowCenter()
+                        }
                     }
-                    
+
                     // Render
                     if let nsImage = dcmObj.renderImage(withWidth: 0, height: 0, ww: renderWW, wc: renderWC) {
                         self.imageCache.setObject(nsImage, forKey: imageFile.url as NSURL)
@@ -1187,16 +1198,10 @@ class DICOMModel: ObservableObject {
                         self.imageCacheParams[imageFile.url as NSURL] = (renderWW, renderWC)
                         self.imageCacheParamsLock.unlock()
 
-                        // Also cache raw data? Maybe too heavy.
-                        // Let's stick to image + dcmtk object for now.
-                        // If user needs histogram, we can load raw data on demand.
-                        // Or we can load it here too.
-                        var w: Int = 0, h: Int = 0, d: Int = 0, s: Int = 0
-                        var isSigned: ObjCBool = false
-                        if let raw = dcmObj.getRawDataWidth(&w, height: &h, bitDepth: &d, samples: &s, isSigned: &isSigned) {
+                        if let raw = raw {
                             self.rawDataCache.setObject(raw as NSData, forKey: imageFile.url as NSURL)
                             self.imageCacheParamsLock.lock()
-                            self.imagePixelMeta[imageFile.url as NSURL] = PixelMeta(width: w, height: h, bitDepth: d, samples: s, isSigned: isSigned.boolValue, isMonochrome1: false)
+                            self.imagePixelMeta[imageFile.url as NSURL] = PixelMeta(width: w, height: h, bitDepth: d, samples: s, isSigned: isSigned.boolValue, isMonochrome1: dcmObj.isMonochrome1())
                             self.imageCacheParamsLock.unlock()
                         }
                     }
@@ -1211,9 +1216,9 @@ class DICOMModel: ObservableObject {
                         let rawMono1 = rawResult.isMonochrome1
                         let rawData = rawResult.pixelData
 
-                        let (minVal, maxVal) = self.computeMinMax(data: rawData, isSigned: rawSigned, bits: rawD)
-                        let autoWW = maxVal - minVal
-                        let autoWC = minVal + (autoWW / 2.0)
+                        let (autoWW, autoWC) = PixelValues.defaultWindow(
+                            storedWidth: rawResult.windowWidth, storedCenter: rawResult.windowCenter,
+                            data: rawData, bits: rawD, isSigned: rawSigned, samples: rawS)
                         let useWW = targetWW > 0 ? targetWW : autoWW
                         let useWC = targetWW > 0 ? targetWC : autoWC
 
@@ -1488,6 +1493,9 @@ class DICOMModel: ObservableObject {
         let samples: Int
         let isSigned: Bool
         let isMonochrome1: Bool
+        /// File's stored window (modality units), if any
+        let windowWidth: Double?
+        let windowCenter: Double?
     }
 
     private func extractRawPixelData(from url: URL) -> RawPixelResult? {
@@ -1505,101 +1513,31 @@ class DICOMModel: ObservableObject {
         let ts = (transferSyntax ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard ts.isEmpty || uncompressedTS.contains(ts) else { return nil }
 
-        func getStr(g: UInt16, e: UInt16) -> String? {
-            return elements.first(where: { $0.tag == DicomTag(group: g, element: e) })?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Decode by BitsAllocated (not BitsStored), honouring byte order,
+        // PlanarConfiguration and the Modality LUT so values are in the same
+        // units as the DCMTK path.
+        let bigEndian = ts == "1.2.840.10008.1.2.2"
+        let attributes = DicomPixelAttributes(elements: elements, bigEndian: bigEndian)
+        guard let decoded = PlainPixelDecoder.decode(pixelData: pixelData, attributes: attributes, bigEndian: bigEndian) else {
+            return nil
         }
-        func getInt(g: UInt16, e: UInt16) -> Int? {
-            if let str = getStr(g: g, e: e), let val = Int(str) { return val }
-            return elements.first(where: { $0.tag == DicomTag(group: g, element: e) })?.intValue
-        }
-
-        guard let width = getInt(g: 0x0028, e: 0x0011),   // Columns
-              let height = getInt(g: 0x0028, e: 0x0010),   // Rows
-              width > 0, height > 0 else { return nil }
-
-        let bitsAllocated = getInt(g: 0x0028, e: 0x0100) ?? 16   // BitsAllocated
-        let bitsStored = getInt(g: 0x0028, e: 0x0101) ?? bitsAllocated  // BitsStored
-        // TODO: Apply HighBit-based masking when BitsStored < BitsAllocated.
-        // For non-standard HighBit values, pixel data should be right-shifted by
-        // (highBit + 1 - bitsStored) and masked to bitsStored width. Deferred to
-        // avoid breaking existing images that render correctly without it.
-        let _ = getInt(g: 0x0028, e: 0x0102) ?? (bitsStored - 1)  // HighBit
-        let samplesPerPixel = getInt(g: 0x0028, e: 0x0002) ?? 1  // SamplesPerPixel
-        let pixelRepresentation = getInt(g: 0x0028, e: 0x0103) ?? 0  // 0=unsigned, 1=signed
-        let photometric = getStr(g: 0x0028, e: 0x0004) ?? "MONOCHROME2"
-
-        let isSigned = pixelRepresentation == 1
-        let isMonochrome1 = photometric.uppercased().contains("MONOCHROME1")
-
-        // Validate pixel data size
-        let bytesPerPixel = (bitsAllocated / 8) * samplesPerPixel
-        let expectedSize = width * height * bytesPerPixel
-        guard pixelData.count >= expectedSize else { return nil }
 
         return RawPixelResult(
-            pixelData: pixelData,
-            width: width,
-            height: height,
-            bitDepth: bitsStored,
-            samples: samplesPerPixel,
-            isSigned: isSigned,
-            isMonochrome1: isMonochrome1
+            pixelData: decoded.data,
+            width: decoded.width,
+            height: decoded.height,
+            bitDepth: decoded.bitDepth,
+            samples: decoded.samples,
+            isSigned: decoded.isSigned,
+            isMonochrome1: attributes.isMonochrome1,
+            windowWidth: attributes.windowWidth,
+            windowCenter: attributes.windowCenter
         )
     }
 
-    private func computeMinMax(data: Data, isSigned: Bool, bits: Int) -> (Double, Double) {
-        var minVal: Double = Double.greatestFiniteMagnitude
-        var maxVal: Double = -Double.greatestFiniteMagnitude
-        
-        if bits > 16 { // 32-bit
-             data.withUnsafeBytes { rawBuffer in
-                 if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt32.self) {
-                     let count = data.count / 4
-                     for i in 0..<count {
-                         var v: Double = 0
-                         if isSigned {
-                             v = Double(Int32(bitPattern: ptr[i]))
-                         } else {
-                             v = Double(ptr[i])
-                         }
-                         
-                         if v < minVal { minVal = v }
-                         if v > maxVal { maxVal = v }
-                     }
-                 }
-             }
-        } else if bits > 8 { // 16-bit
-             data.withUnsafeBytes { rawBuffer in
-                 if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt16.self) {
-                     let count = data.count / 2
-                     for i in 0..<count {
-                         var v: Double = 0
-                         if isSigned {
-                             v = Double(Int16(bitPattern: ptr[i]))
-                         } else {
-                             v = Double(ptr[i])
-                         }
-                         
-                         if v < minVal { minVal = v }
-                         if v > maxVal { maxVal = v }
-                     }
-                 }
-             }
-        } else {
-             data.withUnsafeBytes { rawBuffer in
-                 if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
-                     let count = data.count
-                     for i in 0..<count {
-                         let v = Double(ptr[i])
-                         if v < minVal { minVal = v }
-                         if v > maxVal { maxVal = v }
-                     }
-                 }
-             }
-        }
-        
-        if maxVal == minVal { maxVal = minVal + 1 }
-        return (minVal, maxVal)
+    private func computeMinMax(data: Data, isSigned: Bool, bits: Int, samples: Int = 1) -> (Double, Double) {
+        let r = PixelValues.minMax(data: data, bits: bits, isSigned: isSigned, samples: samples)
+        return (r.min, r.max)
     }
     
     /// Render raw pixel data to an NSImage with window/level tone mapping.
@@ -1809,8 +1747,15 @@ class DICOMModel: ObservableObject {
              
              var finalRaw: Data?
              
-             if isUncompressed, let pd = pixelData {
-                 finalRaw = pd
+             if isUncompressed, pixelData != nil {
+                 // Normalize (BitsAllocated, byte order, planar config, rescale)
+                 // so cached raw data has the same units as the DCMTK path.
+                 if let r = extractRawPixelData(from: url) {
+                     finalRaw = r.pixelData
+                     imageCacheParamsLock.lock()
+                     imagePixelMeta[url as NSURL] = PixelMeta(width: r.width, height: r.height, bitDepth: r.bitDepth, samples: r.samples, isSigned: r.isSigned, isMonochrome1: r.isMonochrome1)
+                     imageCacheParamsLock.unlock()
+                 }
              } 
              // Determine if we need to attempt JPEG encapsulated extraction
              else if let pd = pixelData, pd.count > 8, let fragments = extractEncapsulatedData(pd), !fragments.isEmpty {
@@ -3139,20 +3084,17 @@ class DICOMModel: ObservableObject {
                     return
                 }
 
-                var ww = dcmObj.getWindowWidth()
-                var wc = dcmObj.getWindowCenter()
-                if ww <= 0 {
-                    let (minVal, maxVal) = self.computeMinMax(data: rawData as Data, isSigned: isSigned.boolValue, bits: depth)
-                    ww = maxVal - minVal
-                    wc = minVal + (ww / 2.0)
-                }
+                let (ww, wc) = PixelValues.defaultWindow(
+                    storedWidth: dcmObj.getWindowWidth(), storedCenter: dcmObj.getWindowCenter(),
+                    data: rawData, bits: depth, isSigned: isSigned.boolValue, samples: samples)
+                let mono1 = dcmObj.isMonochrome1()
 
                 if let nsImage = dcmObj.renderImage(withWidth: 0, height: 0, ww: ww, wc: wc) {
                     self.imageCache.setObject(nsImage, forKey: url as NSURL)
                     self.dcmtkCache.setObject(dcmObj, forKey: url as NSURL)
                     self.imageCacheParamsLock.lock()
                     self.imageCacheParams[url as NSURL] = (ww, wc)
-                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: width, height: height, bitDepth: depth, samples: samples, isSigned: isSigned.boolValue, isMonochrome1: false)
+                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: width, height: height, bitDepth: depth, samples: samples, isSigned: isSigned.boolValue, isMonochrome1: mono1)
                     self.imageCacheParamsLock.unlock()
                     self.rawDataCache.setObject(rawData as NSData, forKey: url as NSURL)
 
@@ -3164,6 +3106,7 @@ class DICOMModel: ObservableObject {
                         panel.bitDepth = depth
                         panel.samples = samples
                         panel.isSigned = isSigned.boolValue
+                        panel.isMonochrome1 = mono1
 
                         // Preserve user W/L when scrolling within same series
                         if preservedWW > 0 {
@@ -3220,12 +3163,14 @@ class DICOMModel: ObservableObject {
                 var j2kW: Int = 0, j2kH: Int = 0, j2kD: Int = 0, j2kS: Int = 0
                 var j2kSigned: ObjCBool = false
                 if let j2kData = DCMTKHelper.decodeJPEG2000DICOM(url.path, width: &j2kW, height: &j2kH, bitDepth: &j2kD, samples: &j2kS, isSigned: &j2kSigned) {
-                    let (minVal, maxVal) = self.computeMinMax(data: j2kData, isSigned: j2kSigned.boolValue, bits: j2kD)
-                    let autoWW = maxVal - minVal
-                    let autoWC = minVal + (autoWW / 2.0)
+                    let attrs = DicomPixelAttributes.read(url: url) ?? DicomPixelAttributes()
+                    let j2kMono1 = j2kS == 1 && attrs.isMonochrome1
+                    let (autoWW, autoWC) = PixelValues.defaultWindow(
+                        storedWidth: attrs.windowWidth, storedCenter: attrs.windowCenter,
+                        data: j2kData, bits: j2kD, isSigned: j2kSigned.boolValue, samples: j2kS)
                     self.rawDataCache.setObject(j2kData as NSData, forKey: url as NSURL)
                     self.imageCacheParamsLock.lock()
-                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: j2kW, height: j2kH, bitDepth: j2kD, samples: j2kS, isSigned: j2kSigned.boolValue, isMonochrome1: false)
+                    self.imagePixelMeta[url as NSURL] = PixelMeta(width: j2kW, height: j2kH, bitDepth: j2kD, samples: j2kS, isSigned: j2kSigned.boolValue, isMonochrome1: j2kMono1)
                     self.imageCacheParamsLock.unlock()
 
                     DispatchQueue.main.async {
@@ -3236,6 +3181,7 @@ class DICOMModel: ObservableObject {
                         panel.bitDepth = j2kD
                         panel.samples = j2kS
                         panel.isSigned = j2kSigned.boolValue
+                        panel.isMonochrome1 = j2kMono1
 
                         // Preserve user W/L when scrolling within same series
                         let renderWW = preservedWW > 0 ? preservedWW : autoWW
@@ -3244,7 +3190,7 @@ class DICOMModel: ObservableObject {
                         panel.windowCenter = renderWC
 
                         if let rendered = self.renderImage(width: j2kW, height: j2kH, pixelData: j2kData, ww: renderWW, wc: renderWC,
-                                                           bits: j2kD, spp: j2kS, signed: j2kSigned.boolValue, mono1: false) {
+                                                           bits: j2kD, spp: j2kS, signed: j2kSigned.boolValue, mono1: j2kMono1) {
                             panel.setDisplayImage(rendered)
                             if preservedWW <= 0 {
                                 self.imageCache.setObject(rendered, forKey: url as NSURL)
@@ -3288,9 +3234,9 @@ class DICOMModel: ObservableObject {
                         let rawMono1 = rawResult.isMonochrome1
                         let rawData = rawResult.pixelData
 
-                        let (minVal, maxVal) = self.computeMinMax(data: rawData, isSigned: rawSigned, bits: rawD)
-                        let autoWW = maxVal - minVal
-                        let autoWC = minVal + (autoWW / 2.0)
+                        let (autoWW, autoWC) = PixelValues.defaultWindow(
+                            storedWidth: rawResult.windowWidth, storedCenter: rawResult.windowCenter,
+                            data: rawData, bits: rawD, isSigned: rawSigned, samples: rawS)
                         self.rawDataCache.setObject(rawData as NSData, forKey: url as NSURL)
                         self.imageCacheParamsLock.lock()
                         self.imagePixelMeta[url as NSURL] = PixelMeta(width: rawW, height: rawH, bitDepth: rawD, samples: rawS, isSigned: rawSigned, isMonochrome1: rawMono1)
@@ -3506,10 +3452,9 @@ class DICOMModel: ObservableObject {
     /// Auto W/L from a rectangular ROI in pixel coordinates
     func autoWindowLevelForPanelROI(_ panel: PanelState, rect: CGRect) {
         guard let data = panel.rawPixelData, panel.imageWidth > 0 else { return }
-        let scaleX = panel.displayImageWidth > 0 ? CGFloat(panel.imageWidth) / panel.displayImageWidth : 1.0
-        let scaleY = panel.displayImageHeight > 0 ? CGFloat(panel.imageHeight) / panel.displayImageHeight : 1.0
-        let rawRect = CGRect(x: rect.minX * scaleX, y: rect.minY * scaleY,
-                             width: rect.width * scaleX, height: rect.height * scaleY)
+        let rawRect = PixelDisplayMapping(rawWidth: panel.imageWidth, rawHeight: panel.imageHeight,
+                                          displayWidth: panel.displayImageWidth, displayHeight: panel.displayImageHeight)
+            .displayRectToRaw(rect)
         let (minVal, maxVal) = computeMinMaxInRect(data: data, width: panel.imageWidth, rect: rawRect, isSigned: panel.isSigned, bits: panel.bitDepth)
         let newWW = max(1.0, maxVal - minVal)
         let newWC = minVal + (newWW / 2.0)
@@ -3522,10 +3467,9 @@ class DICOMModel: ObservableObject {
         let w = panel.imageWidth
         let h = panel.imageHeight
         // Scale ROI rect from display-image space to raw-pixel space
-        let scaleX = panel.displayImageWidth > 0 ? CGFloat(panel.imageWidth) / panel.displayImageWidth : 1.0
-        let scaleY = panel.displayImageHeight > 0 ? CGFloat(panel.imageHeight) / panel.displayImageHeight : 1.0
-        let rawRect = CGRect(x: rect.minX * scaleX, y: rect.minY * scaleY,
-                             width: rect.width * scaleX, height: rect.height * scaleY)
+        let mapping = PixelDisplayMapping(rawWidth: w, rawHeight: h,
+                                          displayWidth: panel.displayImageWidth, displayHeight: panel.displayImageHeight)
+        let rawRect = mapping.displayRectToRaw(rect)
         let minX = max(0, Int(rawRect.minX))
         let minY = max(0, Int(rawRect.minY))
         let maxX = min(w - 1, Int(rawRect.maxX))
@@ -3533,28 +3477,15 @@ class DICOMModel: ObservableObject {
         guard maxX > minX, maxY > minY else { return nil }
 
         var values: [Double] = []
-        values.reserveCapacity((maxX - minX) * (maxY - minY))
+        values.reserveCapacity((maxX - minX + 1) * (maxY - minY + 1))
 
+        let bits = panel.bitDepth, signed = panel.isSigned, spp = panel.samples
         data.withUnsafeBytes { raw in
             for py in minY...maxY {
                 for px in minX...maxX {
-                    let index = py * w + px
-                    var val: Double = 0
-                    if panel.bitDepth > 8 {
-                        let byteIndex = index * 2
-                        if byteIndex + 1 < data.count {
-                            if let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt16.self) {
-                                if panel.isSigned {
-                                    val = Double(Int16(bitPattern: ptr[index]))
-                                } else {
-                                    val = Double(ptr[index])
-                                }
-                            }
-                        }
-                    } else if index < data.count {
-                        val = Double(raw[index])
+                    if let v = PixelValues.value(in: raw, index: py * w + px, bits: bits, isSigned: signed, samples: spp) {
+                        values.append(v)
                     }
-                    values.append(val)
                 }
             }
         }
@@ -3765,35 +3696,16 @@ class DICOMModel: ObservableObject {
             let range = maxVal - minVal
             if range <= 0 { return }
 
-            if bits > 8 {
-                data.withUnsafeBytes { rawBuffer in
-                    if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt16.self) {
-                        let count = data.count / 2
-                        let stride = max(1, count / 50000)
-                        var i = 0
-                        while i < count {
-                            var v: Double
-                            if isSigned { v = Double(Int16(bitPattern: ptr[i])) }
-                            else { v = Double(ptr[i]) }
-                            let bin = Int((v - minVal) / range * 255.0)
-                            if bin >= 0 && bin < 256 { bins[bin] += 1 }
-                            i += stride
-                        }
+            let count = data.count / PixelValues.bytesPerSample(bits: bits)
+            let stride = max(1, count / 50000)
+            data.withUnsafeBytes { raw in
+                var i = 0
+                while i < count {
+                    if let v = PixelValues.value(in: raw, index: i, bits: bits, isSigned: isSigned) {
+                        let bin = Int((v - minVal) / range * 255.0)
+                        if bin >= 0 && bin < 256 { bins[bin] += 1 }
                     }
-                }
-            } else {
-                data.withUnsafeBytes { rawBuffer in
-                    if let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
-                        let count = data.count
-                        let stride = max(1, count / 50000)
-                        var i = 0
-                        while i < count {
-                            let v = Double(ptr[i])
-                            let bin = Int((v - minVal) / range * 255.0)
-                            if bin >= 0 && bin < 256 { bins[bin] += 1 }
-                            i += stride
-                        }
-                    }
+                    i += stride
                 }
             }
 

@@ -29,6 +29,7 @@
 #include "dcmtk/dcmdata/dcpxitem.h"    // DcmPixelItem
 #include "dcmtk/dcmdata/dcrledrg.h"    // RLE decoder registration
 #include "dcmtk/dcmimgle/dcmimage.h"
+#include "dcmtk/dcmimage/diregist.h" // registers color (RGB/YBR/...) support for DicomImage
 #include "dcmtk/dcmjpeg/djdecode.h"    // JPEG decoder registration
 #include "dcmtk/dcmjpls/djdecode.h"    // JPEG-LS decoder registration
 
@@ -43,9 +44,21 @@ static void ensureDCMTKInitialized(void) {
     NSBundle *mainBundle = [NSBundle mainBundle];
     NSString *dicPath = [mainBundle pathForResource:@"dicom" ofType:@"dic"];
 
+    // Development fallback (swift run / swift test): the dictionary shipped
+    // in the source tree's libs/, located relative to this source file.
+    if (!dicPath && !getenv("DCMDICTPATH")) {
+      NSString *src = [NSString stringWithUTF8String:__FILE__];
+      NSString *repo = [[[src stringByDeletingLastPathComponent]
+          stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
+      NSString *candidate = [repo
+          stringByAppendingPathComponent:@"libs/dcmtk/share/dcmtk-3.6.8/dicom.dic"];
+      if ([[NSFileManager defaultManager] fileExistsAtPath:candidate])
+        dicPath = candidate;
+    }
+
     if (dicPath) {
       setenv("DCMDICTPATH", [dicPath UTF8String], 1);
-    } else {
+    } else if (!getenv("DCMDICTPATH")) {
       NSLog(@"[DCMTKHelper] WARNING: dicom.dic not found in application bundle!");
     }
 
@@ -55,6 +68,142 @@ static void ensureDCMTKInitialized(void) {
     DcmRLEDecoderRegistration::registerCodecs();  // RLE Lossless
     // Note: JPEG2000 handled via OpenJPEG fallback (no dcmjp2k in DCMTK 3.6.8)
   });
+}
+
+// Extract pixel values after the Modality LUT (rescale) but before VOI.
+// Monochrome: the inter data is one contiguous plane. Color: DiColorPixel's
+// getData() returns an array of plane pointers, not pixel bytes, so copying
+// count*elementSize from it over-reads. Color images are returned as 8-bit
+// interleaved RGB from the rendered output (no VOI applies to color).
+static NSData *copyModalityPixels(DicomImage *image, NSInteger *bitDepth,
+                                  NSInteger *samples, BOOL *isSigned) {
+  if (!image)
+    return nil;
+
+  if (!image->isMonochrome()) {
+    unsigned long size = image->getOutputDataSize(8);
+    if (size == 0)
+      return nil;
+    NSMutableData *rgb = [NSMutableData dataWithLength:size];
+    // planar = 0 -> interleaved RGBRGB...
+    if (!image->getOutputData(rgb.mutableBytes, size, 8, 0, 0))
+      return nil;
+    *bitDepth = 8;
+    *samples = 3;
+    *isSigned = NO;
+    return rgb;
+  }
+
+  *samples = 1;
+  const DiPixel *interData = image->getInterData();
+  if (!interData)
+    return nil;
+
+  unsigned long count = interData->getCount();
+  EP_Representation rep = interData->getRepresentation();
+
+  size_t elementSize = 0;
+  switch (rep) {
+  case EPR_Uint8:
+  case EPR_Sint8:
+    elementSize = 1;
+    *bitDepth = 8;
+    break;
+  case EPR_Uint16:
+  case EPR_Sint16:
+    elementSize = 2;
+    *bitDepth = 16;
+    break;
+  case EPR_Uint32:
+  case EPR_Sint32:
+    elementSize = 4;
+    *bitDepth = 32;
+    break;
+  default:
+    return nil;
+  }
+
+  *isSigned = (rep == EPR_Sint8 || rep == EPR_Sint16 || rep == EPR_Sint32);
+
+  // Inter data may hold several frames; return the first.
+  unsigned long frameCount = image->getFrameCount();
+  unsigned long pixelsPerFrame =
+      (unsigned long)image->getWidth() * (unsigned long)image->getHeight();
+  if (frameCount > 1 && pixelsPerFrame > 0 && pixelsPerFrame < count)
+    count = pixelsPerFrame;
+
+  unsigned long totalSize;
+  if (__builtin_mul_overflow(count, elementSize, &totalSize))
+    return nil;
+
+  const void *pixelPtr = interData->getData();
+  if (!pixelPtr)
+    return nil;
+
+  return [NSData dataWithBytes:pixelPtr length:totalSize];
+}
+
+// Read the file's first stored VOI window (WindowCenter/WindowWidth), in
+// modality units. Returns NO when the dataset has none.
+static BOOL storedWindow(DicomImage *image, double *center, double *width) {
+  if (!image || !image->isMonochrome())
+    return NO;
+  double c = 0, w = 0;
+  if (image->getWindow(c, w) && w > 0) {
+    *center = c;
+    *width = w;
+    return YES;
+  }
+  if (image->getWindowCount() > 0 && image->setWindow(0) &&
+      image->getWindow(c, w) && w > 0) {
+    *center = c;
+    *width = w;
+    return YES;
+  }
+  return NO;
+}
+
+// Pack rescaled monochrome values into the narrowest integer representation
+// that holds them, mirroring DCMTK's choice for its inter data.
+static NSData *packModalityValues(const double *values, size_t count,
+                                  NSInteger *bitDepth, BOOL *isSigned) {
+  double lo = 0, hi = 0;
+  for (size_t i = 0; i < count; i++) {
+    double v = values[i];
+    if (i == 0 || v < lo) lo = v;
+    if (i == 0 || v > hi) hi = v;
+  }
+  if (lo >= 0 && hi <= 255) {
+    NSMutableData *d = [NSMutableData dataWithLength:count];
+    uint8_t *p = (uint8_t *)d.mutableBytes;
+    for (size_t i = 0; i < count; i++) p[i] = (uint8_t)lround(values[i]);
+    *bitDepth = 8; *isSigned = NO;
+    return d;
+  }
+  if (lo >= -32768 && hi <= 32767) {
+    NSMutableData *d = [NSMutableData dataWithLength:count * 2];
+    int16_t *p = (int16_t *)d.mutableBytes;
+    for (size_t i = 0; i < count; i++) p[i] = (int16_t)lround(values[i]);
+    *bitDepth = 16; *isSigned = YES;
+    return d;
+  }
+  if (lo >= 0 && hi <= 65535) {
+    NSMutableData *d = [NSMutableData dataWithLength:count * 2];
+    uint16_t *p = (uint16_t *)d.mutableBytes;
+    for (size_t i = 0; i < count; i++) p[i] = (uint16_t)lround(values[i]);
+    *bitDepth = 16; *isSigned = NO;
+    return d;
+  }
+  NSMutableData *d = [NSMutableData dataWithLength:count * 4];
+  int32_t *p = (int32_t *)d.mutableBytes;
+  for (size_t i = 0; i < count; i++) {
+    double v = values[i];
+    if (v > 2147483647.0) v = 2147483647.0;
+    if (v < -2147483648.0) v = -2147483648.0;
+    p[i] = (int32_t)llround(v);
+  }
+  *bitDepth = 32; *isSigned = YES;
+  return d;
 }
 
 @implementation DCMTKHelper
@@ -146,58 +295,9 @@ static void ensureDCMTKInitialized(void) {
 
   *width = image->getWidth();
   *height = image->getHeight();
-  *samples = image->isMonochrome() ? 1 : 3;
 
-  // Use getInterData() to get the pixel data AFTER Modality LUT but BEFORE VOI
-  // LUT. This gives us the "Rescaled" values (e.g. Hounsfield Units) which is
-  // what we want for W/L.
-  const DiPixel *interData = image->getInterData();
-  if (!interData) {
-    delete image;
-    return nil;
-  }
-
-  unsigned long count = interData->getCount();
-  EP_Representation rep = interData->getRepresentation();
-
-  size_t elementSize = 0;
-  switch (rep) {
-  case EPR_Uint8:
-  case EPR_Sint8:
-    elementSize = 1;
-    *bitDepth = 8;
-    break;
-  case EPR_Uint16:
-  case EPR_Sint16:
-    elementSize = 2;
-    *bitDepth = 16;
-    break;
-  case EPR_Uint32:
-  case EPR_Sint32:
-    elementSize = 4;
-    *bitDepth = 32;
-    break;
-  default:
-    delete image;
-    return nil;
-  }
-
-  *isSigned = (rep == EPR_Sint8 || rep == EPR_Sint16 || rep == EPR_Sint32);
-
-  unsigned long totalSize;
-  if (__builtin_mul_overflow(count, elementSize, &totalSize)) {
-    delete image;
-    return nil;
-  }
-
-  const void *pixelPtr = interData->getData();
-  if (!pixelPtr) {
-    delete image;
-    return nil;
-  }
-
-  NSData *data = [NSData dataWithBytes:pixelPtr length:totalSize];
-
+  // Values after Modality LUT (e.g. Hounsfield Units), before VOI LUT.
+  NSData *data = copyModalityPixels(image, bitDepth, samples, isSigned);
   delete image;
   return data;
 }
@@ -386,7 +486,9 @@ static void opj_info_callback(const char *msg, void *client_data) {
     return nil;
   }
 
-  // Collect all frame fragments (may be split across multiple items)
+  // Collect the first frame's fragments. A frame may span several items;
+  // the next frame starts with a new codestream (J2K SOC+SIZ marker
+  // FF4F FF51) or JP2 signature box.
   NSMutableData *j2kData = [NSMutableData data];
   for (Uint32 i = 1; i < numItems; i++) {
     status = pixelSeq->getItem(pixelItem, i);
@@ -395,7 +497,14 @@ static void opj_info_callback(const char *msg, void *client_data) {
     Uint8 *fragData = NULL;
     status = pixelItem->getUint8Array(fragData);
     if (status.good() && fragData) {
-      [j2kData appendBytes:fragData length:pixelItem->getLength()];
+      Uint32 fragLen = pixelItem->getLength();
+      BOOL startsCodestream =
+          (fragLen >= 4 && fragData[0] == 0xFF && fragData[1] == 0x4F &&
+           fragData[2] == 0xFF && fragData[3] == 0x51) ||
+          (fragLen >= 12 && fragData[4] == 'j' && fragData[5] == 'P');
+      if (j2kData.length > 0 && startsCodestream)
+        break;
+      [j2kData appendBytes:fragData length:fragLen];
     }
   }
 
@@ -500,102 +609,74 @@ static void opj_info_callback(const char *msg, void *client_data) {
 
   *width = imgWidth;
   *height = imgHeight;
-  *samples = numComps;
-  *isSigned = sgnd || (dcmPixelRep == 1);
+
+  size_t pixelCount;
+  if (__builtin_mul_overflow((size_t)imgWidth, (size_t)imgHeight, &pixelCount) ||
+      pixelCount > (size_t)512 * 1024 * 1024) {
+    NSLog(@"[J2K] Image too large");
+    opj_image_destroy(image);
+    return nil;
+  }
 
   NSData *result = nil;
 
-  if (prec <= 8) {
+  if (numComps >= 3) {
+    // Color: 8-bit interleaved RGB (down-shift higher precisions)
+    for (OPJ_UINT32 c = 0; c < 3; c++) {
+      if (!image->comps[c].data || image->comps[c].w != imgWidth ||
+          image->comps[c].h != imgHeight) {
+        NSLog(@"[J2K] Subsampled or missing color components not supported");
+        opj_image_destroy(image);
+        return nil;
+      }
+    }
+    NSMutableData *rgb = [NSMutableData dataWithLength:pixelCount * 3];
+    uint8_t *out = (uint8_t *)rgb.mutableBytes;
+    for (OPJ_UINT32 c = 0; c < 3; c++) {
+      OPJ_UINT32 cprec = image->comps[c].prec;
+      int shift = cprec > 8 ? (int)(cprec - 8) : 0;
+      int offset = image->comps[c].sgnd ? (1 << (cprec - 1)) : 0;
+      const OPJ_INT32 *src = image->comps[c].data;
+      for (size_t i = 0; i < pixelCount; i++) {
+        int v = (src[i] + offset) >> shift;
+        out[i * 3 + c] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+      }
+    }
+    *samples = 3;
     *bitDepth = 8;
-    size_t totalSize;
-    size_t pixelCount;
-    if (__builtin_mul_overflow((size_t)imgWidth, (size_t)imgHeight, &pixelCount) ||
-        __builtin_mul_overflow(pixelCount, (size_t)numComps, &totalSize) ||
-        totalSize > (size_t)2UL * 1024 * 1024 * 1024) {
-      NSLog(@"[J2K] Buffer size overflow or exceeds 2GB");
-      opj_image_destroy(image);
-      return nil;
-    }
-    uint8_t *outBuffer = (uint8_t *)malloc(totalSize);
-    if (!outBuffer) {
-      NSLog(@"[J2K] malloc failed for %zu bytes", totalSize);
-      opj_image_destroy(image);
-      return nil;
-    }
-
-    if (numComps == 1) {
-      OPJ_INT32 *src = image->comps[0].data;
-      if (!src) {
-        free(outBuffer);
-        opj_image_destroy(image);
-        return nil;
-      }
-      for (OPJ_UINT32 i = 0; i < imgWidth * imgHeight; i++) {
-        outBuffer[i] = (uint8_t)OFstatic_cast(int, src[i]);
-      }
-    } else {
-      for (OPJ_UINT32 i = 0; i < imgWidth * imgHeight; i++) {
-        for (OPJ_UINT32 c = 0; c < numComps; c++) {
-          outBuffer[i * numComps + c] =
-              (uint8_t)OFstatic_cast(int, image->comps[c].data[i]);
-        }
-      }
-    }
-
-    result = [NSData dataWithBytesNoCopy:outBuffer
-                                  length:totalSize
-                            freeWhenDone:YES];
+    *isSigned = NO;
+    result = rgb;
   } else {
-    *bitDepth = 16;
-    size_t totalSize;
-    size_t pixelCount16;
-    size_t componentBytes;
-    if (__builtin_mul_overflow((size_t)imgWidth, (size_t)imgHeight, &pixelCount16) ||
-        __builtin_mul_overflow(pixelCount16, (size_t)numComps, &componentBytes) ||
-        __builtin_mul_overflow(componentBytes, (size_t)2, &totalSize) ||
-        totalSize > (size_t)2UL * 1024 * 1024 * 1024) {
-      NSLog(@"[J2K] Buffer size overflow or exceeds 2GB (16-bit)");
+    // Monochrome: stored values -> modality values via RescaleSlope/Intercept,
+    // matching DCMTK's getInterData() so all decode paths share units.
+    const OPJ_INT32 *src = image->comps[0].data;
+    if (!src) {
       opj_image_destroy(image);
       return nil;
     }
-    uint16_t *outBuffer = (uint16_t *)malloc(totalSize);
-    if (!outBuffer) {
-      NSLog(@"[J2K] malloc failed for %zu bytes (16-bit)", totalSize);
+    Float64 slope = 1.0, intercept = 0.0;
+    if (dataset->findAndGetFloat64(DCM_RescaleSlope, slope).bad() || slope == 0)
+      slope = 1.0;
+    if (dataset->findAndGetFloat64(DCM_RescaleIntercept, intercept).bad())
+      intercept = 0.0;
+
+    // Some encoders store signed data with the J2K component marked
+    // unsigned; sign-extend from the stored precision in that case.
+    BOOL signExtend = (dcmPixelRep == 1) && !sgnd && prec > 0 && prec < 32;
+    double *values = (double *)malloc(pixelCount * sizeof(double));
+    if (!values) {
       opj_image_destroy(image);
       return nil;
     }
-
-    if (numComps == 1) {
-      OPJ_INT32 *src = image->comps[0].data;
-      if (!src) {
-        free(outBuffer);
-        opj_image_destroy(image);
-        return nil;
-      }
-      for (OPJ_UINT32 i = 0; i < imgWidth * imgHeight; i++) {
-        if (*isSigned) {
-          ((int16_t *)outBuffer)[i] = (int16_t)src[i];
-        } else {
-          outBuffer[i] = (uint16_t)src[i];
-        }
-      }
-    } else {
-      for (OPJ_UINT32 i = 0; i < imgWidth * imgHeight; i++) {
-        for (OPJ_UINT32 c = 0; c < numComps; c++) {
-          OPJ_UINT32 idx = i * numComps + c;
-          if (*isSigned) {
-            ((int16_t *)outBuffer)[idx] =
-                (int16_t)image->comps[c].data[i];
-          } else {
-            outBuffer[idx] = (uint16_t)image->comps[c].data[i];
-          }
-        }
-      }
+    for (size_t i = 0; i < pixelCount; i++) {
+      int64_t v = src[i];
+      if (signExtend && (v & ((int64_t)1 << (prec - 1))))
+        v -= ((int64_t)1 << prec);
+      values[i] = (double)v * slope + intercept;
     }
-
-    result = [NSData dataWithBytesNoCopy:outBuffer
-                                  length:totalSize
-                            freeWhenDone:YES];
+    *samples = 1;
+    result = packModalityValues(values, pixelCount, bitDepth, isSigned);
+    free(values);
   }
 
   opj_image_destroy(image);
@@ -702,68 +783,21 @@ static void opj_info_callback(const char *msg, void *client_data) {
 
   *width = _image->getWidth();
   *height = _image->getHeight();
-  *samples = _image->isMonochrome() ? 1 : 3;
-
-  // Use getInterData() for raw values (after Modality LUT)
-  const DiPixel *interData = _image->getInterData();
-  if (!interData)
-    return nil;
-
-  unsigned long count = interData->getCount();
-  EP_Representation rep = interData->getRepresentation();
-
-  size_t elementSize = 0;
-  switch (rep) {
-  case EPR_Uint8:
-  case EPR_Sint8:
-    elementSize = 1;
-    *bitDepth = 8;
-    break;
-  case EPR_Uint16:
-  case EPR_Sint16:
-    elementSize = 2;
-    *bitDepth = 16;
-    break;
-  case EPR_Uint32:
-  case EPR_Sint32:
-    elementSize = 4;
-    *bitDepth = 32;
-    break;
-  default:
-    return nil;
-  }
-
-  *isSigned = (rep == EPR_Sint8 || rep == EPR_Sint16 || rep == EPR_Sint32);
-
-  unsigned long totalSize;
-  if (__builtin_mul_overflow(count, elementSize, &totalSize))
-    return nil;
-
-  const void *pixelPtr = interData->getData();
-  if (!pixelPtr)
-    return nil;
-
-  return [NSData dataWithBytes:pixelPtr length:totalSize];
+  return copyModalityPixels(_image, bitDepth, samples, isSigned);
 }
 
 - (double)getWindowWidth {
-  if (!_image)
-    return 0;
-  double c, w;
-  if (_image->getWindow(c, w)) {
-    return w;
-  }
-  return 0;
+  double c = 0, w = 0;
+  return storedWindow(_image, &c, &w) ? w : 0;
 }
 
 - (double)getWindowCenter {
-  if (!_image)
-    return 0;
-  double c, w;
-  if (_image->getWindow(c, w)) {
-    return c;
-  }
-  return 0;
+  double c = 0, w = 0;
+  return storedWindow(_image, &c, &w) ? c : 0;
+}
+
+- (BOOL)isMonochrome1 {
+  return _image && _image->getPhotometricInterpretation() == EPI_Monochrome1;
 }
 
 @end

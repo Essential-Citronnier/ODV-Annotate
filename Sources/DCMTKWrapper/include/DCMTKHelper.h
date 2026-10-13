@@ -24,7 +24,9 @@
 + (NSString *)lastErrorForPath:(NSString *)path;
 
 /// Attempts to decode a JPEG2000-compressed DICOM file using OpenJPEG.
-/// Returns raw decompressed pixel data, or nil on failure.
+/// Returns the first frame's pixel data, or nil on failure. Monochrome data
+/// has RescaleSlope/Intercept applied (modality units, matching the DCMTK
+/// paths); color data is returned as 8-bit interleaved RGB.
 + (NSData *)decodeJPEG2000DICOM:(NSString *)path
                           width:(NSInteger *)width
                          height:(NSInteger *)height
@@ -46,7 +48,10 @@
                    bitDepth:(NSInteger *)bitDepth
                     samples:(NSInteger *)samples
                    isSigned:(BOOL *)isSigned;
+/// File's stored WindowWidth/WindowCenter (first window, modality units), or 0 when absent.
 - (double)getWindowWidth;
 - (double)getWindowCenter;
+/// YES when PhotometricInterpretation is MONOCHROME1 (min value displays white).
+- (BOOL)isMonochrome1;
 
 @end
