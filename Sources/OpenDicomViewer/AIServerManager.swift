@@ -961,10 +961,11 @@ class AIServerManager: ObservableObject {
         if let completion { afterExit[pid, default: []].append(completion) }
         // serverProcess stays set until the exit is observed, so
         // handleTermination can tell this exit from a newer process's.
-        process.terminate()
+        let group = ProcessGroup.led(by: pid)
+        ProcessGroup.send(SIGTERM, group: group, pid: pid)
 
         DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
-            if process.isRunning { kill(pid, SIGKILL) }
+            ProcessGroup.send(SIGKILL, group: group, pid: pid)
         }
     }
 
@@ -994,7 +995,15 @@ class AIServerManager: ObservableObject {
         setupProcessLock.lock()
         let setupProcess = activeSetupProcess
         setupProcessLock.unlock()
-        setupProcess?.terminate()
+        // pip and the wheel builds it spawned: the whole group.
+        if let setupProcess, setupProcess.isRunning {
+            let pid = setupProcess.processIdentifier
+            let group = ProcessGroup.led(by: pid)
+            ProcessGroup.send(SIGTERM, group: group, pid: pid)
+            let deadline = Date().addingTimeInterval(1)
+            while setupProcess.isRunning && Date() < deadline { usleep(50_000) }
+            ProcessGroup.send(SIGKILL, group: group, pid: pid)
+        }
 
         if let pid = adoptedPID { kill(pid, SIGTERM) }
 
@@ -1002,16 +1011,16 @@ class AIServerManager: ObservableObject {
             removePIDRecord()
             return
         }
-        stoppingPIDs.insert(process.processIdentifier)
-        process.terminate()
+        let pid = process.processIdentifier
+        stoppingPIDs.insert(pid)
+        let group = ProcessGroup.led(by: pid)
+        ProcessGroup.send(SIGTERM, group: group, pid: pid)
         let deadline = Date().addingTimeInterval(3)
         while process.isRunning && Date() < deadline {
             usleep(50_000)
         }
-        if process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
-            process.waitUntilExit()
-        }
+        ProcessGroup.send(SIGKILL, group: group, pid: pid)
+        if process.isRunning { process.waitUntilExit() }
         removePIDRecord()
     }
 

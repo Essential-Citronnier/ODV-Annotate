@@ -68,9 +68,10 @@ enum PluginProcessRunner {
     /// `onStdoutLine` receives complete lines with the terminator stripped;
     /// `onStderrLine` likewise. Both are called off the main actor.
     ///
-    /// Cancelling the calling task terminates the child (SIGTERM, then SIGKILL
-    /// after a grace period) and the call throws `CancellationError` once the
-    /// child has gone. Without this, cancelling an install only abandoned the
+    /// Cancelling the calling task terminates the child and its whole process
+    /// group -- pip's build subprocesses included (see `ProcessGroup`) --
+    /// with SIGTERM, then SIGKILL after a grace period, and the call throws
+    /// `CancellationError` once the child has gone. Without this, cancelling an install only abandoned the
     /// awaiting task while pip or a multi-gigabyte download carried on in the
     /// background, writing into a venv the store had already declared idle.
     static func run(
@@ -104,6 +105,7 @@ enum PluginProcessRunner {
         let outcome: PluginProcessOutcome = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 process.terminationHandler = { proc in
+                    control.finished()
                     // Detach the handlers before draining: leaving them attached keeps
                     // the dispatch source alive and the file handles open.
                     outPipe.fileHandleForReading.readabilityHandler = nil
@@ -151,6 +153,13 @@ enum PluginProcessRunner {
         private let process: Process
         private var launched = false
         private var cancelled = false
+        /// The child's process group, captured at launch.
+        private var group: pid_t?
+
+        /// Every child currently running through `run`, so quitting the app
+        /// can take down an install in progress (`terminateAllForQuit`).
+        private static let liveLock = NSLock()
+        private static var live: [ObjectIdentifier: ProcessControl] = [:]
 
         /// How long a terminated child gets to exit before SIGKILL.
         static let gracePeriod: TimeInterval = 5
@@ -170,7 +179,14 @@ enum PluginProcessRunner {
             guard !cancelled else { return false }
             try process.run()
             launched = true
+            group = ProcessGroup.led(by: process.processIdentifier)
+            Self.liveLock.withLock { Self.live[ObjectIdentifier(self)] = self }
             return true
+        }
+
+        /// The child has exited; it no longer needs taking down at quit.
+        func finished() {
+            _ = Self.liveLock.withLock { Self.live.removeValue(forKey: ObjectIdentifier(self)) }
         }
 
         func cancel() {
@@ -178,13 +194,34 @@ enum PluginProcessRunner {
             cancelled = true
             let running = launched && process.isRunning
             let pid = process.processIdentifier
+            let group = self.group
             lock.unlock()
             guard running else { return }
-            process.terminate()
-            let process = self.process
+            ProcessGroup.send(SIGTERM, group: group, pid: pid)
+            // The group is killed whether or not the leader is still running:
+            // pip may have exited on SIGTERM while a build subprocess did not.
             DispatchQueue.global().asyncAfter(deadline: .now() + Self.gracePeriod) {
-                if process.isRunning { kill(pid, SIGKILL) }
+                ProcessGroup.send(SIGKILL, group: group, pid: pid)
             }
+        }
+
+        /// Synchronously terminate every running child and its group, for
+        /// application quit: nothing asynchronous scheduled from a
+        /// `willTerminate` observer is guaranteed to run.
+        static func terminateAllForQuit(grace: TimeInterval = 1) {
+            let controls = liveLock.withLock { Array(live.values) }
+            let targets = controls.map { control in
+                control.lock.withLock {
+                    control.cancelled = true
+                    return (control.process, control.process.processIdentifier, control.group)
+                }
+            }
+            for (_, pid, group) in targets { ProcessGroup.send(SIGTERM, group: group, pid: pid) }
+            let deadline = Date().addingTimeInterval(grace)
+            while targets.contains(where: { $0.0.isRunning }) && Date() < deadline {
+                usleep(50_000)
+            }
+            for (_, pid, group) in targets { ProcessGroup.send(SIGKILL, group: group, pid: pid) }
         }
     }
 

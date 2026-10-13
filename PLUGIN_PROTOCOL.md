@@ -395,8 +395,14 @@ notInstalled → resolvingLicense → downloading → installing → ready
   the marker existed. The launch re-check and the install preflight write its
   marker instead of demoting it, so it is not downloaded again. Anything else
   is re-fetched by the hook, which resumes into the same directory.
-- Cancelling an install terminates the hook or pip process (SIGTERM, then
-  SIGKILL after 5 s) and returns the task to `notInstalled`.
+- Cancelling an install terminates the hook or pip process and everything it
+  spawned (SIGTERM, then SIGKILL after 5 s) and returns the task to
+  `notInstalled`. The host starts every adapter, pip, and hook process as the
+  leader of its own process group and signals the group, so wheel builds and
+  download helpers go too; the same happens to any install or one-shot run in
+  progress when the app quits. An adapter that moves a child into a new
+  session or group of its own (`setsid`, `start_new_session=True`) takes it
+  out of the host's reach and must stop it itself.
 - Installs of tasks belonging to one plugin share its virtualenv and run one at
   a time.
 - The host re-verifies `ready` on launch; a task whose weights vanished falls
