@@ -25,9 +25,7 @@ import hmac
 import io
 import json
 import logging
-import math
 import os
-import re
 import secrets
 import threading
 import time
@@ -42,10 +40,36 @@ from typing import Any
 # grows as bytes arrive. Must be set before huggingface_hub is imported.
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
+import sys
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from PIL import Image, ImageDraw, UnidentifiedImageError
+
+# Model-output parsing, cancellable generation and failure hints are shared
+# with the Gemma plugin (plugins/_shared), which ships beside this directory
+# both in the source tree and in the app bundle's Resources: the same answer
+# must produce the same overlay whichever engine served it.
+_PLUGINS_DIR = Path(__file__).resolve().parent.parent / "plugins"
+if str(_PLUGINS_DIR) not in sys.path:
+    sys.path.insert(0, str(_PLUGINS_DIR))
+
+from _shared.coerce import (  # noqa: E402
+    MIN_BOX_SIZE,  # noqa: F401 - re-exported for callers and tests
+    SEVERITIES,  # noqa: F401
+    as_object as _as_object,
+    coerce_boxes as _coerce_boxes,
+    coerce_confidence as _coerce_confidence,
+    coerce_findings as _coerce_findings,
+    coerce_severity as _coerce_severity,
+    coerce_text as _coerce_text,
+    extract_json as _extract_json,
+    raw_corners as _raw_corners,
+)
+from _shared.errors import describe_failure  # noqa: E402
+from _shared.vlm import GenerationCancelled, generate_text  # noqa: E402
+from _shared.weights import hub_cache_snapshot  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -74,15 +98,10 @@ TEMPERATURE = 0.2
 TOP_P = 0.95
 # Base64 of a 1120x1120 RGBA PNG is well under this; anything larger is abuse.
 MAX_IMAGE_B64_CHARS = 40_000_000
-# Boxes thinner than this (normalized) are noise, not findings.
-MIN_BOX_SIZE = 0.002
-
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("ODV_AI_PORT", "8741"))
 TOKEN_HEADER = "x-odv-token"
 ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
-
-SEVERITIES = ("normal", "mild", "moderate", "severe", "critical")
 
 
 def _load_token() -> str:
@@ -125,15 +144,17 @@ SYSTEM_PROMPT = (
     "Always respond in valid JSON format as specified in the user prompt."
 )
 
+# Substituted into the mode prompts as a str.format() *argument*, so its
+# braces are not interpreted again: single braces here reach the model as-is.
 ANALYZE_JSON_FORMAT = """
 Respond in this exact JSON format:
-{{
+{
   "findings": ["finding 1", "finding 2"],
   "bounding_boxes": [
-    {{"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.2, "label": "label", "confidence": 0.85}}
+    {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.2, "label": "label", "confidence": 0.85}
   ],
   "description": "Brief overall description of the image"
-}}
+}
 Coordinates are normalized (0.0 to 1.0) relative to image dimensions: x and y are \
 the top-left corner, width and height are fractions of the image size."""
 
@@ -331,16 +352,19 @@ def _repo_cache_dir() -> Path:
     return _hub_cache_dir() / ("models--" + MODEL_ID.replace("/", "--"))
 
 
-def snapshot_present() -> bool:
-    """Whether the pinned snapshot is already in the hub cache.
+def complete_snapshot() -> Path | None:
+    """The pinned snapshot in the hub cache, when every weight file is there.
 
     Files are linked into the snapshot as each finishes, so an interrupted
-    download can leave config.json without the weights.
+    download can leave config.json and some shards without the rest; the
+    shard index, when the model has one, names every shard that must exist.
     """
-    snapshot = _repo_cache_dir() / "snapshots" / MODEL_REVISION
-    if not (snapshot / "config.json").is_file():
-        return False
-    return any(path.is_file() for path in snapshot.glob("*.safetensors"))
+    return hub_cache_snapshot(MODEL_ID, MODEL_REVISION, cache_dir=_hub_cache_dir())
+
+
+def snapshot_present() -> bool:
+    """Whether the pinned snapshot is complete in the hub cache."""
+    return complete_snapshot() is not None
 
 
 # A directory already holding this revision's files, normally the Gemma
@@ -348,6 +372,20 @@ def snapshot_present() -> bool:
 # sets it only after checking the directory's completion marker records
 # MODEL_REVISION; a directory without the files is ignored here too.
 LOCAL_MODEL_DIR_ENV = "ODV_MODEL_DIR"
+
+
+def _weights_complete(directory: Path) -> bool:
+    """config.json plus every shard the index names (or at least one shard)."""
+    if not (directory / "config.json").is_file():
+        return False
+    index = directory / "model.safetensors.index.json"
+    if index.is_file():
+        try:
+            shards = set(json.loads(index.read_text()).get("weight_map", {}).values())
+        except (OSError, ValueError):
+            return False
+        return bool(shards) and all((directory / shard).is_file() for shard in shards)
+    return any(path.is_file() for path in directory.glob("*.safetensors"))
 
 
 def local_model_dir() -> Path | None:
@@ -359,8 +397,9 @@ def local_model_dir() -> Path | None:
     if not (directory / "config.json").is_file():
         logger.warning("%s=%s has no config.json; using the hub cache", LOCAL_MODEL_DIR_ENV, value)
         return None
-    if not any(path.is_file() for path in directory.glob("*.safetensors")):
-        logger.warning("%s=%s has no weight shards; using the hub cache", LOCAL_MODEL_DIR_ENV, value)
+    if not _weights_complete(directory):
+        logger.warning("%s=%s is missing weight shards; using the hub cache",
+                       LOCAL_MODEL_DIR_ENV, value)
         return None
     return directory
 
@@ -412,15 +451,15 @@ def load_model():
     logger.info(f"Loading model: {MODEL_ID} @ {MODEL_REVISION}")
     start = time.time()
     try:
-        local = local_model_dir()
-        if local is not None:
-            # Never reaches the Hub: the files and their revision are known.
-            _phase = "loading"
-            logger.info("Loading from the installed copy at %s", local)
-            from mlx_vlm import load
-
-            model, processor = load(str(local))
-        elif not snapshot_present():
+        # Always load from a directory on disk: loading by hub id asks the Hub
+        # for the revision's file list even when everything is cached, which
+        # fails offline. A complete local copy never touches the network.
+        source = local_model_dir()
+        if source is not None:
+            logger.info("Loading from the installed copy at %s", source)
+        else:
+            source = complete_snapshot()
+        if source is None:
             _phase = "downloading"
             # The size query runs beside the download rather than before it.
             threading.Thread(target=_fetch_expected_bytes, name="snapshot-size",
@@ -429,15 +468,14 @@ def load_model():
                         _hub_cache_dir())
             from huggingface_hub import snapshot_download
 
-            snapshot_download(MODEL_ID, revision=MODEL_REVISION)
+            source = Path(snapshot_download(MODEL_ID, revision=MODEL_REVISION))
             logger.info(f"Download finished in {time.time() - start:.1f}s")
-        if local is None:
-            _phase = "loading"
-            from mlx_vlm import load
+        _phase = "loading"
+        from mlx_vlm import load
 
-            model, processor = load(MODEL_ID, revision=MODEL_REVISION)
+        model, processor = load(str(source))
     except BaseException as exc:  # noqa: BLE001
-        _load_error = f"{type(exc).__name__}: {exc}"
+        _load_error = describe_failure(exc)
         logger.error("Model load failed: %s", _load_error)
         return
 
@@ -509,180 +547,7 @@ def _mark_roi(image: Image.Image, roi: tuple[float, float, float, float]) -> Ima
 # ---------------------------------------------------------------------------
 # Model output coercion
 # ---------------------------------------------------------------------------
-def _extract_json(text: str) -> Any:
-    """Recover a JSON value (object or array) from model output, or None."""
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    match = re.search(r"```(?:json)?\s*([\[{].*?[\]}])\s*```", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
-
-    for pattern in (r"\{.*\}", r"\[.*\]"):
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                pass
-
-    return None
-
-
-def _as_object(parsed: Any, list_key: str) -> dict | None:
-    """Normalize parsed model output to a dict.
-
-    A bare array is read as the response's primary list (the model sometimes
-    drops the wrapper object); scalars are unusable.
-    """
-    if isinstance(parsed, Mapping):
-        return dict(parsed)
-    if isinstance(parsed, list):
-        return {list_key: parsed}
-    return None
-
-
-def _finite(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
-def _coerce_confidence(value: Any) -> float:
-    """Confidence as a float in [0, 1]; accepts "85%" and 0-100 scales."""
-    if isinstance(value, str):
-        value = value.strip().rstrip("%")
-    number = _finite(value)
-    if number is None:
-        return 0.0
-    if 1.0 < number <= 100.0:
-        number /= 100.0
-    return min(max(number, 0.0), 1.0)
-
-
-def _coerce_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, Mapping):
-        for key in ("finding", "label", "description", "text", "name"):
-            if isinstance(value.get(key), str):
-                return value[key].strip()
-        return json.dumps(value, ensure_ascii=False)
-    return str(value).strip()
-
-
-def _coerce_findings(value: Any) -> list[str]:
-    items = value if isinstance(value, list) else [value] if value else []
-    findings = [_coerce_text(item) for item in items]
-    return [f for f in findings if f]
-
-
-def _coerce_severity(value: Any) -> str:
-    """Lower-cased known severity, or "unknown" -- never silently "normal"."""
-    severity = _coerce_text(value).lower()
-    return severity if severity in SEVERITIES else "unknown"
-
-
-def _raw_corners(item: Mapping) -> tuple[float, float, float, float] | None:
-    """(x0, y0, x1, y1) in whatever unit the model used, or None."""
-    box_2d = item.get("box_2d")
-    if isinstance(box_2d, (list, tuple)) and len(box_2d) == 4:
-        # Gemma's native grounding format: [ymin, xmin, ymax, xmax].
-        values = [_finite(v) for v in box_2d]
-        if any(v is None for v in values):
-            return None
-        y0, x0, y1, x1 = values
-        return x0, y0, x1, y1
-
-    x = _finite(item.get("x"))
-    y = _finite(item.get("y"))
-    w = _finite(item.get("width", item.get("w")))
-    h = _finite(item.get("height", item.get("h")))
-    if None in (x, y, w, h):
-        return None
-    return x, y, x + w, y + h
-
-
-def _detect_scale(corners: list[tuple[float, float, float, float]],
-                  image_size: tuple[int, int] | None) -> tuple[float, float] | None:
-    """Divisors that map the model's units onto [0, 1].
-
-    The prompt asks for normalized coordinates, but the model does not always
-    comply. Decided once per response, from the largest coordinate:
-      * <= 2        -> already normalized, overshooting the edge (clamped
-                       below). A 0-1000 or pixel box this small would be
-                       sub-pixel noise anyway.
-      * <= 1000     -> Gemma's native 0-1000 grid. Pixel units are
-                       indistinguishable here unless they exceed 1000, and the
-                       model's trained convention is the likelier explanation.
-      * otherwise   -> pixel units of the image the model saw, if they fit it.
-    Returns None when no reading fits, so the caller drops every box rather
-    than drawing them in the wrong place.
-    """
-    if not corners:
-        return (1.0, 1.0)
-    largest = max(max(abs(v) for v in c) for c in corners)
-    if largest <= 2.0:
-        return (1.0, 1.0)
-    if largest <= 1000.0 + 1e-3:
-        return (1000.0, 1000.0)
-    if image_size is not None:
-        width, height = image_size
-        fits = all(max(c[0], c[2]) <= width * 1.02 and max(c[1], c[3]) <= height * 1.02
-                   for c in corners)
-        if fits:
-            return (float(width), float(height))
-    return None
-
-
-def _coerce_boxes(raw: Any, image_size: tuple[int, int] | None = None,
-                  with_severity: bool = False) -> list[dict]:
-    """Keep only well-formed boxes, normalized and clamped to [0, 1].
-
-    A malformed box among several good ones is dropped rather than failing the
-    request: the model is the unreliable component here, and a partial overlay
-    is more useful than an error.
-    """
-    items = [item for item in (raw if isinstance(raw, list) else [])
-             if isinstance(item, Mapping)]
-    parsed = [(item, _raw_corners(item)) for item in items]
-    parsed = [(item, c) for item, c in parsed if c is not None]
-
-    scale = _detect_scale([c for _, c in parsed], image_size)
-    if scale is None:
-        return []
-    sx, sy = scale
-
-    boxes: list[dict] = []
-    for item, (x0, y0, x1, y1) in parsed:
-        # Order the corners (negative width/height) then clamp to the image.
-        left = min(max(min(x0, x1) / sx, 0.0), 1.0)
-        right = min(max(max(x0, x1) / sx, 0.0), 1.0)
-        top = min(max(min(y0, y1) / sy, 0.0), 1.0)
-        bottom = min(max(max(y0, y1) / sy, 0.0), 1.0)
-        if right - left < MIN_BOX_SIZE or bottom - top < MIN_BOX_SIZE:
-            continue
-        box = {
-            "x": left,
-            "y": top,
-            "width": right - left,
-            "height": bottom - top,
-            "label": _coerce_text(item.get("label")),
-            "confidence": _coerce_confidence(item.get("confidence")),
-        }
-        if with_severity:
-            box["severity"] = _coerce_severity(item.get("severity"))
-        boxes.append(box)
-    return boxes
+# The parsing helpers live in plugins/_shared/coerce.py (imported above).
 
 
 def _coerce_roi(roi: Mapping) -> tuple[float, float, float, float]:
@@ -702,42 +567,43 @@ def _coerce_roi(roi: Mapping) -> tuple[float, float, float, float]:
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
-def _generate(image: Image.Image, prompt: str) -> str:
-    """Run inference with the model. Thread-safe via lock."""
-    from mlx_vlm import generate
+def _generate(image: Image.Image, prompt: str,
+              cancel: threading.Event | None = None) -> str:
+    """Run inference with the model, serialized on the model lock.
 
-    with _model_lock:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": prompt},
-                ],
-            },
-        ]
-
-        formatted_prompt = _processor.apply_chat_template(
-            messages, add_generation_prompt=True
-        )
-
-        response = generate(
-            _model,
-            _processor,
-            formatted_prompt,
-            image=[image],
-            max_tokens=MAX_TOKENS,
-            temperature=TEMPERATURE,
-            top_p=TOP_P,
-        )
-
-    return response.text if hasattr(response, 'text') else str(response)
+    Raises GenerationCancelled when `cancel` is set before or during the run.
+    """
+    return generate_text(_model, _processor, SYSTEM_PROMPT, prompt, image,
+                         _model_lock, cancel, max_tokens=MAX_TOKENS,
+                         temperature=TEMPERATURE, top_p=TOP_P)
 
 
-async def _run_generate(image: Image.Image, prompt: str) -> str:
+# How often a running request checks whether its client is still connected.
+DISCONNECT_POLL_SECONDS = 0.5
+
+
+async def _run_generate(image: Image.Image, prompt: str,
+                        request: Request | None = None) -> str:
+    """Generate off the event loop; stop if the client goes away.
+
+    The viewer abandons a request when its timeout fires or the user retries.
+    Without this the abandoned run would hold the model lock to completion and
+    the retry would queue behind it.
+    """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _generate, image, prompt)
+    cancel = threading.Event()
+    future = loop.run_in_executor(None, _generate, image, prompt, cancel)
+    try:
+        while True:
+            done, _ = await asyncio.wait({future}, timeout=DISCONNECT_POLL_SECONDS)
+            if done:
+                return future.result()
+            if request is not None and await request.is_disconnected():
+                logger.info("Client disconnected; cancelling generation")
+                cancel.set()
+                raise GenerationCancelled()
+    finally:
+        cancel.set()
 
 
 def _require_model():
@@ -779,6 +645,24 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+@app.exception_handler(GenerationCancelled)
+async def _cancelled(_request: Request, _exc: GenerationCancelled):
+    # Nobody is listening any more; 499 is nginx's "client closed request".
+    return JSONResponse({"detail": "Request cancelled"}, status_code=499)
+
+
+@app.exception_handler(Exception)
+async def _unexpected(_request: Request, exc: Exception):
+    """Every failure answers {"detail": ...}, never a bare 500 text body.
+
+    MLX raises plain RuntimeErrors (Metal out of memory, for one); the viewer
+    shows `detail` to the user, so it carries the cause and, when recognised,
+    what to do about it.
+    """
+    logger.exception("Request failed")
+    return JSONResponse({"detail": describe_failure(exc)}, status_code=500)
 
 
 def _host_allowed(host_header: str | None) -> bool:
@@ -873,7 +757,7 @@ def build_abnormality_response(raw: str,
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(request: AnalyzeRequest):
+async def analyze(request: AnalyzeRequest, http_request: Request):
     """Analyze a full DICOM image for anatomical structures and findings."""
     _require_model()
 
@@ -889,12 +773,12 @@ async def analyze(request: AnalyzeRequest):
         json_format=ANALYZE_JSON_FORMAT,
     )
 
-    raw = await _run_generate(image, prompt)
+    raw = await _run_generate(image, prompt, http_request)
     return build_analyze_response(raw, image.size)
 
 
 @app.post("/describe-roi", response_model=ROIDescription)
-async def describe_roi(request: DescribeROIRequest):
+async def describe_roi(request: DescribeROIRequest, http_request: Request):
     """Describe a user-selected region of interest."""
     _require_model()
 
@@ -906,12 +790,12 @@ async def describe_roi(request: DescribeROIRequest):
         context=request.context or "none",
     )
 
-    raw = await _run_generate(image, prompt)
+    raw = await _run_generate(image, prompt, http_request)
     return build_roi_response(raw)
 
 
 @app.post("/detect-abnormalities", response_model=DetectAbnormalitiesResponse)
-async def detect_abnormalities(request: DetectAbnormalitiesRequest):
+async def detect_abnormalities(request: DetectAbnormalitiesRequest, http_request: Request):
     """Detect potential abnormalities in a DICOM image."""
     _require_model()
 
@@ -921,7 +805,7 @@ async def detect_abnormalities(request: DetectAbnormalitiesRequest):
         modality=request.modality,
     )
 
-    raw = await _run_generate(image, prompt)
+    raw = await _run_generate(image, prompt, http_request)
     return build_abnormality_response(raw, image.size)
 
 

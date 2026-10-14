@@ -202,14 +202,33 @@ enum HuggingFaceCache {
             .appendingPathComponent("models--" + repo.replacingOccurrences(of: "/", with: "--"))
             .appendingPathComponent("snapshots")
             .appendingPathComponent(revision)
+        return weightsComplete(in: snapshot)
+    }
+
+    /// Whether `directory` holds config.json and every weight shard: all the
+    /// shards `model.safetensors.index.json` names when there is one (as
+    /// `_shared/weights.py` checks), else at least one `.safetensors` file.
+    /// Each file is linked in as it finishes, so an interrupted download can
+    /// leave config.json and some shards without the rest.
+    static func weightsComplete(in directory: URL) -> Bool {
         let manager = FileManager.default
-        guard manager.fileExists(atPath: snapshot.appendingPathComponent("config.json").path),
-              let entries = try? manager.contentsOfDirectory(atPath: snapshot.path) else { return false }
-        // Each file is linked in as it finishes, so an interrupted download
-        // can leave config.json without the weights.
+        guard manager.fileExists(atPath: directory.appendingPathComponent("config.json").path) else {
+            return false
+        }
+        let index = directory.appendingPathComponent("model.safetensors.index.json")
+        if manager.fileExists(atPath: index.path) {
+            guard let data = try? Data(contentsOf: index),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let map = object["weight_map"] as? [String: String] else { return false }
+            let shards = Set(map.values)
+            return !shards.isEmpty && shards.allSatisfy {
+                manager.fileExists(atPath: directory.appendingPathComponent($0).path)
+            }
+        }
+        guard let entries = try? manager.contentsOfDirectory(atPath: directory.path) else { return false }
         return entries.contains { name in
             name.hasSuffix(".safetensors")
-                && manager.fileExists(atPath: snapshot.appendingPathComponent(name).path)
+                && manager.fileExists(atPath: directory.appendingPathComponent(name).path)
         }
     }
 }

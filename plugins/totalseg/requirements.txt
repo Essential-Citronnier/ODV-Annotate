@@ -5,14 +5,151 @@
 # adapter's environment is separate from this one.
 #
 # Roughly 3 GB installed; weights are fetched per task by download_weights.py.
-
-TotalSegmentator>=2.4.0
-torch>=2.2.0
-
+#
+#   TotalSegmentator>=2.4.0
+#   torch>=2.2.0
+#
 # NIfTI in, DICOM SEG out.
-nibabel>=5.0.0
-SimpleITK>=2.3.0
-pydicom>=2.4.0
-highdicom>=0.22.0
+#   nibabel>=5.0.0
+#   SimpleITK>=2.3.0
+#   pydicom>=2.4.0
+#   highdicom>=0.22.0
+#
+#   numpy>=1.24.0
+#
+# Full lock. The direct requirements above (indented, commented out) are
+# the input; every package below, transitive ones included, is pinned
+# exactly so an upstream release cannot change this plugin underneath the
+# viewer. Resolved for the interpreter the app bundles (CPython 3.11,
+# macOS 14 arm64) with:
+#
+#   MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile direct.in \
+#       --python-version 3.11 --python-platform aarch64-apple-darwin \
+#       --no-header --annotation-style line
+#
+# where direct.in holds the direct requirements above. To change a
+# version, edit direct.in, re-run the command and replace the list below.
 
-numpy>=1.24.0
+acvl-utils==0.2.6         # via nnunetv2
+aiohappyeyeballs==2.7.1   # via aiohttp
+aiohttp==3.14.5           # via fury
+aiosignal==1.4.0          # via aiohttp
+annotated-doc==0.0.5      # via typer
+annotated-types==0.8.0    # via pydantic
+anyio==4.15.1             # via httpx, httpx2
+argparse==1.4.0           # via unittest2
+attrs==26.1.0             # via aiohttp
+batchgenerators==0.25.5   # via acvl-utils, batchgeneratorsv2, nnunetv2
+batchgeneratorsv2==0.3.6  # via nnunetv2
+blosc==1.11.4             # via totalsegmentator
+blosc2==4.14.1            # via acvl-utils, nnunetv2
+cachebox==5.2.3           # via deepdiff
+certifi==2026.7.22        # via httpcore, httpx, requests
+charset-normalizer==3.5.2  # via requests
+click==8.5.0              # via huggingface-hub
+cloudpickle==3.1.2        # via joblib
+connected-components-3d==4.1.0  # via acvl-utils
+contourpy==1.3.3          # via matplotlib
+cycler==0.12.1            # via matplotlib
+dataclasses-json==0.6.7   # via pygltflib
+deepdiff==9.1.0           # via trx-python
+deprecated==1.3.1         # via pygltflib
+dicom2nifti==2.6.2        # via totalsegmentator
+dipy==1.12.1              # via totalsegmentator
+dynamic-network-architectures==0.4.4  # via nnunetv2
+einops==0.8.2             # via dynamic-network-architectures, nnunetv2
+filelock==4.1.2           # via huggingface-hub, torch
+fonttools==4.67.0         # via matplotlib
+frozenlist==1.8.0         # via aiohttp, aiosignal
+fsspec==2026.9.0          # via huggingface-hub, torch
+fury==0.12.0              # via totalsegmentator
+future==1.0.0             # via batchgenerators
+graphviz==0.21            # via nnunetv2
+h11==0.16.0               # via httpcore, httpcore2
+h2==4.4.1                 # via httpx
+h5py==3.16.0              # via dipy
+hf-xet==1.7.0             # via huggingface-hub
+highdicom==0.28.2         # via -r direct.in
+hpack==4.2.0              # via h2
+httpcore==1.0.9           # via httpx
+httpcore2==2.13.1         # via httpx2
+httpx==0.28.1             # via blosc2
+httpx2==2.13.1            # via huggingface-hub
+huggingface-hub==2.2.0    # via timm
+hyperframe==6.1.0         # via h2
+idna==3.20                # via anyio, httpx, httpx2, requests, yarl
+imagecodecs==2026.3.6     # via nnunetv2
+imageio==2.38.1           # via scikit-image
+imgkit==1.2.3             # via totalsegmentator
+importlib-resources==7.1.0  # via nibabel
+jinja2==3.1.6             # via torch, totalsegmentator
+joblib==1.6.0             # via scikit-learn
+kiwisolver==1.5.1         # via matplotlib
+lazy-loader==0.6          # via fury, scikit-image
+linecache2==1.0.0         # via traceback2
+markdown-it-py==4.2.0     # via rich
+markupsafe==3.0.4         # via jinja2
+marshmallow==3.26.2       # via dataclasses-json
+matplotlib==3.11.2        # via nnunetv2, seaborn, totalsegmentator, vtk
+mdurl==0.1.2              # via markdown-it-py
+mpmath==1.3.0             # via sympy
+msgpack==1.2.3            # via blosc2
+multidict==7.1.0          # via aiohttp, yarl
+mypy-extensions==1.1.0    # via typing-inspect
+narwhals==2.27.1          # via scikit-learn
+ndindex==1.10.1           # via blosc2
+networkx==3.6.1           # via scikit-image, torch, totalsegmentator
+nibabel==5.4.2            # via dicom2nifti, dipy, nnunetv2, totalsegmentator, trx-python, -r direct.in
+nnunetv2==2.8.1           # via totalsegmentator
+numexpr==2.14.2           # via blosc2
+numpy==2.4.6              # via acvl-utils, batchgenerators, batchgeneratorsv2, blosc2, connected-components-3d, contourpy, dicom2nifti, dipy, dynamic-network-architectures, fury, h5py, highdicom, imagecodecs, imageio, matplotlib, nibabel, nnunetv2, numexpr, pandas, pyjpegls, scikit-image, scikit-learn, scipy, seaborn, tifffile, torchvision, totalsegmentator, trx-python, -r direct.in
+orderly-set==5.5.0        # via deepdiff
+packaging==26.3           # via dipy, fury, highdicom, huggingface-hub, lazy-loader, marshmallow, matplotlib, nibabel, scikit-image
+pandas==3.0.6             # via batchgenerators, nnunetv2, seaborn, totalsegmentator
+pillow==12.3.0            # via batchgenerators, fury, highdicom, imageio, matplotlib, scikit-image, torchvision, totalsegmentator
+propcache==0.5.4          # via aiohttp, yarl
+pyarrow==26.0.0           # via totalsegmentator
+pydantic==2.14.1          # via blosc2
+pydantic-core==2.50.1     # via pydantic
+pydicom==3.0.2            # via dicom2nifti, highdicom, -r direct.in
+pygltflib==1.16.5         # via fury
+pygments==2.21.0          # via rich
+pyjpegls==1.5.1           # via highdicom
+pyparsing==3.3.3          # via matplotlib
+python-dateutil==2.9.0.post0  # via matplotlib, pandas
+python-gdcm==3.2.6        # via dicom2nifti
+pyyaml==6.0.3             # via huggingface-hub, timm, yacs
+requests==2.34.2          # via nnunetv2, totalsegmentator
+rich==15.0.0              # via blosc2, typer
+safetensors==0.8.0        # via timm
+scikit-image==0.26.0      # via acvl-utils, batchgenerators, nnunetv2, totalsegmentator
+scikit-learn==1.9.1       # via batchgenerators, nnunetv2, totalsegmentator
+scipy==1.17.1             # via batchgenerators, dicom2nifti, dipy, fury, nnunetv2, scikit-image, scikit-learn, totalsegmentator
+seaborn==0.13.2           # via nnunetv2
+setuptools==84.0.0        # via torch
+shellingham==1.5.4        # via typer
+simpleitk==2.5.6          # via acvl-utils, nnunetv2, totalsegmentator, -r direct.in
+six==1.17.0               # via imgkit, python-dateutil, unittest2
+sympy==1.14.0             # via torch
+threadpoolctl==3.7.0      # via batchgenerators, blosc2, scikit-learn
+tifffile==2026.3.3        # via nnunetv2, scikit-image
+timm==1.0.22              # via dynamic-network-architectures
+torch==2.14.1             # via acvl-utils, batchgeneratorsv2, dynamic-network-architectures, nnunetv2, timm, torchvision, totalsegmentator, -r direct.in
+torchvision==0.29.1       # via timm
+totalsegmentator==2.18.0  # via -r direct.in
+tqdm==4.70.1              # via dipy, huggingface-hub, nnunetv2, totalsegmentator
+traceback2==1.4.0         # via unittest2
+truststore==0.10.5        # via httpcore2, httpx2
+trx-python==0.6           # via dipy
+typer==0.27.3             # via trx-python
+typing-extensions==4.16.0  # via aiohttp, aiosignal, anyio, highdicom, httpx2, huggingface-hub, nibabel, pydantic, pydantic-core, torch, typing-inspect, typing-inspection
+typing-inspect==0.9.0     # via dataclasses-json
+typing-inspection==0.4.4  # via pydantic
+unittest2==1.1.0          # via batchgenerators
+urllib3==2.8.0            # via requests
+vtk==9.3.1                # via fury
+wrapt==2.5.1              # via deprecated
+xmltodict==1.0.4          # via totalsegmentator
+xvfbwrapper==0.2.35       # via totalsegmentator
+yacs==0.1.8               # via nnunetv2
+yarl==1.25.1              # via aiohttp

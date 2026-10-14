@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
+import os
 import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -48,7 +50,28 @@ from .protocol import (
 )
 
 __all__ = ["Adapter", "build_app", "run_adapter", "parse_server_args",
-           "start_parent_watch"]
+           "start_parent_watch", "TOKEN_ENV", "TOKEN_HEADER"]
+
+# The host generates a token per launch and passes it in this variable; every
+# request must then carry it in TOKEN_HEADER and name loopback in its Host
+# header. The Host check defeats DNS-rebinding pages that would otherwise reach
+# a loopback port from the browser; the token keeps other local processes out.
+# Started by hand without the variable (development, the conformance kit), the
+# adapter stays open as before.
+TOKEN_ENV = "ODV_PLUGIN_TOKEN"
+TOKEN_HEADER = "x-odv-token"
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
+
+
+def _host_allowed(host_header: str | None) -> bool:
+    if not host_header:
+        return False
+    host = host_header.strip().lower()
+    if host.startswith("[::1]"):
+        return True
+    if host.startswith("["):
+        return False
+    return host.rsplit(":", 1)[0] in _ALLOWED_HOSTS
 
 
 class Adapter(Protocol):
@@ -93,8 +116,13 @@ def _as_error_response(exc: BaseException) -> JSONResponse:
     )
 
 
-def build_app(adapter: Adapter, on_startup: Callable[[], None] | None = None):
-    """Build the FastAPI app exposing `adapter` over protocol v1."""
+def build_app(adapter: Adapter, on_startup: Callable[[], None] | None = None,
+              token: str | None = None):
+    """Build the FastAPI app exposing `adapter` over protocol v1.
+
+    `token` defaults to $ODV_PLUGIN_TOKEN; when set, requests without it (or
+    addressed to a non-loopback Host) are refused.
+    """
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
@@ -103,7 +131,21 @@ def build_app(adapter: Adapter, on_startup: Callable[[], None] | None = None):
             on_startup()
         yield
 
-    app = FastAPI(title=f"ODV plugin: {adapter.plugin_id}", lifespan=lifespan)
+    app = FastAPI(title=f"ODV plugin: {adapter.plugin_id}", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
+
+    expected = (token if token is not None else os.environ.get(TOKEN_ENV, "")).strip()
+    if expected:
+        @app.middleware("http")
+        async def require_local_caller(request: Request, call_next):
+            if not _host_allowed(request.headers.get("host")):
+                return JSONResponse(status_code=403, content=error_payload(
+                    ErrorCode.BAD_INPUT, "Forbidden host", recoverable=False))
+            supplied = request.headers.get(TOKEN_HEADER, "")
+            if not hmac.compare_digest(supplied.encode(), expected.encode()):
+                return JSONResponse(status_code=401, content=error_payload(
+                    ErrorCode.BAD_INPUT, "Missing or invalid token", recoverable=False))
+            return await call_next(request)
 
     @app.get("/health")
     async def health() -> dict:

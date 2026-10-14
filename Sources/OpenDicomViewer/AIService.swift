@@ -186,6 +186,51 @@ enum AISeverity: String, CaseIterable {
     var displayName: String { rawValue.capitalized }
 }
 
+// MARK: - Image preparation
+
+/// The bitmap the model sees, drawn at the size the panel displays.
+///
+/// An MPR or MIP image carries its raw voxel grid as pixels and the
+/// aspect-corrected size only as its point size; encoding its bitmap directly
+/// sent the model a squashed slice. Redrawing at the display size fixes that,
+/// and capping the longest side (the servers downsample to this anyway) keeps
+/// large DX and MG images from producing tens of megabytes of base64.
+enum AIImagePreparation {
+    static let maxSide: CGFloat = 1120
+
+    /// Pixel size for a display size, aspect kept, longest side capped.
+    static func targetSize(width: CGFloat, height: CGFloat,
+                           maxSide: CGFloat = maxSide) -> CGSize? {
+        guard width.isFinite, height.isFinite, width >= 1, height >= 1 else { return nil }
+        let scale = min(1, maxSide / max(width, height))
+        return CGSize(width: max(1, (width * scale).rounded()),
+                      height: max(1, (height * scale).rounded()))
+    }
+
+    /// `image` redrawn into a bitmap of `targetSize(width:height:)` pixels.
+    static func render(_ image: NSImage, width: CGFloat, height: CGFloat) -> NSImage? {
+        guard let size = targetSize(width: width, height: height),
+              let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.imageInterpolation = .high
+        let bounds = NSRect(origin: .zero, size: size)
+        NSColor.black.setFill()
+        bounds.fill()
+        image.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        let output = NSImage(size: size)
+        output.addRepresentation(rep)
+        return output
+    }
+}
+
 // MARK: - Box Sanitizing
 
 enum AIBoxSanitizer {
@@ -252,18 +297,29 @@ class AIService: ObservableObject {
     var authToken: String = ""
     static let tokenHeader = "X-ODV-Token"
 
-    private let baseURL: URL
+    /// Default port, used when the manager has not picked one yet and for
+    /// adopting a server a developer started with launch.sh.
+    static let defaultPort = 8741
+    /// The port of the server this app talks to. The manager picks a free
+    /// one for each launch (passed to the server as ODV_AI_PORT), so another
+    /// program on 8741 cannot stop the built-in engine from starting.
+    var port: Int = AIService.defaultPort
+    private var baseURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
     private let session: URLSession
+    /// Ceiling for one inference request. A base M1 with 8 GB can need several
+    /// minutes for a first answer while weights page in; the server cancels a
+    /// generation whose client gave up, so a retry does not queue behind it.
+    static let inferenceTimeout: TimeInterval = 600
     /// One inference at a time: the server holds a single model and runs one
     /// generation at once anyway, and queueing here keeps several panels'
     /// requests from all running into the client timeout behind each other.
     private let requestQueue = AIRequestQueue()
 
     private init() {
-        self.baseURL = URL(string: "http://127.0.0.1:8741")!
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 120  // model inference can be slow
-        config.timeoutIntervalForResource = 180
+        let config = URLSessionConfiguration.ephemeral
+        // Per request: /health and /modes set short timeouts themselves.
+        config.timeoutIntervalForRequest = Self.inferenceTimeout
+        config.timeoutIntervalForResource = Self.inferenceTimeout + 60
         self.session = URLSession(configuration: config)
     }
 
@@ -298,7 +354,7 @@ class AIService: ObservableObject {
             default: status = .starting
             }
         case .foreign:
-            status = .error("Port 8741 is used by another process")
+            status = .error("Port \(port) is used by another process")
         case .unreachable:
             status = .stopped
         }
@@ -362,7 +418,8 @@ class AIService: ObservableObject {
 
     func fetchModes() async {
         do {
-            let request = authorizedRequest(baseURL.appendingPathComponent("modes"))
+            var request = authorizedRequest(baseURL.appendingPathComponent("modes"))
+            request.timeoutInterval = 10
             let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse,
                   httpResponse.statusCode == 200 else { return }
@@ -475,6 +532,7 @@ class AIService: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
+        request.timeoutInterval = Self.inferenceTimeout
 
         await requestQueue.acquire()
         await MainActor.run { isInferencing = true }
@@ -483,7 +541,14 @@ class AIService: ObservableObject {
             Task { await requestQueue.release() }
         }
 
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let error as URLError {
+            if error.code == .cancelled || Task.isCancelled { throw CancellationError() }
+            throw AIServiceError.transport(error)
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw AIServiceError.invalidResponse
@@ -493,11 +558,27 @@ class AIService: ObservableObject {
             if httpResponse.statusCode == 503 {
                 throw AIServiceError.serverNotReady
             }
-            let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw AIServiceError.serverError(httpResponse.statusCode, errorText)
+            throw AIServiceError.serverError(httpResponse.statusCode,
+                                             Self.errorDetail(from: data))
         }
 
         return try JSONDecoder().decode(R.self, from: data)
+    }
+
+    /// The server's `{"detail": ...}` message (FastAPI's error shape, which
+    /// server.py also uses for unexpected failures), else the body as text.
+    static func errorDetail(from data: Data) -> String {
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let detail = object["detail"] as? String, !detail.isEmpty { return detail }
+            // Validation errors: a list of {"msg": ...}.
+            if let items = object["detail"] as? [[String: Any]] {
+                let messages = items.compactMap { $0["msg"] as? String }
+                if !messages.isEmpty { return messages.joined(separator: "; ") }
+            }
+        }
+        let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return text.isEmpty ? "Unknown error" : String(text.prefix(500))
     }
 }
 
@@ -532,6 +613,7 @@ enum AIServiceError: LocalizedError {
     case imageConversionFailed
     case invalidResponse
     case serverError(Int, String)
+    case transport(URLError)
 
     var errorDescription: String? {
         switch self {
@@ -543,6 +625,17 @@ enum AIServiceError: LocalizedError {
             return "Invalid response from AI server."
         case .serverError(let code, let message):
             return "AI server error (\(code)): \(message)"
+        case .transport(let error):
+            switch error.code {
+            case .timedOut:
+                return "The AI model did not answer within \(Int(AIService.inferenceTimeout / 60)) minutes. "
+                    + "On a Mac with 8 GB of memory, quit other apps and try again."
+            case .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet:
+                return "Lost the connection to the local AI server. It may have run out of memory; "
+                    + "try again, and restart the AI engine if it persists."
+            default:
+                return "Could not reach the local AI server: \(error.localizedDescription)"
+            }
         }
     }
 }

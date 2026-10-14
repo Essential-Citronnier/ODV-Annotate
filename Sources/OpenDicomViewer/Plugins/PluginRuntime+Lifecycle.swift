@@ -60,7 +60,10 @@ extension PluginRuntime {
                 pluginID: builtInServerID,
                 declaredRamGB: AIServerManager.declaredRamGB,
                 lastUsed: server.lastUsed,
-                isEvictable: !AIService.shared.isInferencing && !server.hasPendingRun)]
+                // Never while it downloads or loads the model: stopping it
+                // then throws away minutes of work the user is waiting on.
+                isEvictable: AIService.shared.serverStatus.isReady
+                    && !AIService.shared.isInferencing && !server.hasPendingRun)]
         }
         runtime.stopExternalResident = { id in
             guard id == builtInServerID else { return }
@@ -68,6 +71,12 @@ extension PluginRuntime {
         }
         runtime.willStartPlugin = { pluginID in
             guard pluginID == AIAnalysisEngine.pluginID, server.isServerRunning else { return }
+            if !AIService.shared.serverStatus.isReady {
+                let message = "The built-in AI engine is still downloading or loading the model. "
+                    + "Wait for it to finish, or stop it in the AI inspector, then try the plugin again."
+                runtime.log(for: pluginID).line("Refused: \(message)")
+                throw PluginError.notReady(message)
+            }
             runtime.log(for: pluginID).line(
                 "Stopping the built-in AI server: it holds the same model.")
             await server.stopAndWait()

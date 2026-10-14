@@ -97,13 +97,22 @@ class AIServerManager: ObservableObject {
     /// Bumped by every stop, so a start still waiting for the plugin runtime
     /// to free the model does not spawn after the user stopped it.
     private var launchGeneration = 0
-    /// The latest AI request made while the server was not ready; it runs
-    /// once the model is ready. One slot: a burst of clicks runs once.
-    private var pendingRun: (() -> Void)? {
-        didSet { hasPendingRun = pendingRun != nil }
+    /// AI requests made while the server was not ready, one per panel; each
+    /// runs once the model is ready. One slot per panel: a burst of clicks on
+    /// a panel runs once, and a request on another panel is not lost.
+    private var pendingRuns: [(key: AnyHashable, work: () -> Void)] = [] {
+        didSet { hasPendingRun = !pendingRuns.isEmpty }
     }
     /// Whether an AI request is waiting for the server (shown in the UI).
     @Published private(set) var hasPendingRun = false
+    /// Why the latest `ensureStarted()` returned false, for the panel to show.
+    private(set) var lastStartRefusal: String?
+    /// The user chose Start Anyway on the low-memory warning this launch.
+    private var lowMemoryAcknowledged = false
+    /// Whether a completed install was found on disk (or just finished).
+    /// Unlike `setupState`, a server failure does not clear it, so engine
+    /// resolution does not flip to the plugin on a transient failure.
+    @Published private(set) var hasCompletedSetup = false
     /// When the server last finished a request or became ready, for the
     /// plugin arbiter's least-recently-used eviction order.
     private(set) var lastUsed: Date = .distantPast
@@ -123,7 +132,9 @@ class AIServerManager: ObservableObject {
     /// themselves (launch.sh) can export the same ODV_AI_TOKEN to both.
     let launchToken: String
 
-    private static let port = 8741
+    /// The port the current server listens on; a free one is picked per
+    /// launch so another program on the default port cannot block the engine.
+    private var port: Int = AIService.defaultPort
     /// Initial readiness wait; polling continues with backoff afterwards.
     private static let initialReadyTimeout: TimeInterval = 300
 
@@ -238,9 +249,20 @@ class AIServerManager: ObservableObject {
         venvDirectory.appendingPathComponent(".odv-setup-complete")
     }
 
-    /// PID and start time of the server this app launched (see `PIDRecord`).
+    /// PID and start time of the server this app instance launched, with the
+    /// app's own (see `PIDRecord`). One file per app instance, so a second
+    /// copy of the app neither overwrites nor removes the first one's record.
     private var pidFileURL: URL {
-        venvDirectory.appendingPathComponent(".odv-server.pid")
+        pidDirectory.appendingPathComponent(".odv-server-\(getpid()).pid")
+    }
+
+    /// Where PID records live: beside the venv, which setup recreates.
+    private var pidDirectory: URL { venvDirectory.deletingLastPathComponent() }
+
+    /// Held while a setup runs, so two copies of the app never rebuild the
+    /// same venv at once. Beside the venv, which `venv --clear` would wipe.
+    private var setupLockURL: URL {
+        venvDirectory.deletingLastPathComponent().appendingPathComponent(".odv-setup.lock")
     }
 
     private var requirementsURL: URL {
@@ -275,6 +297,10 @@ class AIServerManager: ObservableObject {
         if env["HOME"] == nil {
             env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
         }
+        // The bundled interpreter and the plugins/_shared sources server.py
+        // imports sit in the read-only, signed app bundle; writing .pyc files
+        // there fails (or, from a writable copy, breaks the seal).
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         // pip and huggingface_hub ignore the macOS proxy settings.
         return SystemProxyEnvironment.applying(to: env)
     }
@@ -320,6 +346,7 @@ class AIServerManager: ObservableObject {
         // halfway through it.
         guard setupState != .installingDeps else { return }
         let complete = isSetupComplete
+        hasCompletedSetup = complete
         setupState = complete ? .ready : .notSetup
         // Installs made before the enable prompt existed count as enabled.
         if complete && aiEnabled == nil { aiEnabled = true }
@@ -398,6 +425,79 @@ class AIServerManager: ObservableObject {
             what: "the AI model download (~5.2 GB)")
     }
 
+    // MARK: - Memory
+
+    /// Below this much physical memory the built-in engine still runs, but
+    /// the 5 GB model leaves little for macOS and the viewer: answers can take
+    /// minutes and other apps get paged out.
+    static let lowMemoryThresholdBytes: UInt64 = 12 * 1024 * 1024 * 1024
+    /// What the docs recommend.
+    static let recommendedMemoryGB = 16
+
+    static func isLowMemory(physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Bool {
+        physicalBytes < lowMemoryThresholdBytes
+    }
+
+    static func memoryGBText(_ bytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> String {
+        "\(Int((Double(bytes) / 1_073_741_824).rounded())) GB"
+    }
+
+    /// Asked before the built-in engine starts on a low-memory Mac, once per
+    /// launch. Returns whether to go ahead.
+    @MainActor
+    private func confirmLowMemoryIfNeeded() -> Bool {
+        guard Self.isLowMemory(), !lowMemoryAcknowledged else { return true }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "This Mac has \(Self.memoryGBText()) of memory"
+        alert.informativeText = """
+            The AI model needs about 5 GB of memory while it runs; \(Self.recommendedMemoryGB) GB \
+            is recommended. On this Mac it will be slow (a first answer can take several \
+            minutes) and other apps may slow down. Quit other apps before starting it.
+
+            Plugins other than Gemma (SAM 2, SAM 3, TotalSegmentator) need more memory \
+            and are not recommended on this Mac.
+            """
+        alert.addButton(withTitle: "Start Anyway")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        lowMemoryAcknowledged = true
+        return true
+    }
+
+    // MARK: - Install location
+
+    /// Whether the app runs from a mounted disk image or an App Translocation
+    /// path. A venv built from the bundled interpreter there breaks as soon as
+    /// the app is moved, so AI setup asks for the move first.
+    static func isRunningFromDiskImageOrTranslocation(bundlePath: String = Bundle.main.bundlePath) -> Bool {
+        let path = URL(fileURLWithPath: bundlePath).standardizedFileURL.path
+        return path.contains("/AppTranslocation/") || path.hasPrefix("/Volumes/")
+    }
+
+    /// Explain the move, offering to reveal the app. Returns false (setup does
+    /// not proceed).
+    @MainActor
+    private func askToMoveToApplications() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Move the app to Applications first"
+        alert.informativeText = """
+            The app is running from the disk image (or a temporary location macOS \
+            uses for downloaded apps). Local AI installs files that depend on where \
+            the app is, so set it up after moving the app:
+
+            1. Quit the app.
+            2. Drag it into the Applications folder.
+            3. Open it from Applications and try again.
+            """
+        alert.addButton(withTitle: "Show App in Finder")
+        alert.addButton(withTitle: "OK")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+        }
+        return false
+    }
+
     // MARK: - Enabling
 
     /// Ask once whether to enable local AI. Returns whether it is enabled.
@@ -410,6 +510,11 @@ class AIServerManager: ObservableObject {
         }
         // Declined before: the inspector offers the button instead of a modal.
         guard aiEnabled == nil else { return false }
+        let memoryLine = "Memory: the model uses about 5 GB while it runs; "
+            + "\(Self.recommendedMemoryGB) GB of RAM is recommended. This Mac has \(Self.memoryGBText())"
+            + (Self.isLowMemory()
+               ? ", so answers will be slow; quit other apps while using AI."
+               : ".")
         let alert = NSAlert()
         alert.messageText = "Enable local AI?"
         alert.informativeText = """
@@ -417,6 +522,8 @@ class AIServerManager: ObservableObject {
             about 6–7 GB once: Python packages (~1.5 GB) and the model (~5.2 GB), \
             and needs about 8 GB of free disk space. Setup takes roughly 10–30 \
             minutes depending on your connection; you can keep working meanwhile.
+
+            \(memoryLine)
 
             Images never leave this Mac.
             """
@@ -439,43 +546,63 @@ class AIServerManager: ObservableObject {
     @MainActor
     @discardableResult
     func ensureStarted() -> Bool {
+        lastStartRefusal = nil
         if aiService.serverStatus.isReady { return true }
-        guard confirmEnableIfNeeded() else { return false }
+        guard confirmEnableIfNeeded() else {
+            lastStartRefusal = "Local AI is off. Press Enable Local AI in the AI inspector to set it up."
+            return false
+        }
         if setupState == .unknown { checkSetupState() }
         switch setupState {
         case .installingDeps:
             return true
-        case .failed:
+        case .failed(let message):
+            lastStartRefusal = message
             return false
         case .notSetup, .ready, .unknown:
             if isServerRunning { return true }
+            if !isSetupComplete && Self.isRunningFromDiskImageOrTranslocation() {
+                _ = askToMoveToApplications()
+                lastStartRefusal = "Move the app to the Applications folder, open it from there, then try again."
+                return false
+            }
+            guard confirmLowMemoryIfNeeded() else {
+                lastStartRefusal = "AI was not started."
+                return false
+            }
             startServer()
-            if case .failed = setupState { return false }
+            if case .failed(let message) = setupState {
+                lastStartRefusal = message
+                return false
+            }
             return true
         }
     }
 
-    /// Run `work` once the server is ready (replacing any earlier pending
-    /// request), or now if it already is.
-    func runWhenReady(_ work: @escaping () -> Void) {
+    /// Run `work` once the server is ready, or now if it already is. A
+    /// request queued under the same `key` (normally the panel) replaces the
+    /// earlier one; requests under other keys keep their place.
+    func runWhenReady(key: AnyHashable, _ work: @escaping () -> Void) {
         if aiService.serverStatus.isReady {
             work()
         } else {
-            pendingRun = work
+            pendingRuns.removeAll { $0.key == key }
+            pendingRuns.append((key: key, work: work))
         }
     }
 
     private func serverBecameReady() {
         lastUsed = Date()
-        let work = pendingRun
-        pendingRun = nil
+        let work = pendingRuns.map(\.work)
+        pendingRuns = []
         NotificationCenter.default.post(name: .odvAIServerReady, object: nil)
-        work?()
+        // AIService serializes the requests, so they run one after another.
+        work.forEach { $0() }
     }
 
-    /// Forget a queued request: the server it was waiting for will not come.
+    /// Forget queued requests: the server they were waiting for will not come.
     private func dropPendingRun() {
-        pendingRun = nil
+        pendingRuns = []
     }
 
     func noteUsed() {
@@ -530,13 +657,15 @@ class AIServerManager: ObservableObject {
         aiEnabled = true
 
         // Capture value types before entering background task
+        let lockURL = setupLockURL
         let venvDir = venvDirectory
         let requirementsPath = requirementsURL.path
         let markerURL = setupMarkerURL
         let requirementsHash = currentRequirementsHash ?? "unknown-requirements"
 
-        // An interrupted reinstall must not look complete.
-        try? FileManager.default.removeItem(at: markerURL)
+        // An interrupted reinstall must not look complete (the marker is
+        // removed under the setup lock, below).
+        hasCompletedSetup = false
 
         Task.detached { [weak self] in
             guard let self else { return }
@@ -546,6 +675,35 @@ class AIServerManager: ObservableObject {
             try? FileManager.default.createDirectory(
                 at: parentDir, withIntermediateDirectories: true
             )
+
+            // Another copy of the app may be building this venv right now.
+            guard let lock = SetupLock(url: lockURL) else {
+                await self.failSetup("Could not create the setup lock at \(lockURL.path).")
+                return
+            }
+            defer { lock.release() }
+            if !lock.tryAcquire() {
+                await MainActor.run {
+                    self.appendSetupLog("Another copy of the app is setting up local AI; waiting for it to finish…\n")
+                }
+                while !lock.tryAcquire() {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+                // It may have completed the very install this one would do.
+                let done = await MainActor.run { self.isSetupComplete }
+                if done {
+                    await MainActor.run {
+                        self.hasCompletedSetup = true
+                        self.setupState = .ready
+                        self.appendSetupLog("Setup was completed by the other copy — starting server…\n")
+                        self.launchServerProcess()
+                    }
+                    return
+                }
+            }
+            // Removed under the lock: an install the other copy finished
+            // must not be invalidated before the check above.
+            try? FileManager.default.removeItem(at: markerURL)
 
             // Locate Python 3
             guard let python3 = self.findPython3() else {
@@ -635,6 +793,7 @@ class AIServerManager: ObservableObject {
             }
 
             await MainActor.run {
+                self.hasCompletedSetup = true
                 self.setupState = .ready
                 self.appendSetupLog("\nEnvironment ready — starting server…\n")
                 self.launchServerProcess()
@@ -791,7 +950,9 @@ class AIServerManager: ObservableObject {
         process.currentDirectoryURL = serverDirectory
         var env = buildPythonEnvironment()
         env["ODV_AI_TOKEN"] = launchToken
-        env["ODV_AI_PORT"] = String(Self.port)
+        port = PluginPortAllocator.freeLoopbackPort() ?? AIService.defaultPort
+        aiService.port = port
+        env["ODV_AI_PORT"] = String(port)
         env["ODV_PARENT_PID"] = String(getpid())
         env["PYTHONUNBUFFERED"] = "1"
         if let shared = sharedModelDirectory {
@@ -819,7 +980,7 @@ class AIServerManager: ObservableObject {
             serverProcess = process
             adoptedPID = nil
             isServerRunning = true
-            appendLog("Server process started (PID \(process.processIdentifier))")
+            appendLog("Server process started (PID \(process.processIdentifier), port \(port))")
             recordPID(process.processIdentifier)
             monitorReadiness(of: process)
         } catch {
@@ -1050,6 +1211,9 @@ class AIServerManager: ObservableObject {
             self.init(pid: pid, startSeconds: seconds, startMicroseconds: micros)
         }
 
+        /// Whether this exact process (PID and start time) is alive.
+        var isAlive: Bool { Self.current(pid: pid) == self }
+
         /// The record for a live process, or nil if no such process exists.
         static func current(pid: Int32) -> PIDRecord? {
             var info = kinfo_proc()
@@ -1063,38 +1227,94 @@ class AIServerManager: ObservableObject {
         }
     }
 
+    /// A launched server together with the app instance that owns it. A
+    /// server whose owner is still alive belongs to another running copy of
+    /// the app and is never swept.
+    struct OwnedPIDRecord: Equatable {
+        let server: PIDRecord
+        /// Nil in records written before owners were recorded.
+        let owner: PIDRecord?
+
+        var serialized: String {
+            server.serialized + (owner.map { "\n" + $0.serialized } ?? "")
+        }
+
+        init(server: PIDRecord, owner: PIDRecord?) {
+            self.server = server
+            self.owner = owner
+        }
+
+        init?(serialized: String) {
+            let lines = serialized.split(whereSeparator: \.isNewline)
+            guard let first = lines.first, let server = PIDRecord(serialized: String(first)) else {
+                return nil
+            }
+            self.server = server
+            owner = lines.count > 1 ? PIDRecord(serialized: String(lines[1])) : nil
+        }
+
+        /// Whether a launch-time sweep may terminate the server: it is alive,
+        /// and the app that started it is gone (or unknown, for old records).
+        func isOrphaned(serverAlive: Bool, ownerAlive: Bool) -> Bool {
+            guard serverAlive else { return false }
+            guard owner != nil else { return true }
+            return !ownerAlive
+        }
+    }
+
     private func recordPID(_ pid: Int32) {
         guard let record = PIDRecord.current(pid: pid) else { return }
-        try? record.serialized.write(to: pidFileURL, atomically: true, encoding: .utf8)
+        let owned = OwnedPIDRecord(server: record, owner: PIDRecord.current(pid: getpid()))
+        try? owned.serialized.write(to: pidFileURL, atomically: true, encoding: .utf8)
     }
 
     private func removePIDRecord() {
         try? FileManager.default.removeItem(at: pidFileURL)
     }
 
-    /// Terminate a server left running by an earlier launch of this app (e.g.
-    /// after a crash). Only a process whose PID *and* start time match the
-    /// record is touched. Returns whether one was found.
+    /// Terminate servers left running by earlier launches of this app (e.g.
+    /// after a crash). Only a process whose PID *and* start time match its
+    /// record is touched, and only when the app instance that started it is
+    /// gone: a second copy of the app must not kill the first one's server.
+    /// Returns whether one was found.
     private func terminateOrphanedServer() async -> Bool {
-        guard let contents = try? String(contentsOf: pidFileURL, encoding: .utf8),
-              let recorded = PIDRecord(serialized: contents) else { return false }
-        // The record may already describe a server this process started (the
-        // user asked for AI before the launch check got here). Never kill it.
-        let ownPID = await MainActor.run { self.serverProcess?.processIdentifier }
-        guard recorded.pid != ownPID else { return false }
-        defer { removePIDRecord() }
-        guard PIDRecord.current(pid: recorded.pid) == recorded else { return false }
+        let manager = FileManager.default
+        let directory = pidDirectory
+        var candidates = ((try? manager.contentsOfDirectory(atPath: directory.path)) ?? [])
+            .filter { $0.hasPrefix(".odv-server") && $0.hasSuffix(".pid") }
+            .map { directory.appendingPathComponent($0) }
+        // Records from versions that kept one file inside the venv.
+        let legacy = venvDirectory.appendingPathComponent(".odv-server.pid")
+        if manager.fileExists(atPath: legacy.path) { candidates.append(legacy) }
 
-        await MainActor.run { appendLog("Stopping AI server left over from a previous session (PID \(recorded.pid))…") }
-        kill(recorded.pid, SIGTERM)
-        for _ in 0..<60 where PIDRecord.current(pid: recorded.pid) == recorded {
-            try? await Task.sleep(nanoseconds: 50_000_000)
+        let ownFile = pidFileURL.standardizedFileURL
+        let ownPID = await MainActor.run { self.serverProcess?.processIdentifier }
+        var found = false
+        for file in candidates where file.standardizedFileURL != ownFile {
+            guard let contents = try? String(contentsOf: file, encoding: .utf8),
+                  let record = OwnedPIDRecord(serialized: contents) else {
+                try? manager.removeItem(at: file)
+                continue
+            }
+            let recorded = record.server
+            guard recorded.pid != ownPID else { continue }
+            let ownerAlive = record.owner?.isAlive ?? false
+            if ownerAlive { continue }  // another running copy's server
+            try? manager.removeItem(at: file)
+            guard record.isOrphaned(serverAlive: recorded.isAlive, ownerAlive: ownerAlive) else { continue }
+
+            found = true
+            await MainActor.run { appendLog("Stopping AI server left over from a previous session (PID \(recorded.pid))…") }
+            kill(recorded.pid, SIGTERM)
+            for _ in 0..<60 where recorded.isAlive {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            if recorded.isAlive {
+                kill(recorded.pid, SIGKILL)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
         }
-        if PIDRecord.current(pid: recorded.pid) == recorded {
-            kill(recorded.pid, SIGKILL)
-            try? await Task.sleep(nanoseconds: 300_000_000)
-        }
-        return true
+        return found
     }
 
     // MARK: - Check Existing Server
@@ -1126,8 +1346,8 @@ class AIServerManager: ObservableObject {
                         if ready { await MainActor.run { self.serverBecameReady() } }
                     }
                 case .foreign:
-                    self.aiService.serverStatus = .error("Port \(Self.port) is used by another process")
-                    self.appendLog("ERROR: Port \(Self.port) is in use by a process that is not this app's AI server. Not connecting to it.")
+                    // Not ours; the server we start picks a free port anyway.
+                    self.appendLog("Port \(AIService.defaultPort) is in use by another process; not connecting to it.")
                 case .unreachable:
                     break
                 }
@@ -1143,9 +1363,16 @@ class AIServerManager: ObservableObject {
         guard setupState != .installingDeps else { return }
         aiEnabled = true
         if isSetupComplete {
-            setupState = .ready
-            aiService.serverStatus = .stopped
-            launchServerProcess()
+            // The failed process may still be exiting (failServer stops it),
+            // and launching meanwhile only logged "already running". Relaunch
+            // once it is gone.
+            stopServer(then: { [weak self] in
+                guard let self else { return }
+                self.hasCompletedSetup = true
+                self.setupState = .ready
+                self.aiService.serverStatus = .stopped
+                self.launchServerProcess()
+            })
         } else {
             reinstallEnvironment()
         }
@@ -1180,5 +1407,34 @@ class AIServerManager: ObservableObject {
         if lines.count > 300 {
             setupLog = lines.suffix(200).joined(separator: "\n")
         }
+    }
+}
+
+// MARK: - Setup lock
+
+/// An advisory `flock` on a file, so two copies of the app never run setup
+/// in the same venv at once. Released explicitly, or when the process exits.
+final class SetupLock: @unchecked Sendable {
+    private let descriptor: Int32
+    private var held = false
+
+    init?(url: URL) {
+        descriptor = open(url.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o644)
+        guard descriptor >= 0 else { return nil }
+    }
+
+    deinit { release(); close(descriptor) }
+
+    /// Take the lock without waiting. True when this instance now holds it.
+    func tryAcquire() -> Bool {
+        if held { return true }
+        held = flock(descriptor, LOCK_EX | LOCK_NB) == 0
+        return held
+    }
+
+    func release() {
+        guard held else { return }
+        flock(descriptor, LOCK_UN)
+        held = false
     }
 }

@@ -427,6 +427,9 @@ enum PluginHostEnvironment {
     static let parentPID = "ODV_PARENT_PID"
     /// Section 4b; install hooks only.
     static let licenseKey = "ODV_PLUGIN_LICENSE_KEY"
+    /// Per-launch token a resident adapter requires on every request.
+    static let adapterToken = "ODV_PLUGIN_TOKEN"
+    static let tokenHeader = "X-ODV-Token"
 }
 
 // MARK: - Network preflight

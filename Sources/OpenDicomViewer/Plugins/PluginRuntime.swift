@@ -9,6 +9,7 @@
 
 import Foundation
 import Darwin
+import Security
 import CoreGraphics
 
 // MARK: - Port assignment
@@ -367,6 +368,16 @@ final class PluginRuntime: ObservableObject {
     /// because the user chose "Start anyway". Consumed by that admission.
     private var lowMemoryOverrides: Set<String> = []
     private let urlSession: URLSession
+    /// Sent with every request to a resident adapter, which refuses requests
+    /// without it (`_shared/serve.py`). One per runtime: each adapter learns it
+    /// from `ODV_PLUGIN_TOKEN` at spawn.
+    let adapterToken: String = {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+            return UUID().uuidString + UUID().uuidString
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }()
 
     // MARK: Model memory outside the plugin subsystem
 
@@ -379,7 +390,8 @@ final class PluginRuntime: ObservableObject {
     var stopExternalResident: (String) async -> Void = { _ in }
     /// Called before a plugin process is spawned, so the app can stop an
     /// engine that would load the same model (see `exclusiveWithBuiltIn`).
-    var willStartPlugin: (String) async -> Void = { _ in }
+    /// Throwing refuses the start (e.g. the built-in server is mid-download).
+    var willStartPlugin: (String) async throws -> Void = { _ in }
 
     // MARK: Init
 
@@ -696,7 +708,7 @@ final class PluginRuntime: ObservableObject {
 
         // e.g. stop the built-in AI server before the Gemma plugin loads the
         // same model, whatever the memory arithmetic says.
-        await willStartPlugin(pluginID)
+        try await willStartPlugin(pluginID)
         try Task.checkCancellation()
 
         let decision = arbiter.admit(
@@ -730,6 +742,7 @@ final class PluginRuntime: ObservableObject {
         // never reaches the hub, whatever its library would otherwise try.
         environment["HF_HUB_OFFLINE"] = "1"
         environment["TRANSFORMERS_OFFLINE"] = "1"
+        environment[PluginHostEnvironment.adapterToken] = adapterToken
         process.environment = environment
 
         let outPipe = Pipe()
@@ -1161,6 +1174,7 @@ final class PluginRuntime: ObservableObject {
         var request = URLRequest(url: url(path: path, port: port))
         request.httpMethod = "GET"
         request.timeoutInterval = 5
+        request.setValue(adapterToken, forHTTPHeaderField: PluginHostEnvironment.tokenHeader)
         do {
             let (data, _) = try await urlSession.data(for: request)
             return data
@@ -1176,6 +1190,7 @@ final class PluginRuntime: ObservableObject {
         var request = URLRequest(url: url(path: path, port: port))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(adapterToken, forHTTPHeaderField: PluginHostEnvironment.tokenHeader)
         request.httpBody = body
 
         let data: Data

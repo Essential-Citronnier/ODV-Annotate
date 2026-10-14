@@ -19,15 +19,13 @@
 from __future__ import annotations
 
 import io
-import json
 import logging
 import os
-import re
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -39,7 +37,16 @@ from _shared.protocol import (  # noqa: E402
 )
 from _shared.bench import bench_arg_present, run_resident_bench  # noqa: E402
 from _shared.cli import parse_server_args  # noqa: E402
+from _shared.coerce import (  # noqa: E402
+    as_object,
+    coerce_boxes,
+    coerce_findings,
+    coerce_text,
+    extract_json,
+)
+from _shared.errors import describe_failure  # noqa: E402
 from _shared.lifeline import start_parent_watch  # noqa: E402
+from _shared.vlm import generate_text  # noqa: E402
 from _shared.weights import (  # noqa: E402
     WEIGHTS_DIR_ENV,
     adopt_snapshot,
@@ -90,16 +97,19 @@ SYSTEM_PROMPT = (
     "Always respond in valid JSON format as specified in the user prompt."
 )
 
+# Substituted into the mode prompts as a str.format() *argument*, so its
+# braces are not interpreted again: single braces here reach the model as-is.
 ANALYZE_JSON_FORMAT = """
 Respond in this exact JSON format:
-{{
+{
   "findings": ["finding 1", "finding 2"],
   "bounding_boxes": [
-    {{"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.2, "label": "label", "confidence": 0.85}}
+    {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.2, "label": "label", "confidence": 0.85}
   ],
   "description": "Brief overall description of the image"
-}}
-Coordinates are normalized (0.0 to 1.0) relative to image dimensions."""
+}
+Coordinates are normalized (0.0 to 1.0) relative to image dimensions: x and y are \
+the top-left corner, width and height are fractions of the image size."""
 
 ANALYZE_MODES: dict[str, dict] = {
     "clinical": {
@@ -261,28 +271,15 @@ class GemmaModel:
             logger.error("Model load failed: %s", self._load_error)
             return
         except BaseException as exc:  # noqa: BLE001
-            self._load_error = f"{type(exc).__name__}: {exc}"
+            self._load_error = describe_failure(exc)
             logger.error("Model load failed: %s", self._load_error)
             return
         logger.info("Model loaded in %.1fs", time.time() - started)
 
     def generate(self, image, prompt: str) -> str:
-        from mlx_vlm import generate
-
-        with self._lock:
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",
-                 "content": [{"type": "image"}, {"type": "text", "text": prompt}]},
-            ]
-            formatted = self._processor.apply_chat_template(
-                messages, add_generation_prompt=True
-            )
-            response = generate(
-                self._model, self._processor, formatted, image=[image],
-                max_tokens=MAX_TOKENS, temperature=TEMPERATURE, top_p=TOP_P,
-            )
-        return response.text if hasattr(response, "text") else str(response)
+        return generate_text(self._model, self._processor, SYSTEM_PROMPT, prompt, image,
+                             self._lock, max_tokens=MAX_TOKENS,
+                             temperature=TEMPERATURE, top_p=TOP_P)
 
     def memory_mb(self) -> float | None:
         try:
@@ -313,64 +310,45 @@ def decode_image(data: bytes):
     return image
 
 
-def extract_json(text: str) -> dict | None:
-    """Recover a JSON object from model output.
-
-    Carried over from mlx-server unchanged. The model usually returns bare
-    JSON, sometimes fences it, and occasionally wraps it in prose; each
-    fallback handles one of those and the caller degrades to raw text when all
-    three miss.
-    """
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
-
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-
-    return None
+# Model output is parsed by _shared/coerce.py, the same code the built-in
+# mlx-server uses: boxes in Gemma's 0-1000 grid or box_2d format are rescaled,
+# severities are matched case-insensitively, and an unrecognised severity is
+# "unknown" (neutral grey) -- never "normal", which would draw a critical
+# finding in green.
 
 
-def _coerce_boxes(raw: Any, with_severity: bool = False) -> list[dict]:
-    """Keep only well-formed boxes.
+def build_analyze_outputs(raw: str, image_size: tuple[int, int]) -> dict:
+    parsed = as_object(extract_json(raw), "bounding_boxes")
+    if parsed is None:
+        # The unparsed answer is still worth showing: it is usually a correct
+        # description that simply was not JSON.
+        return {"text": raw.strip(), "bbox": []}
+    description = coerce_text(parsed.get("description"))
+    findings = coerce_findings(parsed.get("findings"))
+    if findings:
+        bullets = "\n".join(f"- {item}" for item in findings)
+        description = f"{description}\n\n{bullets}".strip()
+    return {"text": description,
+            "bbox": coerce_boxes(parsed.get("bounding_boxes"), image_size)}
 
-    A malformed box among several good ones is dropped rather than failing the
-    request: the model is the unreliable component here, and a partial overlay
-    is more useful than an error.
-    """
-    boxes: list[dict] = []
-    for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, Mapping):
-            continue
-        try:
-            box = {
-                "x": float(item["x"]),
-                "y": float(item["y"]),
-                "width": float(item["width"]),
-                "height": float(item["height"]),
-                "label": str(item.get("label", "")),
-                "confidence": float(item.get("confidence", 0.0)),
-            }
-        except (KeyError, TypeError, ValueError):
-            continue
-        if with_severity:
-            severity = str(item.get("severity", "normal"))
-            box["severity"] = severity if severity in (
-                "normal", "mild", "moderate", "severe") else "normal"
-        boxes.append(box)
-    return boxes
+
+def build_roi_outputs(raw: str) -> dict:
+    parsed = extract_json(raw)
+    if not isinstance(parsed, Mapping):
+        return {"text": raw.strip()}
+    label = coerce_text(parsed.get("label"))
+    description = coerce_text(parsed.get("description"))
+    return {"text": f"{label}: {description}" if label else description}
+
+
+def build_abnormality_outputs(raw: str, image_size: tuple[int, int]) -> dict:
+    parsed = as_object(extract_json(raw), "regions")
+    if parsed is None:
+        return {"bbox": [], "text": raw.strip()}
+    boxes = coerce_boxes(parsed.get("regions"), image_size, with_severity=True)
+    summary = (f"{len(boxes)} region(s) flagged for attention."
+               if boxes else "No abnormalities detected.")
+    return {"bbox": boxes, "text": summary}
 
 
 # ---------------------------------------------------------------------------
@@ -450,19 +428,7 @@ class GemmaAdapter:
         )
 
         raw = self.model.generate(image, prompt)
-        parsed = extract_json(raw)
-        if parsed is None:
-            # The unparsed answer is still worth showing: it is usually a
-            # correct description that simply was not JSON.
-            return {"text": raw.strip(), "bbox": []}
-
-        findings = parsed.get("findings")
-        description = str(parsed.get("description", ""))
-        if isinstance(findings, list) and findings:
-            bullets = "\n".join(f"- {item}" for item in findings)
-            description = f"{description}\n\n{bullets}".strip()
-
-        return {"text": description, "bbox": _coerce_boxes(parsed.get("bounding_boxes"))}
+        return build_analyze_outputs(raw, image.size)
 
     def describe_roi(self, request: TaskRequest) -> dict:
         image = decode_image(request.slice2d_bytes())
@@ -473,13 +439,7 @@ class GemmaAdapter:
         )
 
         raw = self.model.generate(image, prompt)
-        parsed = extract_json(raw)
-        if parsed is None:
-            return {"text": raw.strip()}
-
-        label = str(parsed.get("label", "")).strip()
-        description = str(parsed.get("description", "")).strip()
-        return {"text": f"{label}: {description}" if label else description}
+        return build_roi_outputs(raw)
 
     def detect_abnormalities(self, request: TaskRequest) -> dict:
         image = decode_image(request.slice2d_bytes())
@@ -488,14 +448,7 @@ class GemmaAdapter:
         )
 
         raw = self.model.generate(image, prompt)
-        parsed = extract_json(raw)
-        if parsed is None:
-            return {"bbox": [], "text": raw.strip()}
-
-        boxes = _coerce_boxes(parsed.get("regions"), with_severity=True)
-        summary = (f"{len(boxes)} region(s) flagged for attention."
-                   if boxes else "No abnormalities detected.")
-        return {"bbox": boxes, "text": summary}
+        return build_abnormality_outputs(raw, image.size)
 
 
 # ---------------------------------------------------------------------------

@@ -219,7 +219,6 @@ struct ContentView: View {
             // ⌘G = Reanalyse with AI
             if press.modifiers == .command && press.characters.lowercased() == "g" {
                 if let panel = model.activePanel {
-                    panel.clearAIAnnotations()
                     panel.showAIAnnotations = true
                     model.showAIInspector = true
                     model.triggerPreferredAIAnalysis(for: panel)

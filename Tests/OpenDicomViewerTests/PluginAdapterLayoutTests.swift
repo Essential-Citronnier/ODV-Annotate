@@ -149,4 +149,44 @@ final class PluginAdapterLayoutTests: XCTestCase {
                               "\(plugin.id) claimed success for a missing series")
         }
     }
+
+    /// Every adapter's requirements file is a full lock: each non-comment line
+    /// pins one package exactly, transitive ones included, so an install made
+    /// months from now resolves to the set that was tested. A range (`>=`)
+    /// slipping back in would let an upstream release change a plugin silently.
+    func testEveryAdapterRequirementsFileIsAFullLock() throws {
+        let root = try repositoryRoot()
+        let locator = PluginEnvironmentLocator(
+            adaptersRoot: root.appendingPathComponent("plugins", isDirectory: true),
+            paths: .standard)
+
+        for plugin in try manifest().plugins {
+            let lines = try String(contentsOf: locator.requirementsFile(for: plugin), encoding: .utf8)
+                .split(separator: "\n")
+                .map { String($0).components(separatedBy: "#")[0] }
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            XCTAssertGreaterThan(lines.count, 20,
+                                 "\(plugin.id): the lock should include transitive packages")
+            for line in lines {
+                XCTAssertTrue(line.contains("==") && !line.contains(">") && !line.contains("<"),
+                              "\(plugin.id): not pinned exactly: \(line)")
+            }
+        }
+    }
+
+    /// Hugging Face weights name a commit, so a re-upload to the repository
+    /// cannot change what a fresh install downloads.
+    func testEveryHuggingFaceWeightPinsARevision() throws {
+        for plugin in try manifest().plugins {
+            for task in plugin.tasks {
+                for weight in task.weights where weight.repo != nil {
+                    let revision = try XCTUnwrap(weight.revision,
+                                                 "\(plugin.id)/\(weight.id) has no revision")
+                    XCTAssertEqual(revision.count, 40,
+                                   "\(plugin.id)/\(weight.id): revision is not a full commit SHA")
+                }
+            }
+        }
+    }
 }

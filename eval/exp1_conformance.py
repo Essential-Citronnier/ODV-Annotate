@@ -1328,8 +1328,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--results", type=Path,
                         default=REPO / "eval" / "results" / "exp1_conformance.jsonl")
     parser.add_argument("--python", type=Path,
-                        default=Path("/Users/daeseongkim/ODV-PE/seg-engine/.venv/bin/python"),
-                        help="Interpreter with TotalSegmentator installed")
+                        default=Path(sys.executable),
+                        help="Interpreter with TotalSegmentator installed, e.g. "
+                             "the totalsegmentator plugin's venv python "
+                             "(default: the interpreter running this script)")
     parser.add_argument("--dcmqi-bin", type=Path, default=None,
                         help="Directory containing dcmqi command-line tools")
     parser.add_argument("--task", default="total", choices=["total", "heartchambers_highres"])

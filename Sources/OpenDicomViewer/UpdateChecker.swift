@@ -33,11 +33,17 @@ class UpdateChecker: ObservableObject {
             var request = URLRequest(url: url)
             request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
 
-            let (data, _) = try await URLSession.shared.data(for: request)
+            request.timeoutInterval = 15
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                fail(Self.statusMessage(http.statusCode), userInitiated: userInitiated)
+                return
+            }
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
             guard let tagName = json?["tag_name"] as? String else {
-                state = .error("Invalid response from GitHub")
+                fail("GitHub returned an unexpected response.", userInitiated: userInitiated)
                 return
             }
 
@@ -67,7 +73,22 @@ class UpdateChecker: ObservableObject {
                 }
             }
         } catch {
-            state = .error(error.localizedDescription)
+            fail("Could not reach GitHub: \(error.localizedDescription)", userInitiated: userInitiated)
+        }
+    }
+
+    /// Record a failure; only a check the user asked for shows it; the daily
+    /// background check stays quiet.
+    private func fail(_ message: String, userInitiated: Bool) {
+        state = .error(message)
+        if userInitiated { showUpdateAlert = true }
+    }
+
+    nonisolated static func statusMessage(_ code: Int) -> String {
+        switch code {
+        case 404: return "No published release was found on GitHub."
+        case 403, 429: return "GitHub's rate limit was reached. Try again in an hour."
+        default: return "GitHub answered with HTTP \(code). Try again later."
         }
     }
 
