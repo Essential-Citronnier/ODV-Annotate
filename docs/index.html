@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenDicomViewer-Annotate — AI-Powered DICOM Annotation on Mac</title>
-  <meta name="description" content="Free, open-source DICOM viewer with on-device AI annotation powered by Gemma 4. Runs locally on Apple Silicon via MLX. No cloud, no uploads.">
+  <meta name="description" content="Free, open-source DICOM viewer with on-device AI annotation powered by Gemma 4. Runs locally on Apple Silicon via MLX. No cloud inference; images stay on your Mac.">
   <meta name="theme-color" content="#0a0a0f">
   <meta property="og:title" content="OpenDicomViewer-Annotate">
   <meta property="og:description" content="AI-powered DICOM annotation on your Mac — fully local, fully private. Powered by Gemma 4 E4B on Apple Silicon.">
@@ -1118,16 +1118,16 @@
     <h1 class="reveal reveal-delay-1"><span>OpenDicomViewer-Annotate</span></h1>
     <p class="hero-sub reveal reveal-delay-2">AI-powered DICOM annotation on your Mac.<br>Fully local. Fully private.<br>Powered by <strong style="color:var(--accent-cyan)">Gemma 4 E4B</strong> running on Apple Silicon via MLX.</p>
     <div class="hero-actions reveal reveal-delay-3">
-      <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v1.2.1/OpenDicomViewer-Annotate.dmg" class="btn btn-primary">
+      <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v2.0.0/OpenDicomViewer-Annotate.dmg" class="btn btn-primary">
         <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 2a1 1 0 0 1 1 1v10.586l2.293-2.293a1 1 0 1 1 1.414 1.414l-4 4a1 1 0 0 1-1.414 0l-4-4a1 1 0 1 1 1.414-1.414L11 13.586V3a1 1 0 0 1 1-1zM5 20a1 1 0 1 1 0 2H5a1 1 0 0 1 0-2h14z"/></svg>
-        Download for macOS
+        Download v2.0.0 for macOS
       </a>
       <a href="https://github.com/Essential-Citronnier/ODV-Annotate" class="btn btn-secondary" target="_blank" rel="noopener">
         <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style="width:16px;height:16px"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" fill="currentColor"/></svg>
         View on GitHub
       </a>
     </div>
-    <p class="hero-note reveal reveal-delay-4">Requires macOS 14.0+ (Sonoma) &middot; Apple Silicon &middot; 16GB+ RAM recommended</p>
+    <p class="hero-note reveal reveal-delay-4">Apple Silicon only (M1 or later), macOS 14+ &middot; 16 GB RAM recommended (8 GB runs the built-in AI) &middot; <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v2.0.0" target="_blank" rel="noopener" style="color:inherit;">v2.0.0 release notes</a></p>
 
     <!-- Screenshots -->
     <div class="hero-screenshot reveal reveal-delay-5">
@@ -1189,7 +1189,7 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f472b6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22"/><path d="M8 6a4 4 0 0 1 .68-2.24"/><circle cx="12" cy="6" r="1"/></svg>
           </div>
           <h3>Gemma 4 On-Device AI</h3>
-          <p>Google's vision-language model runs locally via MLX. Analyze images, detect structures, describe ROIs &mdash; no cloud, no uploads, 100% private.</p>
+          <p>Google's vision-language model runs locally via MLX. Analyze images, detect structures, describe ROIs &mdash; no cloud inference, no image uploads.</p>
         </div>
       </div>
     </div>
@@ -1258,7 +1258,7 @@
       <div class="privacy-bar reveal">
         <div class="privacy-item">
           <svg viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
-          No internet required
+          Works offline after setup
         </div>
         <div class="privacy-item">
           <svg viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
@@ -1273,6 +1273,7 @@
           All inference on Apple Silicon GPU
         </div>
       </div>
+      <p class="reveal" style="font-size:13px;color:var(--text-tertiary);text-align:center;max-width:720px;margin:16px auto 0;line-height:1.6;">Network use: the pinned Python packages (PyPI) and model weights (Hugging Face) are downloaded once, only after you agree. At launch (at most once a day) and when you choose <em>Check for Updates&hellip;</em>, the app asks the GitHub releases API for the latest version number; it sends nothing about you or your images. AI output is for research and education only &mdash; not for clinical use.</p>
     </div>
   </section>
 
@@ -1418,12 +1419,22 @@
       <div class="start-grid">
         <div class="start-card reveal">
           <h3>Download</h3>
-          <p>Grab the latest release, open the DMG, and drag OpenDicomViewer-Annotate to your Applications folder. The app is signed and notarized &mdash; no Gatekeeper warnings. AI model downloads automatically on first use (~4.5GB).</p>
-          <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v1.2.1/OpenDicomViewer-Annotate.dmg" class="btn btn-primary">
+          <p>Grab the latest release, open the DMG, and drag OpenDicomViewer-Annotate to your Applications folder. The app and DMG are signed and notarized by Apple. On first AI use the app asks before downloading the Gemma 4 E4B model (~5.2 GB, <code>mlx-community/gemma-4-E4B-it-4bit</code>) and ~1.5 GB of pinned Python packages (mlx 0.32.0, mlx-vlm 0.6.5, transformers 5.14.1) into the bundled CPython 3.11.17.</p>
+          <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v2.0.0/OpenDicomViewer-Annotate.dmg" class="btn btn-primary">
             <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="width:16px;height:16px"><path d="M12 2a1 1 0 0 1 1 1v10.586l2.293-2.293a1 1 0 1 1 1.414 1.414l-4 4a1 1 0 0 1-1.414 0l-4-4a1 1 0 1 1 1.414-1.414L11 13.586V3a1 1 0 0 1 1-1zM5 20a1 1 0 1 1 0 2H5a1 1 0 0 1 0-2h14z" fill="currentColor"/></svg>
-            Download DMG
+            Download v2.0.0 DMG
           </a>
-          <p style="font-size:13px;color:var(--text-tertiary);margin-top:16px;">Requires macOS 14+ (Sonoma) &middot; Apple Silicon &middot; 16GB+ RAM recommended</p>
+          <p style="font-size:13px;color:var(--text-tertiary);margin-top:16px;">Apple Silicon only (M1 or later), macOS 14+ &middot; <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v2.0.0" target="_blank" rel="noopener" style="color:inherit;">Release notes</a></p>
+          <table style="width:100%;margin-top:16px;font-size:13px;color:var(--text-secondary);border-collapse:collapse;text-align:left;">
+            <thead><tr style="color:var(--text-tertiary);"><th style="padding:4px 8px 4px 0;font-weight:500;">Engine</th><th style="padding:4px 8px;font-weight:500;">Minimum RAM</th><th style="padding:4px 0 4px 8px;font-weight:500;">Recommended</th></tr></thead>
+            <tbody>
+              <tr><td style="padding:4px 8px 4px 0;">Built-in Gemma 4 E4B</td><td style="padding:4px 8px;">8 GB (close other apps; warns under 12 GiB)</td><td style="padding:4px 0 4px 8px;">16 GB</td></tr>
+              <tr><td style="padding:4px 8px 4px 0;">Gemma 4 E4B plugin</td><td style="padding:4px 8px;">16 GB</td><td style="padding:4px 0 4px 8px;">16 GB</td></tr>
+              <tr><td style="padding:4px 8px 4px 0;">SAM 2 plugin</td><td style="padding:4px 8px;">8 GB</td><td style="padding:4px 0 4px 8px;">16 GB</td></tr>
+              <tr><td style="padding:4px 8px 4px 0;">SAM 3 plugin</td><td style="padding:4px 8px;">16 GB</td><td style="padding:4px 0 4px 8px;">16 GB</td></tr>
+              <tr><td style="padding:4px 8px 4px 0;">TotalSegmentator plugin</td><td style="padding:4px 8px;">32 GB</td><td style="padding:4px 0 4px 8px;">32 GB+</td></tr>
+            </tbody>
+          </table>
         </div>
         <div class="start-card reveal reveal-delay-1">
           <h3>Build from Source <span style="font-size:13px;font-weight:400;color:var(--text-tertiary);">(optional)</span></h3>

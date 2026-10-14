@@ -2,7 +2,7 @@
 // OpenDicomViewer
 //
 // Gemma 4 can run two ways: the built-in server (mlx-server/) or the Gemma
-// plugin from the store. The brain button, G / ⌘G and the AI inspector's
+// plugin from the store. The brain button, ⌘⇧G / ⌘G and the AI inspector's
 // buttons go to whichever the user picked; until they pick, to the plugin when
 // it is installed and the built-in engine has not been set up, else built-in.
 // Licensed under the MIT License. See LICENSE for details.
@@ -51,14 +51,26 @@ enum AIAnalysisEngine: String, CaseIterable, Identifiable {
         PluginRuntime.shared.installState(pluginAnalyze).isReady
     }
 
-    /// The engine the AI buttons use right now. "Set up" is the manager's
-    /// last checked state, not a fresh look at the disk, so views can ask
-    /// on every render.
+    /// The engine the AI buttons use right now. "Set up" is whether a
+    /// completed install was found, not the live setup state: a server that
+    /// failed or has not been checked yet (.failed / .unknown) must not
+    /// silently switch the buttons to the plugin. Cached by the manager, so
+    /// views can ask on every render.
     @MainActor
     static var current: AIAnalysisEngine {
         resolve(preference: preference,
                 pluginInstalled: isPluginInstalled,
-                builtInSetUp: AIServerManager.shared.setupState == .ready)
+                builtInSetUp: AIServerManager.shared.hasCompletedSetup)
+    }
+
+    /// The engine for a run the user just asked for. Without an explicit
+    /// choice, the resolved default is remembered, so later runs keep using
+    /// the same engine whatever transient state the other one is in.
+    @MainActor
+    static func engineForRun() -> AIAnalysisEngine {
+        let engine = current
+        if preference == nil { preference = engine }
+        return engine
     }
 }
 
@@ -93,7 +105,7 @@ extension DICOMModel {
     /// Analyze the panel's slice with the preferred engine.
     func triggerPreferredAIAnalysis(for panel: PanelState) {
         panel.lastAIAction = .analyze
-        switch AIAnalysisEngine.current {
+        switch AIAnalysisEngine.engineForRun() {
         case .builtIn: triggerAIAnalysis(for: panel)
         case .gemmaPlugin:
             showAIInspector = true
@@ -104,7 +116,7 @@ extension DICOMModel {
     /// Describe the latest ROI Stats rectangle with the preferred engine.
     func triggerPreferredAIDescribeROI(for panel: PanelState) {
         panel.lastAIAction = .describeROI
-        switch AIAnalysisEngine.current {
+        switch AIAnalysisEngine.engineForRun() {
         case .builtIn: triggerAIDescribeLatestROI(for: panel)
         case .gemmaPlugin:
             showAIInspector = true
@@ -115,7 +127,7 @@ extension DICOMModel {
     /// Flag abnormalities with the preferred engine.
     func triggerPreferredAIAbnormalityDetection(for panel: PanelState) {
         panel.lastAIAction = .detectAbnormalities
-        switch AIAnalysisEngine.current {
+        switch AIAnalysisEngine.engineForRun() {
         case .builtIn: triggerAIAbnormalityDetection(for: panel)
         case .gemmaPlugin:
             showAIInspector = true

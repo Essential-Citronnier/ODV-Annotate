@@ -120,10 +120,13 @@ extension DICOMModel {
         // into the derived-object list, which needs no inspector.
         if task.inputs.contains(.slice2d) { showAIInspector = true }
 
+        // A slice task runs on the frame on screen (cine stopped) at its
+        // displayed aspect; see captureAIInput.
+        let input = task.inputs.contains(.slice2d) ? captureAIInput(for: panel) : nil
         let invocation: PluginInvocation
         let staged: URL?
         do {
-            (invocation, staged) = try buildInvocation(for: task, panel: panel)
+            (invocation, staged) = try buildInvocation(for: task, panel: panel, image: input?.image)
         } catch {
             panel.aiError = error.localizedDescription
             return
@@ -133,9 +136,9 @@ extension DICOMModel {
             return
         }
 
-        let slice = panel.currentSlice
-        let seriesID = allSeries.indices.contains(panel.seriesIndex)
-            ? allSeries[panel.seriesIndex].id : nil
+        let slice = input?.slice ?? panel.currentSlice
+        let seriesID = input?.seriesID ?? (allSeries.indices.contains(panel.seriesIndex)
+            ? allSeries[panel.seriesIndex].id : nil)
 
         panel.aiAnalysisInProgress = true
         panel.aiError = nil
@@ -188,15 +191,15 @@ extension DICOMModel {
     ///
     /// Returns, alongside the invocation, any directory staged for it, which
     /// the caller removes once the run is over.
-    private func buildInvocation(for task: PluginTask,
-                                 panel: PanelState) throws -> (PluginInvocation, URL?) {
+    private func buildInvocation(for task: PluginTask, panel: PanelState,
+                                 image captured: NSImage?) throws -> (PluginInvocation, URL?) {
         var invocation = PluginInvocation()
         var staged: URL?
 
         for kind in task.inputs {
             switch kind {
             case .slice2d:
-                guard let image = panel.image,
+                guard let image = captured ?? panel.image,
                       let encoded = Self.base64PNG(image) else {
                     throw PluginError.unsupportedInput(.slice2d)
                 }

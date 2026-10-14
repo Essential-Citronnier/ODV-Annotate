@@ -404,8 +404,35 @@ Set `recoverable=False` when retrying the identical request cannot succeed.
 
 Each plugin gets its own virtualenv (section 7). MLX and torch are not
 co-installable in practice, and independent environments confine a broken
-install to one plugin. Keep `requirements.txt` to what the adapter imports;
-weights are downloaded separately by the store, never by pip.
+install to one plugin. Keep the direct requirements to what the adapter
+imports; weights are downloaded separately by the store, never by pip.
+
+`requirements.txt` is a full lock, not a list of ranges: every package,
+transitive ones included, is pinned with `==`, and the direct requirements
+are kept in the file's header comment. Regenerate it for the interpreter the
+app bundles (CPython 3.11.17, macOS 14 arm64):
+
+```bash
+MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile direct.in \
+    --python-version 3.11 --python-platform aarch64-apple-darwin \
+    --no-header --annotation-style line
+```
+
+`PluginAdapterLayoutTests` fails if any manifest plugin's requirements file
+has an unpinned line, or if a Hugging Face weight lacks a full 40-character
+`revision`. The store reinstalls a plugin whose requirements file changed.
+An adapter's `tests/` directory is not copied into the packaged app.
+
+| Plugin | Declared `ram_gb` | Minimum Mac RAM | Locked versions of note |
+|---|---|---|---|
+| `gemma-4-e4b` | 5.0 | 16 GB (8 GB Macs use the built-in engine) | mlx 0.32.0, mlx-vlm 0.6.5, transformers 5.14.1 |
+| `sam2` | 3.0 | 8 GB | torch 2.14.1, transformers 5.19.0 |
+| `sam3` | 6.0 | 16 GB | torch 2.14.1, transformers 5.19.0 |
+| `totalsegmentator` | 23.5 | 32 GB | TotalSegmentator 2.18.0, nnunetv2 2.8.1, torch 2.14.1 |
+
+The minimum follows the store's rule: a plugin is offered only when its
+declared memory is at most half of the Mac's RAM (three quarters for one-shot
+plugins).
 
 The only network activity a plugin may perform is downloading its declared
 weights and dependencies (invariant 3). Inference must not reach the network --

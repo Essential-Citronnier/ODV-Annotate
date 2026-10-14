@@ -143,6 +143,7 @@
               "id": "sam2.1-hiera-small",
               "source": "huggingface",
               "repo": "facebook/sam2.1-hiera-small",
+              "revision": "ee5bba1d82bb8749febdf90f45e84b687142ba03",
               "size_gb": 0.18
             }
           ],
@@ -194,6 +195,7 @@
               "id": "sam3-checkpoint",
               "source": "manual",
               "repo": "facebook/sam3",
+              "revision": "3c879f39826c281e95690f02c7821c4de09afae7",
               "filename": "sam3.pt",
               "size_gb": 3.4
             }

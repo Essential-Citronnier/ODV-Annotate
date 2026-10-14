@@ -465,6 +465,20 @@ class PanelState: ObservableObject, Identifiable {
         aiError = nil
     }
 
+    /// Drop the AI boxes (structures and findings) already on `slice`, so a
+    /// new analysis replaces them instead of piling up beside them -- what
+    /// plugin results do too. Called when a result arrives, not when the run
+    /// is requested, so a run that is declined, queued or fails keeps them.
+    func replaceAIBoxes(on slice: AnnotationSlice) {
+        annotations.removeAll { annotation in
+            guard annotation.isAI, annotation.slice == slice else { return false }
+            switch annotation.type {
+            case .aiStructure, .aiFinding: return true
+            default: return false
+            }
+        }
+    }
+
     /// Whether `clearAIAnnotations()` would remove anything.
     var hasAIResultsOnCurrentSlice: Bool {
         let current = currentSlice

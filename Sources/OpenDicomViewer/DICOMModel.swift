@@ -4448,28 +4448,62 @@ class DICOMModel: ObservableObject {
 
     private static let modalityTag = DicomTag(group: 0x0008, element: 0x0060)
 
+    /// What one AI run is computed on, captured when the user asks: the
+    /// image the model will see and the slice its results belong to.
+    struct AIRunInput {
+        let image: NSImage
+        let slice: AnnotationSlice
+        let seriesID: String?
+    }
+
+    /// Capture the panel's current slice for an AI run. Cine playback is
+    /// stopped first, so the image and slice are the frame on screen rather
+    /// than one the timer has already moved past, and the image is redrawn at
+    /// its displayed (aspect-correct) size; see `AIImagePreparation`.
+    @MainActor
+    func captureAIInput(for panel: PanelState) -> AIRunInput? {
+        if panel.isPlaying { stopCinePlayback(panel) }
+        guard let image = panel.image else { return nil }
+        let width = panel.displayImageWidth > 0 ? panel.displayImageWidth : image.size.width
+        let height = panel.displayImageHeight > 0 ? panel.displayImageHeight : image.size.height
+        let prepared = AIImagePreparation.render(image, width: width, height: height) ?? image
+        return AIRunInput(image: prepared, slice: panel.currentSlice, seriesID: aiSeriesID(for: panel))
+    }
+
     /// Common gate for every built-in AI run: an image, no run already in
     /// flight on this panel, a ready server, and the one-time disclaimer.
+    /// Returns the input to run on now, or nil.
     ///
     /// The server starts lazily. When it is not ready, this starts it (asking
     /// once whether to enable local AI), shows the AI inspector with the
-    /// download / loading progress, and queues `retry` to run once the model
-    /// is ready, instead of failing with "not running".
+    /// download / loading progress, and queues `retry` -- with the slice
+    /// captured now, not whatever is on screen later -- to run once the model
+    /// is ready, instead of failing with "not running". `preset` is that
+    /// queued input coming back.
     @MainActor
-    private func canStartAIRun(for panel: PanelState,
-                                retry: @escaping @MainActor () -> Void) -> Bool {
-        guard panel.image != nil, !panel.aiAnalysisInProgress else { return false }
+    private func beginAIRun(for panel: PanelState, preset: AIRunInput?,
+                            retry: @escaping @MainActor (AIRunInput) -> Void) -> AIRunInput? {
+        guard !panel.aiAnalysisInProgress else { return nil }
+        if let preset { return preset }
+        guard panel.image != nil else { return nil }
         showAIInspector = true
         if aiService.serverStatus.isReady {
-            return aiService.confirmDisclaimerIfNeeded()
+            guard aiService.confirmDisclaimerIfNeeded() else { return nil }
+            return captureAIInput(for: panel)
         }
         let manager = AIServerManager.shared
-        guard manager.ensureStarted(), aiService.confirmDisclaimerIfNeeded() else { return false }
-        panel.aiError = nil
-        manager.runWhenReady {
-            MainActor.assumeIsolated { retry() }
+        guard manager.ensureStarted() else {
+            panel.aiError = manager.lastStartRefusal
+                ?? "The local AI engine could not be started. See the AI inspector."
+            return nil
         }
-        return false
+        guard aiService.confirmDisclaimerIfNeeded(),
+              let input = captureAIInput(for: panel) else { return nil }
+        panel.aiError = nil
+        manager.runWhenReady(key: panel.id) {
+            MainActor.assumeIsolated { retry(input) }
+        }
+        return nil
     }
 
     /// Clear "not ready" errors left on panels once the server is ready.
@@ -4500,12 +4534,13 @@ class DICOMModel: ObservableObject {
     @MainActor
     private func runAI<R>(
         for panel: PanelState,
+        input: AIRunInput,
         request: @escaping (NSImage) async throws -> R,
         apply: @escaping @MainActor (R, AnnotationSlice) -> Void
     ) {
-        guard let image = panel.image else { return }
-        let slice = panel.currentSlice
-        let seriesID = aiSeriesID(for: panel)
+        let image = input.image
+        let slice = input.slice
+        let seriesID = input.seriesID
 
         panel.aiAnalysisInProgress = true
         panel.aiError = nil
@@ -4524,6 +4559,7 @@ class DICOMModel: ObservableObject {
                       self.allSeries[slice.seriesIndex].id == seriesID else {
                     return  // the study changed under us; the result describes nothing on screen
                 }
+                if case .failure(let error) = outcome, error is CancellationError { return }
                 switch outcome {
                 case .success(let result):
                     AIServerManager.shared.noteUsed()
@@ -4538,10 +4574,10 @@ class DICOMModel: ObservableObject {
 
     /// Trigger AI analysis for the active panel's current image
     @MainActor
-    func triggerAIAnalysis(for panel: PanelState) {
-        guard canStartAIRun(for: panel, retry: { [weak self, weak panel] in
+    func triggerAIAnalysis(for panel: PanelState, input preset: AIRunInput? = nil) {
+        guard let input = beginAIRun(for: panel, preset: preset, retry: { [weak self, weak panel] input in
             guard let self, let panel else { return }
-            self.triggerAIAnalysis(for: panel)
+            self.triggerAIAnalysis(for: panel, input: input)
         }) else { return }
 
         let modality = aiModality(for: panel)
@@ -4551,7 +4587,7 @@ class DICOMModel: ObservableObject {
         let windowWidth = panel.windowWidth
         let service = aiService
 
-        runAI(for: panel, request: { image in
+        runAI(for: panel, input: input, request: { image in
             try await service.analyzeImage(
                 image,
                 modality: modality,
@@ -4560,6 +4596,7 @@ class DICOMModel: ObservableObject {
                 windowWidth: windowWidth
             )
         }, apply: { result, slice in
+            panel.replaceAIBoxes(on: slice)
             for box in result.bounding_boxes {
                 guard let rect = AIBoxSanitizer.normalizedRect(
                     x: box.x, y: box.y, width: box.width, height: box.height) else { continue }
@@ -4582,18 +4619,19 @@ class DICOMModel: ObservableObject {
 
     /// Trigger AI abnormality detection for the active panel
     @MainActor
-    func triggerAIAbnormalityDetection(for panel: PanelState) {
-        guard canStartAIRun(for: panel, retry: { [weak self, weak panel] in
+    func triggerAIAbnormalityDetection(for panel: PanelState, input preset: AIRunInput? = nil) {
+        guard let input = beginAIRun(for: panel, preset: preset, retry: { [weak self, weak panel] input in
             guard let self, let panel else { return }
-            self.triggerAIAbnormalityDetection(for: panel)
+            self.triggerAIAbnormalityDetection(for: panel, input: input)
         }) else { return }
 
         let modality = aiModality(for: panel)
         let service = aiService
 
-        runAI(for: panel, request: { image in
+        runAI(for: panel, input: input, request: { image in
             try await service.detectAbnormalities(image, modality: modality)
         }, apply: { result, slice in
+            panel.replaceAIBoxes(on: slice)
             for region in result.regions {
                 guard let rect = AIBoxSanitizer.normalizedRect(
                     x: region.x, y: region.y, width: region.width, height: region.height) else { continue }
@@ -4645,7 +4683,7 @@ class DICOMModel: ObservableObject {
     /// Trigger AI ROI description for a selected region (display-image pixel coordinates).
     /// The server outlines the region on the image it sends to the model.
     @MainActor
-    func triggerAIDescribeROI(for panel: PanelState, roi: CGRect) {
+    func triggerAIDescribeROI(for panel: PanelState, roi: CGRect, input preset: AIRunInput? = nil) {
         // Normalize ROI to 0-1 coordinates
         let imgW = max(1, panel.displayImageWidth)
         let imgH = max(1, panel.displayImageHeight)
@@ -4655,18 +4693,23 @@ class DICOMModel: ObservableObject {
             panel.aiError = "The selected region is too small to describe."
             return
         }
-        guard canStartAIRun(for: panel, retry: { [weak self, weak panel] in
+        guard let input = beginAIRun(for: panel, preset: preset, retry: { [weak self, weak panel] input in
             guard let self, let panel else { return }
-            self.triggerAIDescribeROI(for: panel, roi: roi)
+            self.triggerAIDescribeROI(for: panel, roi: roi, input: input)
         }) else { return }
 
         let context = allSeries.indices.contains(panel.seriesIndex)
             ? allSeries[panel.seriesIndex].seriesDescription : ""
         let service = aiService
 
-        runAI(for: panel, request: { image in
+        runAI(for: panel, input: input, request: { image in
             try await service.describeROI(image, roi: normalizedROI, context: context)
         }, apply: { result, slice in
+            panel.annotations.removeAll { annotation in
+                guard annotation.isAI, annotation.slice == slice,
+                      case .aiROILabel(let rect, _, _, _) = annotation.type else { return false }
+                return rect == normalizedROI
+            }
             panel.annotations.append(Annotation(
                 type: .aiROILabel(rect: normalizedROI, label: result.label,
                                   description: result.description,

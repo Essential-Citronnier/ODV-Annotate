@@ -2252,7 +2252,14 @@ struct AIInspectorView: View {
             Group {
                 if panelHasAIContent || engine == .gemmaPlugin {
                     VStack(spacing: 0) {
-                        if engine == .builtIn && builtInBusy {
+                        // A failed engine must stay visible even when the
+                        // panel still shows earlier results: they are why
+                        // the new run never started.
+                        if engine == .builtIn, case .failed(let message) = aiServerManager.setupState {
+                            AISetupFailedView(message: message)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Divider()
+                        } else if engine == .builtIn && builtInBusy {
                             AIBusyBanner()
                         }
                         panelContent
@@ -2267,8 +2274,10 @@ struct AIInspectorView: View {
             // Bottom action bar
             HStack {
                 Button(action: {
+                    // Earlier results on this slice are replaced when the new
+                    // ones arrive, not here: a declined consent, a queued run
+                    // or a failure must not wipe them.
                     if let panel = panel {
-                        panel.clearAIAnnotations()
                         model.triggerPreferredAIAnalysis(for: panel)
                     }
                 }) {
@@ -2278,7 +2287,7 @@ struct AIInspectorView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(!canRun)
-                .help("Analyze this slice (G / ⌘G)")
+                .help("Analyze this slice (⌘⇧G, or ⌘G in the viewer)")
 
                 Button(action: {
                     if let panel = panel {
@@ -2389,11 +2398,8 @@ struct AIInspectorView: View {
                         .multilineTextAlignment(.center)
                         .textSelection(.enabled)
                     Button(panel.lastAIAction.retryTitle) {
-                        let action = panel.lastAIAction
-                        // Describe ROI only replaces the description, so keep
-                        // the slice's boxes when retrying it.
-                        if action != .describeROI { panel.clearAIAnnotations() }
-                        model.triggerPreferredAI(action, for: panel)
+                        // The new result replaces the old one when it arrives.
+                        model.triggerPreferredAI(panel.lastAIAction, for: panel)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -2405,9 +2411,9 @@ struct AIInspectorView: View {
                     Label("No Analysis", systemImage: "brain")
                 } description: {
                     if offSliceAIAnnotationCount > 0 {
-                        Text("AI results on this panel belong to other slices. Press G or ⌘G to analyze this one.")
+                        Text("AI results on this panel belong to other slices. Press ⌘⇧G to analyze this one.")
                     } else {
-                        Text("Press G or ⌘G to analyze the current image")
+                        Text("Press ⌘⇧G (AI ▸ Analyze Image) to analyze the current image, or press G and click the image")
                     }
                 }
             } else {

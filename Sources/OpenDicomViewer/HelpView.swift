@@ -137,7 +137,7 @@ struct HelpView: View {
                         Text("The AI assistant describes the slice on screen, flags possible abnormalities and describes a region you select, using Google's Gemma 4 E4B model running entirely on your Mac. Images never leave the machine.")
 
                         helpSubheading("First use")
-                        Text("Nothing is downloaded until you ask for AI. The first time you press **G**, **Cmd+G**, the brain button, or an item in the **AI** menu, the app asks once whether to enable local AI. If you choose **Not Now**, press **Enable Local AI** in the AI inspector whenever you like.")
+                        Text("Nothing is downloaded until you ask for AI. The first time you press **Cmd+Shift+G**, the brain button, or an item in the **AI** menu, the app asks once whether to enable local AI. If you choose **Not Now**, press **Enable Local AI** in the AI inspector whenever you like.")
                         bullet("**What it downloads:** about 1.5 GB of Python packages and the 5.2 GB model, once. You need about 8 GB of free disk space.")
                         bullet("**How long it takes:** usually 10–30 minutes, depending on your connection. The AI inspector shows the installation, then the model download with its progress; expand **Server log** for details. You can keep viewing images meanwhile, and the analysis you asked for runs by itself once the model is ready.")
                         bullet("**Afterwards:** the model loads in a few seconds when you first use AI in a session.")
@@ -145,7 +145,8 @@ struct HelpView: View {
 
                         helpSubheading("Using it")
                         VStack(alignment: .leading, spacing: 6) {
-                            shortcutRow("G / Cmd+G", "Analyze the current slice (AI ▸ Analyze Image)")
+                            shortcutRow("Cmd+Shift+G", "Analyze the current slice (AI ▸ Analyze Image); Cmd+G does the same while the viewer has focus")
+                            shortcutRow("G, then click", "Select the AI Analyze tool, then click the image to analyze it")
                             shortcutRow("AI menu", "Detect Abnormalities")
                             shortcutRow("S, then AI", "Describe ROI: draw a rectangle with the ROI Stats tool on the slice, then AI ▸ Describe ROI (or Describe ROI in the inspector)")
                             shortcutRow("Mode", "Change what the analysis focuses on (inspector or AI ▸ Analysis Mode)")

@@ -8,8 +8,45 @@
 
 import SwiftUI
 
+extension Notification.Name {
+    /// Files or folders handed to the app by Finder (double-click, Open With,
+    /// a drop on the Dock icon). `object` is the `[URL]`.
+    static let odvOpenURLs = Notification.Name("odv.openURLs")
+}
+
+/// Receives Finder open requests (CFBundleDocumentTypes in Info.plist). URLs
+/// that arrive before a window exists -- the app launched by a double-click --
+/// are held until the window asks for them.
+final class AppOpenDelegate: NSObject, NSApplicationDelegate {
+    @MainActor static var pendingURLs: [URL] = []
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        MainActor.assumeIsolated {
+            Self.pendingURLs.append(contentsOf: urls)
+            NotificationCenter.default.post(name: .odvOpenURLs, object: urls)
+        }
+    }
+
+    /// Take the URLs not yet handled.
+    @MainActor static func takePending() -> [URL] {
+        defer { pendingURLs = [] }
+        return pendingURLs
+    }
+
+    /// What to load for a set of opened items: the item itself when there is
+    /// one, else the folder holding them all (several files of one series
+    /// selected in Finder), else the first.
+    static func loadTarget(for urls: [URL]) -> URL? {
+        guard let first = urls.first else { return nil }
+        guard urls.count > 1 else { return first }
+        let parents = Set(urls.map { $0.deletingLastPathComponent().standardizedFileURL })
+        return parents.count == 1 ? parents.first : first
+    }
+}
+
 @main
 struct OpenDicomViewerApp: App {
+    @NSApplicationDelegateAdaptor(AppOpenDelegate.self) private var openDelegate
     @StateObject private var model = DICOMModel()
     @StateObject private var updateChecker = UpdateChecker()
     @StateObject private var aiServerManager = AIServerManager.shared
@@ -40,6 +77,13 @@ struct OpenDicomViewerApp: App {
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
                         await updateChecker.checkForUpdates()
                     }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .odvOpenURLs)) { _ in
+                    openPendingURLs()
+                }
+                .onAppear { openPendingURLs() }
+                .onOpenURL { url in
+                    if url.isFileURL { model.load(url: url) }
                 }
                 .alert(
                     updateAlertTitle,
@@ -277,12 +321,20 @@ struct OpenDicomViewerApp: App {
         }
     }
 
+    @MainActor
+    private func openPendingURLs() {
+        let urls = AppOpenDelegate.takePending()
+        if let target = AppOpenDelegate.loadTarget(for: urls) { model.load(url: target) }
+    }
+
     private var updateAlertTitle: String {
         switch updateChecker.state {
         case .updateAvailable:
             return "Update Available"
         case .upToDate:
             return "You're Up to Date"
+        case .error:
+            return "Couldn't Check for Updates"
         default:
             return ""
         }
@@ -294,6 +346,8 @@ struct OpenDicomViewerApp: App {
             return "Version \(version) is available (current: \(updateChecker.currentVersion)).\n\n\(String(notes.prefix(300)))"
         case .upToDate:
             return "OpenDicomViewer \(updateChecker.currentVersion) is the latest version."
+        case .error(let message):
+            return message
         default:
             return ""
         }
