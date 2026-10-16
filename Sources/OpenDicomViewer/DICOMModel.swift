@@ -267,6 +267,13 @@ class DICOMModel: ObservableObject {
         let width: Int; let height: Int; let bitDepth: Int; let samples: Int
         let isSigned: Bool; let isMonochrome1: Bool
     }
+
+    /// A cached display image is only reusable when its pixel metadata and a
+    /// pixel source (raw buffer or DCMTK object) are cached too; otherwise
+    /// W/L, the value readout and ROI stats would have nothing to work on.
+    static func isUsableCacheHit(hasMeta: Bool, hasRaw: Bool, hasDCMTK: Bool) -> Bool {
+        hasMeta && (hasRaw || hasDCMTK)
+    }
     private var imagePixelMeta: [NSURL: PixelMeta] = [:]
     // Queue for Series Caching
     private let cachingQueue: OperationQueue = {
@@ -375,6 +382,7 @@ class DICOMModel: ObservableObject {
         let firstPanel = PanelState()
         self.panels = [firstPanel]
         self.activePanelID = firstPanel.id
+        attachSliceUIDs(firstPanel)
 
         // Monitor Shift key globally for group selection overlay
         flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
@@ -743,9 +751,11 @@ class DICOMModel: ObservableObject {
         BenchmarkLogger.shared.start("load_total")
         BenchmarkLogger.shared.log(event: "load_start", dataset: url.lastPathComponent, detail: url.path)
 
-        // Cancel any pending background work
+        // Cancel any pending background work, including a running folder
+        // scan (its queued UI updates are dropped from here on)
         cachingQueue.cancelAllOperations()
-        
+        _ = beginScanGeneration()
+
         DispatchQueue.main.async {
             // Reset State completely
             self.errorMessage = nil
@@ -772,11 +782,27 @@ class DICOMModel: ObservableObject {
                     self.isScanning = true
                     self.scanDirectory(url)
                 } else {
-                    // File: Load immediately, then scan parent for context
-                    self.loadSingleFile(url)
+                    // File: Load immediately, then scan its own folder (not
+                    // the subfolders under it) for the rest of the series.
+                    // A multi-frame file goes straight to the frame decoder;
+                    // loadSingleFile can't see its frame count yet (the
+                    // series list was just emptied) and would decode every
+                    // frame through DCMTK.
+                    if let ctx = self.quickParse(url), ctx.numberOfFrames > 1, let panel = self.activePanel {
+                        self.allSeries = [DicomSeries(
+                            id: ctx.seriesGroupingKey, seriesNumber: ctx.seriesNumber,
+                            seriesDescription: ctx.displaySeriesDescription(baseDescription: ctx.seriesDescription),
+                            images: [ctx])]
+                        self.currentSeriesIndex = 0
+                        self.currentImageIndex = 0
+                        self.isLoading = false
+                        self.assignSeriesToPanel(panel, seriesIndex: 0)
+                    } else {
+                        self.loadSingleFile(url)
+                    }
                     let parent = url.deletingLastPathComponent()
                     self.isScanning = true
-                    self.scanDirectory(parent, selecting: url)
+                    self.scanDirectory(parent, selecting: url, recursive: false)
                 }
             } else {
                  self.errorMessage = "File not accessible or does not exist."
@@ -1847,13 +1873,33 @@ class DICOMModel: ObservableObject {
 
 
     // MARK: - Directory
-    private func scanDirectory(_ url: URL, selecting targetUrl: URL? = nil) {
+    /// Bumped by every scan; a scan whose generation is no longer current
+    /// stops and drops its UI updates, so an older study's scan can't
+    /// overwrite a newer one (e.g. a Finder open during a folder scan).
+    private let scanGenerationLock = NSLock()
+    private var scanGeneration = 0
+
+    private func beginScanGeneration() -> Int {
+        scanGenerationLock.lock(); defer { scanGenerationLock.unlock() }
+        scanGeneration += 1
+        return scanGeneration
+    }
+
+    private func isCurrentScan(_ generation: Int) -> Bool {
+        scanGenerationLock.lock(); defer { scanGenerationLock.unlock() }
+        return generation == scanGeneration
+    }
+
+    private func scanDirectory(_ url: URL, selecting targetUrl: URL? = nil, recursive: Bool = true) {
         BenchmarkLogger.shared.start("scan_directory")
         let benchDataset = url.lastPathComponent
+        let generation = beginScanGeneration()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             let fileManager = FileManager.default
-            guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
+            var options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles]
+            if !recursive { options.insert(.skipsSubdirectoryDescendants) }
+            guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: options) else { return }
             var contexts: [DicomImageContext] = []
             var derivedObjects: [DICOMDerivedObjectSummary] = []
             var annotationObjects: [DICOMAnnotationObject] = []
@@ -1893,6 +1939,7 @@ class DICOMModel: ObservableObject {
                 }
                 
                 DispatchQueue.main.async {
+                    guard self.isCurrentScan(generation) else { return }
                     // Capture current selection UID before replacing list
                     let currentUID = (self.currentSeriesIndex >= 0 && self.currentSeriesIndex < self.allSeries.count) ? self.allSeries[self.currentSeriesIndex].id : nil
                     let currentImgURL = (self.currentSeriesIndex >= 0 && self.currentSeriesIndex < self.allSeries.count && self.currentImageIndex >= 0 && self.currentImageIndex < self.allSeries[self.currentSeriesIndex].images.count) ? self.allSeries[self.currentSeriesIndex].images[self.currentImageIndex].url : nil
@@ -1987,6 +2034,7 @@ class DICOMModel: ObservableObject {
             var counter = 0
             
             for case let fileURL as URL in enumerator {
+                if !self.isCurrentScan(generation) { return }
                 // Check directory
                 if let resources = try? fileURL.resourceValues(forKeys: [.isDirectoryKey]), resources.isDirectory == true { continue }
                 
@@ -2008,7 +2056,7 @@ class DICOMModel: ObservableObject {
                         BenchmarkLogger.shared.start("first_image_display")
                         DispatchQueue.main.async {
                             // Only set if we are still empty (avoid race conditions)
-                            if self.allSeries.isEmpty {
+                            if self.isCurrentScan(generation), self.allSeries.isEmpty {
                                 let tempDesc = context.displaySeriesDescription(baseDescription: context.seriesDescription)
                                 let tempSeries = DicomSeries(
                                     id: context.seriesGroupingKey,
@@ -2048,6 +2096,7 @@ class DICOMModel: ObservableObject {
             }
             
             // Final Update
+            guard self.isCurrentScan(generation) else { return }
             updateUI(isFinal: true)
             let fileCount = contexts.count
             let seriesCount = Dictionary(grouping: contexts, by: { $0.seriesUID }).count
@@ -2057,7 +2106,7 @@ class DICOMModel: ObservableObject {
             // Auto-assign series to panels when in multi-panel mode
             // (panels is main-thread state; check it there)
             DispatchQueue.main.async {
-                if self.panels.count > 1 {
+                if self.isCurrentScan(generation), self.panels.count > 1 {
                     self.autoAssignSeriesToPanels()
                 }
             }
@@ -2104,7 +2153,9 @@ class DICOMModel: ObservableObject {
     }
 
     private func setImportedOverlays(for panel: PanelState, imageContext: DicomImageContext) {
-        panel.importedOverlays = importedOverlays(for: imageContext)
+        // RTSTRUCT/SEG/GSPS coordinates belong to the source image; an MPR or
+        // MIP panel shows a different plane, so it gets none.
+        panel.importedOverlays = panel.panelMode == .slice2D ? importedOverlays(for: imageContext) : []
     }
 
     func refreshImportedOverlaysForAllPanels() {
@@ -2409,6 +2460,8 @@ class DICOMModel: ObservableObject {
         panel.isMultiFrame = false
         panel.numberOfFrames = 0
         panel.currentFrameIndex = 0
+        // And the previous series' pixel state, until the new image arrives
+        Self.resetSingleFramePixelState(panel)
 
         let series = allSeries[seriesIndex]
         if let first = series.images.first {
@@ -2523,6 +2576,7 @@ class DICOMModel: ObservableObject {
     func ensurePanelsInitialized() {
         if panels.isEmpty {
             let panel = PanelState()
+            attachSliceUIDs(panel)
             panels = [panel]
             activePanelID = panel.id
         }
@@ -2562,6 +2616,7 @@ class DICOMModel: ObservableObject {
         if newCount > oldCount {
             for i in oldCount..<newCount {
                 let newPanel = PanelState()
+                attachSliceUIDs(newPanel)
                 panels.append(newPanel)
                 // Auto-assign series to newly created panels
                 if i < allSeries.count {
@@ -2974,9 +3029,12 @@ class DICOMModel: ObservableObject {
 
     /// Load image into a specific panel (uses shared caches)
     func loadSingleFileForPanel(_ url: URL, panel: PanelState) {
-        // Early check: reject encapsulated PDF (not a displayable image)
+        // Early check: reject encapsulated PDF (not a displayable image).
+        // The parsed header is kept for the cache-hit path's tags.
+        var headerElements: [DicomElement]? = nil
         if let headerData = try? Data(contentsOf: url, options: [.mappedIfSafe]),
            let (elements, _, _) = try? SimpleDicomParser(data: headerData).parse(stopAtPixelData: true) {
+            headerElements = elements
             let sopClass = elements.first(where: { $0.tag == DicomTag(group: 0x0008, element: 0x0016) })?.stringValue?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if sopClass == "1.2.840.10008.5.1.4.1.1.104.1" || sopClass == "1.2.840.10008.5.1.4.1.1.104.2" {
@@ -3008,17 +3066,21 @@ class DICOMModel: ObservableObject {
         op.addExecutionBlock { [weak self, weak op, weak panel] in
             guard let self = self, let op = op, !op.isCancelled, let panel = panel else { return }
 
-            // Check cache
-            if let cachedImage = self.imageCache.object(forKey: url as NSURL) {
-                let cachedRaw = self.rawDataCache.object(forKey: url as NSURL) as Data?
-                let cachedDCMTK = self.dcmtkCache.object(forKey: url as NSURL)
-
-                // Retrieve cached pixel metadata
-                self.imageCacheParamsLock.lock()
-                let meta = self.imagePixelMeta[url as NSURL]
-                self.imageCacheParamsLock.unlock()
-
+            // Check cache. A hit is only usable when it carries pixel metadata
+            // and a pixel source (raw buffer or DCMTK object): the background
+            // cacher stores display-only NSImages for compressed files, and
+            // using one of those would lose W/L, readout and ROI and leave the
+            // previous image's size/bit depth on the panel. Treat it as a miss.
+            let cachedRaw = self.rawDataCache.object(forKey: url as NSURL) as Data?
+            let cachedDCMTK = self.dcmtkCache.object(forKey: url as NSURL)
+            self.imageCacheParamsLock.lock()
+            let meta = self.imagePixelMeta[url as NSURL]
+            self.imageCacheParamsLock.unlock()
+            if let cachedImage = self.imageCache.object(forKey: url as NSURL),
+               DICOMModel.isUsableCacheHit(hasMeta: meta != nil, hasRaw: cachedRaw != nil,
+                                           hasDCMTK: cachedDCMTK != nil) {
                 DispatchQueue.main.async {
+                    if let elements = headerElements { panel.tags = elements }
                     panel.rawPixelData = cachedRaw
                     panel.dcmtkImage = cachedDCMTK  // clear stale DCMTK if not cached
 
@@ -3489,6 +3551,19 @@ class DICOMModel: ObservableObject {
         adjustWindowLevelForPanel(panel, deltaWidth: newWW - panel.windowWidth, deltaCenter: newWC - panel.windowCenter)
     }
 
+    /// Pixels an ROI rectangle (raw-pixel coordinates) covers: those whose
+    /// centre lies inside it, as half-open ranges clipped to the image. A
+    /// rectangle from 0 to 10 covers pixels 0..<10, not 0...10.
+    static func roiPixelBounds(rawRect: CGRect, width: Int, height: Int) -> (x: Range<Int>, y: Range<Int>)? {
+        guard rawRect.minX.isFinite, rawRect.maxX.isFinite, rawRect.minY.isFinite, rawRect.maxY.isFinite else { return nil }
+        let x0 = max(0, Int((rawRect.minX - 0.5).rounded(.up)))
+        let x1 = min(width, Int((rawRect.maxX - 0.5).rounded(.up)))
+        let y0 = max(0, Int((rawRect.minY - 0.5).rounded(.up)))
+        let y1 = min(height, Int((rawRect.maxY - 0.5).rounded(.up)))
+        guard x1 > x0, y1 > y0 else { return nil }
+        return (x0..<x1, y0..<y1)
+    }
+
     /// Compute HU statistics for a pixel-coordinate rectangle on a panel
     func computeROIStats(panel: PanelState, rect: CGRect) -> (mean: Double, max: Double, min: Double, stdDev: Double, count: Int)? {
         guard let px = modalityPixels(for: panel) else { return nil }
@@ -3499,19 +3574,15 @@ class DICOMModel: ObservableObject {
         let mapping = PixelDisplayMapping(rawWidth: w, rawHeight: h,
                                           displayWidth: panel.displayImageWidth, displayHeight: panel.displayImageHeight)
         let rawRect = mapping.displayRectToRaw(rect)
-        let minX = max(0, Int(rawRect.minX))
-        let minY = max(0, Int(rawRect.minY))
-        let maxX = min(w - 1, Int(rawRect.maxX))
-        let maxY = min(h - 1, Int(rawRect.maxY))
-        guard maxX > minX, maxY > minY else { return nil }
+        guard let bounds = Self.roiPixelBounds(rawRect: rawRect, width: w, height: h) else { return nil }
 
         var values: [Double] = []
-        values.reserveCapacity((maxX - minX + 1) * (maxY - minY + 1))
+        values.reserveCapacity(bounds.x.count * bounds.y.count)
 
         let bits = px.bits, signed = px.isSigned, spp = px.samples
         data.withUnsafeBytes { raw in
-            for py in minY...maxY {
-                for px in minX...maxX {
+            for py in bounds.y {
+                for px in bounds.x {
                     if let v = PixelValues.value(in: raw, index: py * w + px, bits: bits, isSigned: signed, samples: spp) {
                         values.append(v)
                     }
@@ -4181,6 +4252,7 @@ class DICOMModel: ObservableObject {
     /// Set up multi-frame decoding for a panel
     func setupMultiFrameForPanel(_ panel: PanelState, imageContext: DicomImageContext) {
         let url = imageContext.url
+        Self.resetSingleFramePixelState(panel)
         let setupStart = CFAbsoluteTimeGetCurrent()
         cineLog("setupMultiFrameForPanel: \(url.lastPathComponent) (\(imageContext.numberOfFrames) frames)")
 
@@ -4255,6 +4327,34 @@ class DICOMModel: ObservableObject {
         }
     }
 
+    /// Drop a panel's single-frame pixel state (buffer, DCMTK object, size,
+    /// bit depth, tags) so nothing keeps describing the previous image.
+    static func resetSingleFramePixelState(_ panel: PanelState) {
+        panel.rawPixelData = nil
+        panel.dcmtkImage = nil
+        panel.imageWidth = 0
+        panel.imageHeight = 0
+        panel.bitDepth = 8
+        panel.samples = 1
+        panel.isSigned = false
+        panel.isMonochrome1 = false
+        panel.tags = []
+    }
+
+    /// Let a panel resolve the UIDs of what it shows, so annotations bind to
+    /// images rather than to series-list indices.
+    private func attachSliceUIDs(_ panel: PanelState) {
+        panel.sliceUIDs = { [weak self] p in self?.sliceUIDs(of: p) ?? (series: "", instance: "") }
+    }
+
+    /// Series/SOP Instance UIDs of what a panel shows ("" when unknown).
+    func sliceUIDs(of panel: PanelState) -> (series: String, instance: String) {
+        guard panel.seriesIndex >= 0, panel.seriesIndex < allSeries.count else { return ("", "") }
+        let series = allSeries[panel.seriesIndex]
+        let instance = series.images[safe: panel.imageIndex]?.sopInstanceUID ?? ""
+        return (series.id, instance)
+    }
+
     /// URL of the image a panel currently shows (main thread).
     private func currentURL(of panel: PanelState) -> URL? {
         guard panel.seriesIndex >= 0, panel.seriesIndex < allSeries.count else { return nil }
@@ -4278,7 +4378,27 @@ class DICOMModel: ObservableObject {
     }
 
     /// Apply a decoder to a panel and display the first frame
-    private func applyMultiFrameDecoder(_ decoder: MultiFrameDecoder, to panel: PanelState) {
+    func applyMultiFrameDecoder(_ decoder: MultiFrameDecoder, to panel: PanelState) {
+        // The panel's single-frame pixel state belongs to whatever it showed
+        // before; drop it and describe the cine instead, so W/L, the value
+        // readout, ROI stats and mm mapping never use the previous image.
+        Self.resetSingleFramePixelState(panel)
+        panel.imageWidth = decoder.frameWidth
+        panel.imageHeight = decoder.frameHeight
+        panel.bitDepth = decoder.bitsAllocated
+        panel.samples = decoder.samplesPerPixel
+        panel.isSigned = decoder.isSigned
+        let url = decoder.url
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak panel] in
+            guard let fh = try? FileHandle(forReadingFrom: url) else { return }
+            let data = fh.readData(ofLength: 65_536)
+            fh.closeFile()
+            guard let (elements, _, _) = try? SimpleDicomParser(data: data).parse(stopAtPixelData: true) else { return }
+            DispatchQueue.main.async {
+                guard let self = self, let panel = panel, self.currentURL(of: panel) == url else { return }
+                panel.tags = elements
+            }
+        }
         panel.isMultiFrame = true
         panel.numberOfFrames = decoder.effectiveFrameCount
         panel.currentFrameIndex = 0

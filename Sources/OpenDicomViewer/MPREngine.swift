@@ -183,7 +183,7 @@ struct VolumeBuilder {
 
     /// Fill an Int16 voxel buffer from decoded slices (modality units).
     /// 8/16-bit slices are stored as-is. When slices hold values that Int16
-    /// can't represent — 32-bit values outside its range, or fractional
+    /// can't represent — unsigned 16-bit or 32-bit values outside its range, or fractional
     /// Float32 values (PET SUV-scaled, Philips MR) — the whole volume is
     /// stored with a linear encoding (stored = (value − intercept) / slope)
     /// spanning the data range, instead of clamping or rounding to integers.
@@ -233,6 +233,22 @@ struct VolumeBuilder {
                 }
                 any = true
                 wide.append((z, .float(values)))
+            } else if bps == 2 && !s.isSigned && s.data.withUnsafeBytes({ raw in
+                // Unsigned 16-bit above 32767 (MR, NM, integer PET) doesn't
+                // fit Int16 as identity: take the wide path so it's rescaled
+                // instead of clamped.
+                (0..<stride).contains { (PixelValues.value(in: raw, index: $0, bits: s.bits, isSigned: false) ?? 0) > Double(Int16.max) }
+            }) {
+                var values = [Int32](repeating: 0, count: stride)
+                s.data.withUnsafeBytes { raw in
+                    for i in 0..<stride {
+                        let v = Int32(PixelValues.value(in: raw, index: i, bits: s.bits, isSigned: false) ?? 0)
+                        values[i] = v
+                        lo = min(lo, Double(v)); hi = max(hi, Double(v))
+                    }
+                }
+                any = true
+                wide.append((z, .int(values)))
             } else if bps == 4 {
                 var values = [Int32](repeating: 0, count: stride)
                 s.data.withUnsafeBytes { raw in
