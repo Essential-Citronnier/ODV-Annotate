@@ -1630,7 +1630,19 @@ def write_summary(results_path: Path, manifest: dict, csv_path: Path) -> None:
             entry["bench_ok"] = row["ok"]
             entry["bench_error"] = row.get("error")
             entry["peak_rss_gb"] = metrics.get("peak_rss_gb")
-            entry["peak_vs_declared_ratio"] = metrics.get("peak_vs_declared_ratio")
+            # The ratio is recomputed against the declaration in the current
+            # manifest (the `declared_ram_gb` column) rather than copied from
+            # the run, so the two columns of one row always agree. The
+            # declaration in force when the run was made is kept beside it:
+            # TotalSegmentator's bench run was made at 23.5 and the manifest
+            # has since moved to 25.5. Units as recorded: peak in 1e9 bytes,
+            # declaration as the manifest states it (see PLUGIN_PROTOCOL.md).
+            entry["declared_ram_gb_at_run"] = metrics.get("declared_ram_gb")
+            peak_gb = metrics.get("peak_rss_gb")
+            current = entry.get("declared_ram_gb")
+            entry["peak_vs_declared_ratio"] = (
+                round(peak_gb / current, 3) if peak_gb and current
+                else metrics.get("peak_vs_declared_ratio"))
             entry["device"] = metrics.get("device")
             for name, value in stages.items():
                 entry[f"stage_s.{name}"] = round(value, 3)

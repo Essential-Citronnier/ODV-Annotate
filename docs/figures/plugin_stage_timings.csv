@@ -1,6 +1,0 @@
-stage,seconds,comparable
-Segmentation (nnU-Net forward),11.53,False
-"DICOM SEG export (61 seg, 2080 frames)",0.78,True
-Mask extraction,0.05,True
-Volume metrics,0.03,True
-Interpreter + model imports,2.4,True
