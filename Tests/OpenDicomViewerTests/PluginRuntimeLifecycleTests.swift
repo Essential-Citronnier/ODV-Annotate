@@ -293,13 +293,19 @@ final class PluginRuntimeLifecycleTests: XCTestCase {
     /// A stand-in adapter that never answers /health, records each spawn,
     /// and takes a moment to exit on SIGTERM like a model mid-load.
     @MainActor
-    private func makeHungRuntime(availableGB: Double = 48) throws -> (PluginRuntime, spawns: URL) {
+    private func makeHungRuntime(availableGB: Double = 48,
+                                 crashWithCode exitCode: Int32? = nil) throws -> (PluginRuntime, spawns: URL) {
         let paths = self.paths
         let spawns = temporaryRoot.appendingPathComponent("spawns.log")
         let python = paths.venvPython("gemma-4-e4b")
         try FileManager.default.createDirectory(
             at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let script = """
+        let script = exitCode.map { code in """
+        #!/bin/sh
+        echo spawned >> '\(spawns.path)'
+        sleep 0.3
+        exit \(code)
+        """ } ?? """
         #!/bin/sh
         trap 'sleep 1; exit 0' TERM
         echo spawned >> '\(spawns.path)'
@@ -343,6 +349,28 @@ final class PluginRuntimeLifecycleTests: XCTestCase {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: spawns.path), "the adapter never started")
+    }
+
+    /// `handleExit` clears the process entry as soon as the adapter dies, so
+    /// a readiness loop that looked the process up there missed the exit and
+    /// polled until its 300 s deadline, then reported a timeout.
+    @MainActor
+    func testAnAdapterThatDiesDuringStartupFailsPromptlyWithItsExitCode() async throws {
+        let (runtime, _) = try makeHungRuntime(crashWithCode: 3)
+
+        let started = Date()
+        do {
+            try await runtime.startPlugin("gemma-4-e4b")
+            XCTFail("a start whose process exited must not report success")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("exited with code 3"),
+                          error.localizedDescription)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 15)
+        guard case .error(let message) = runtime.runtimeState("gemma-4-e4b") else {
+            return XCTFail("an adapter that crashed on startup is an error")
+        }
+        XCTAssertTrue(message.contains("exited with code 3"), message)
     }
 
     @MainActor

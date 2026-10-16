@@ -104,7 +104,7 @@ Every adapter — resident, session, and one-shot alike — implements the secti
 
 ```
 <venv python> <entry> --install-weights --weight-id <id> --source <source> \
-    --dest <dir> [--repo <repo>] [--task <task>]
+    --dest <dir> [--repo <repo>] [--revision <commit>] [--task <task>]
 ```
 
 Check for it before your normal argument parsing, since it shares no required

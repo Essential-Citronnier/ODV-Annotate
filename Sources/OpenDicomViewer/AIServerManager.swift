@@ -119,8 +119,9 @@ class AIServerManager: ObservableObject {
 
     /// Hooks the plugin runtime installs so the built-in server and the Gemma
     /// plugin never hold the same model in memory at once: called before the
-    /// built-in server starts, it stops (and awaits) any plugin that would.
-    var willStartServer: (() async -> Void)?
+    /// built-in server starts, it stops (and awaits) any plugin that would,
+    /// and returns the arbiter's refusal when the server must not start.
+    var willStartServer: (() async -> Error?)?
 
     /// pip / venv child process, so quitting mid-install does not orphan it.
     private let setupProcessLock = NSLock()
@@ -1042,8 +1043,15 @@ class AIServerManager: ObservableObject {
             // Stop the Gemma plugin first so the model is never resident twice.
             let generation = launchGeneration
             Task { @MainActor in
-                await willStartServer()
+                let refusal = await willStartServer()
                 guard self.launchGeneration == generation else { return }
+                if let refusal {
+                    self.appendLog("ERROR: \(refusal.localizedDescription)")
+                    self.isServerRunning = false
+                    self.aiService.serverStatus = .error(refusal.localizedDescription)
+                    self.dropPendingRun()
+                    return
+                }
                 self.spawnServerProcess(serverScript: serverScript)
             }
         } else {

@@ -814,7 +814,7 @@ final class PluginRuntime: ObservableObject {
         buffer.line("Started \(plugin.name) on 127.0.0.1:\(port) (pid \(process.processIdentifier)).")
 
         do {
-            try await waitUntilReady(pluginID: pluginID, port: port)
+            try await waitUntilReady(pluginID: pluginID, process: process, port: port)
             runtimeStates[pluginID] = .ready
             lastUsed[pluginID] = Date()
         } catch is CancellationError {
@@ -871,22 +871,37 @@ final class PluginRuntime: ObservableObject {
     /// Before the built-in server loads Gemma: stop any plugin that holds the
     /// same model (`AIAnalysisEngine.pluginID`), then evict plugins the
     /// arbiter says must go for the built-in server's declared memory to fit.
-    /// A refusal is logged, not enforced: the built-in engine predates the
-    /// plugin arbiter and the user asked for it explicitly.
-    func makeRoomForBuiltInServer(id: String, declaredRamGB: Double) async {
+    ///
+    /// Returns the refusal when the declared budget cannot fit the server at
+    /// all (for example beside an in-flight TotalSegmentator run); the caller
+    /// must not start it. A live-headroom refusal is overridden: the user
+    /// asked for the engine explicitly, and the built-in server has its own
+    /// low-memory confirmation.
+    func makeRoomForBuiltInServer(id: String, declaredRamGB: Double) async -> PluginError? {
+        let decision = arbiter.admit(
+            PluginResidency(pluginID: id, declaredRamGB: declaredRamGB),
+            residents: pluginResidents(excluding: AIAnalysisEngine.pluginID))
+        if case .refuse = decision, let refusal = decision.refusalError {
+            log(for: AIAnalysisEngine.pluginID).line(
+                "Refused the built-in AI server: \(refusal.localizedDescription)")
+            return refusal
+        }
+        if decision.isOverridable {
+            log(for: AIAnalysisEngine.pluginID).line(
+                "Starting the built-in AI server despite low free memory: it was requested explicitly.")
+        }
+
         if runtimeState(AIAnalysisEngine.pluginID) != .stopped
             || processes[AIAnalysisEngine.pluginID] != nil {
             log(for: AIAnalysisEngine.pluginID).line(
                 "Stopping: the built-in AI server is starting and loads the same model.")
             await stop(AIAnalysisEngine.pluginID)
         }
-        let decision = arbiter.admit(
-            PluginResidency(pluginID: id, declaredRamGB: declaredRamGB),
-            residents: pluginResidents(excluding: nil))
-        for victim in decision.evictions {
+        for victim in decision.overridden.evictions {
             log(for: victim).line("Stopping to free memory for the built-in AI server.")
             await stop(victim)
         }
+        return nil
     }
 
     private func stop(_ pluginID: String, cancelStart: Bool) async {
@@ -995,14 +1010,21 @@ final class PluginRuntime: ObservableObject {
     /// the cancelled request was filed as a transport error meaning "not bound
     /// yet" -- so a cancelled start spun on the main actor, issuing requests
     /// back to back until the five-minute deadline.
-    private func waitUntilReady(pluginID: String, port: Int, timeout: TimeInterval = 300) async throws {
+    private func waitUntilReady(pluginID: String, process: Process, port: Int,
+                                timeout: TimeInterval = 300) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         var lastDetail = "no response yet"
 
         while Date() < deadline {
             try Task.checkCancellation()
-            if let process = processes[pluginID], !process.isRunning {
-                throw PluginError.notReady("The plugin process exited during startup.")
+            // Checked on the process this start launched, not `processes`:
+            // `handleExit` clears that entry as soon as the process dies, which
+            // used to hide an early exit until the timeout.
+            if !process.isRunning {
+                let reason = process.terminationReason == .uncaughtSignal
+                    ? "was terminated by signal \(process.terminationStatus)"
+                    : "exited with code \(process.terminationStatus)"
+                throw PluginError.notReady("The plugin process \(reason) during startup.")
             }
             do {
                 let health = try await health(port: port)
