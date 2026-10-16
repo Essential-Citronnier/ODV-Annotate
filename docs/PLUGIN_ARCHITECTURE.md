@@ -21,7 +21,7 @@ plausibly wants:
 | Natural process lifetime | resident | resident, with per-image state | none: run and exit |
 | Input | one rendered slice | slice plus interactive prompts | the whole series |
 | Output | text, boxes | 2D masks | 3D DICOM SEG, volumes |
-| Peak memory | ~5 GB | 3–6 GB | ~3.5 GB |
+| Peak memory | ~5 GB | 3–6 GB | ~24–25 GB (measured, CPU) |
 | Weight acquisition | unconditional | unconditional (2) / accept terms (3) | academic licence key |
 | Python stack | MLX | torch | torch + nnU-Net |
 
@@ -156,9 +156,13 @@ ties broken deterministically — rather than a bare refusal. A plugin mid-reque
 or holding open sessions is non-evictable and blocks admission instead of being
 stopped under the user.
 
-The 16 GB case falls out directly. Budget 8 GB; Gemma (5.0) plus
-TotalSegmentator (3.5) is 8.5, which does not fit, so Gemma stops for the
-duration of the segmentation and restarts after. At 32 GB both run concurrently.
+The 16 GB case falls out directly. Budget 8 GB; Gemma (5.0) plus a 3.5 GB
+one-shot is 8.5, which does not fit, so Gemma stops for the duration of the job
+and restarts after. At 32 GB both run concurrently. (3.5 GB was
+TotalSegmentator's original declaration; measured, it peaks at 24–25 GB. A
+one-shot too large for half the machine is budgeted against three quarters of
+it instead, so its `total_lowmem` task, declared at 24.0 GB, runs on a 32 GB Mac
+with everything evictable stopped, and nothing of that size runs on 16 GB.)
 One-shot admission deliberately does not exempt a resident sibling of the same
 plugin: a subprocess's peak lands on top of the server's, not inside it.
 

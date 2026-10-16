@@ -38,7 +38,7 @@ AF_UNIX and loopback TCP alike. This splits the table in two.
 | SAM 2 | session | 3.0 GB | **1.45 GB** | 0.48× | 69 s | 184 MB in 24 s |
 | SAM 3 | session | 6.0 GB | not measured | — | 71 s | licence gate held |
 | Gemma 4 E4B | resident-server | 5.0 GB | not measured | — | 60 s | 5.18 GB in 879 s |
-| TotalSegmentator | one-shot | 3.5 GB → 23.5 GB | **22.70 GB** | **6.5× as declared; 0.97× corrected** | 176 s | 166 MB in 52 s |
+| TotalSegmentator | one-shot | 3.5 GB → 23.5 GB → **25.5 GB** (Oct 2026) | **22.70 GB** single process; **25.41 GB** process tree (Oct 2026) | **6.5× as declared; 0.97× corrected** | 176 s | 166 MB in 52 s |
 
 ### The corrected declaration, validated end to end
 
@@ -299,6 +299,10 @@ file; reported, not edited.
 
 ## Finding 6 — the corrected declaration makes the plugin inadmissible on the target machine
 
+> **Superseded in part (October 2026)**: the arbiter now gives an oversized
+> one-shot 0.75 of physical memory, and a `total_lowmem` task at 24.0 GB fits a
+> 32 GB Mac. See "Arbitration re-run after the admission changes" below.
+
 Re-running the arbitration scenarios against the corrected manifest surfaces a
 consequence worth stating plainly, because it was not visible while the
 declaration was wrong. At an honest `ram_gb: 23.5` against a budget of half
@@ -341,6 +345,8 @@ is the arithmetic the scenario claims to test.
 
 ## Arbitration: 20/20 scenarios match the shipped policy
 
+> Historical (August 2026). Re-run in October 2026 at 38/38; see below.
+
 Driven by compiling `ResourceArbiter.swift` and `PluginTypes.swift` into a
 JSON-in/JSON-out driver, so the decisions are the shipped type's own rather
 than a Python restatement of the policy. Coverage includes LRU eviction order,
@@ -358,6 +364,146 @@ badly constructed — it landed on the budget boundary and would have been
 admitted whether or not the resident was evictable — and was rebuilt so that
 non-evictability is actually isolated.
 
+## Low-memory settings, and the peak with real worker processes (October 2026)
+
+`eval/exp3_totalseg_lowmem.py`; rows in `exp3_totalseg_lowmem.jsonl`, summary in
+`exp3_totalseg_lowmem.csv`. Same machine (M5 Max, 128 GB), TotalSegmentator
+2.18.0, nnunetv2 2.8.1, torch 2.13.0, CPU (the adapter's `device='gpu'`
+resolves to CUDA and falls back to CPU on a Mac, so this is what the shipped
+plugin runs). Master's lock now pins torch 2.14.1; TotalSegmentator and
+nnunetv2 are unchanged, and the next re-measurement should use the locked
+environment.
+
+**What changed in the method.** This machine permits multiprocessing, so for
+the first time nnU-Net ran with its worker processes as it does under the host,
+without `exp3_mp_thread_shim.py`. A per-process figure no longer describes that,
+so the experiment adds a process-tree sampler: `phys_footprint` summed over the
+adapter and every descendant, read via `proc_pid_rusage` every 0.2 s. exp3's
+own instrument (the largest single descendant's `ru_maxrss` from a forked
+intermediate) is recorded beside it on every row for comparability. Both are
+per-process-tree figures, so other work on the machine does not enter them. It
+does stretch wall time: 1-minute load at case start ranged 4.2-32.9 (median
+9.4), with other sessions' Python jobs of up to 12 GB resident.
+
+**Sanity check against 22.7 GB.** On the bench series the per-process instrument
+reads 23.1-23.3 GB, against exp3's 22.70-23.10 GB: the same quantity, reproduced.
+The *tree* figure is higher, because nnU-Net spawns its export pool
+(`nr_thr_saving`, default 6) before inference, and those workers are alive
+through the inference peak.
+
+**Full adapter, as the host spawns it** (segmentation, volumes, DICOM SEG
+export), 2 runs per series:
+
+| Series | 3 mm grid (≈, from geometry) | `total` (6 workers) tree peak | wall | `nr_thr_saving=1` tree peak | wall |
+|---|---|---|---|---|---|
+| `tcia_1556218467652708` | 140×140×137 | 23.46-23.65 GB | 68-72 s | 23.37 GB | 116-118 s |
+| `tcia_2121018880599426` | 120×120×205 | **25.40-25.41 GB** | 67-69 s | **23.77-23.78 GB** | 114-118 s |
+| `tcia_7962814028413347` | 167×167×214 | 22.54-23.77 GB | 80-88 s | 22.45 GB | 122-130 s |
+| `tcia_2083024417478217` | 164×164×202 | 22.68-24.97 GB | 81-101 s | 22.57 GB | 143-147 s |
+| `tcia_3381330240602696` | 145×145×245 | 23.15 GB | 58 s | 23.06 GB | 69-84 s |
+| **max** | | **25.41 GB** | | **23.78 GB** | |
+
+One run of the new `total_lowmem` task itself, through the manifest with no
+override, on the heaviest series: 23.78 GB, 147 s — the same configuration
+measured the same way.
+
+**Segmentation stage alone** (`totalsegmentator()` only, 3 runs per series):
+
+| Setting | `tcia_1556…` | `tcia_2121…` | wall (median) |
+|---|---|---|---|
+| default | 23.46 GB | 25.17-25.18 GB | 47-59 s |
+| `force_split=True` | **26.25-26.27 GB** | 25.01-25.46 GB | 61-67 s |
+| `nr_thr_resamp=1, nr_thr_saving=1` | 23.18-23.19 GB | 23.54-23.56 GB | 114-118 s |
+| both | 25.88 GB | 24.63-24.64 GB | 107-114 s |
+
+What the measurements say:
+
+- **The peak is CPU inference, not the image.** A timestamped trace puts it
+  inside nnU-Net's sliding-window prediction: 2.6 GB before it, 23.0 GB during
+  it, 11.9 GB after, on a 140×140×137 grid whose 118-class logits are about
+  1.3 GB. It does not track the 3 mm grid size (the largest grid,
+  `tcia_7962814028413347`, is among the lowest peaks) and does not track the
+  torch thread count: clamping torch to 4 or 8 threads gave the same 23.09 GB
+  in two exploratory runs (single runs, not in the JSONL).
+- **`force_split` makes it worse**, by up to 2.8 GB. It triples the number of
+  cases nnU-Net predicts without shrinking what one prediction holds at 3 mm,
+  and adds the split and recombination arrays. Not used.
+- **`nr_thr_saving=1` is the only lever.** It removes the idle export workers,
+  lowering the worst case from 25.41 to 23.78 GB (−1.6 GB), at 1.3-1.7× the
+  wall time, since TotalSegmentator's per-structure NIfTI saving becomes serial
+  too. `nr_thr_resamp` is already 1 by default.
+- **`fast` is not a separate low-memory mode here**: it is already the default
+  and the only resolution the manifest ships weights for. `fastest` (6 mm)
+  needs Dataset298, which the manifest does not declare, so it was not
+  measured.
+
+**Declared RAM, by the project's rule** (highest measured peak rounded up to the
+next 0.5 GB — how 23.23 GB became 23.5 in `de234fe`):
+
+| Task | Was | Now | From |
+|---|---|---|---|
+| `total` (plugin figure too) | 23.5 | **25.5** | 25.41 GB tree peak |
+| `total_lowmem` (new) | — | **24.0** | 23.78 GB tree peak |
+
+`total` was under-declared by about 1.9 GB for the pipeline as the host really
+runs it; the 23.5 figure was correct only for the thread-shimmed single
+process it was measured on. `total_lowmem` is the same TotalSegmentator task
+and weights with one export worker, and its 24.0 fits exactly the one-shot
+share of a 32 GB Mac (0.75 × 32 = 24 GiB), which `total` at 25.5 no longer
+does. `heartchambers_highres` is licensed and was not measured; it still
+inherits the plugin figure.
+
+A first pass of this script measured 35-44 GB and was discarded: its
+segmentation driver lacked a `__main__` guard, so every `spawn` worker
+re-imported it and started a TotalSegmentator run of its own. The adapter and
+exp3's crosscheck driver are not affected (the adapter is guarded; the
+crosscheck never spawned under the shim), but exp3's `CROSSCHECK_DRIVER` has
+the same latent defect and would hit it if run without `--totalseg-threads`.
+
+## Arbitration re-run after the admission changes (October 2026)
+
+Three changes landed after the 20-scenario run: one-shot admission excludes the
+requester from its own resident set (it used to be charged twice — 47 GB for a
+23.5 GB job), a one-shot too large for half the machine is re-decided against
+0.75 of it, and a refusal caused only by the live reading is now
+`refuseLiveHeadroom`, which the user may override with "Start Anyway". The
+driver could not report any of this: commit `2ce3a9b` had merged two `case`
+labels onto one line of the generated Swift, so the phase no longer compiled,
+and it mapped the new refusal to plain `refuse`. `PluginTypes.swift` also now
+needs SwiftPM's `Bundle.module`, which a standalone build lacks. All three are
+fixed in `exp3_resources.py`; the driver reports `overridable` and what an
+override would do.
+
+**38/38 scenarios match** (was 20/20), all decided by the compiled
+`ResourceArbiter.swift`. Decisions that changed for the same scenario:
+
+| Scenario | Old | New | Why |
+|---|---|---|---|
+| `32gb/totalseg-…-on-corrected-declaration` (23.5) | refuse | **admit** (renamed `…-admitted-…`) | 0.75 one-shot share: 24 GiB |
+| `64gb-but-loaded/live-headroom-refuses` | refuse | **refuseLiveHeadroom**, overridable | refusal type split |
+| `16gb/totalseg-refused-on-{corrected-declaration,its-measurement}` | refuse, 8 GiB available | refuse, **12 GiB** available | 0.75 share reported |
+
+`16gb/busy-resident-is-not-evictable` now pins the request at 3.5 GB: read live
+it was refused on size before reaching the busy resident it exists to test.
+Rows about the 23.5 correction, the oversized share, requester exclusion and
+Start Anyway pin 23.5; rows that track today's declarations read the manifest:
+
+| Machine | `total` at 25.5 | `total_lowmem` at 24.0 |
+|---|---|---|
+| 16 GB (12 GiB one-shot share) | refuse | refuse |
+| 24 GB (18 GiB) | refuse | refuse |
+| 32 GB idle (24 GiB) | refuse | **admit** |
+| 32 GB in use (20 GB available) | refuse, final | **Start Anyway offered** |
+| 48 GB (36 GiB) | admit | admit |
+
+New scenarios cover the oversized share evicting a resident Gemma, a resident
+server of the same size getting no such share, the double-charge the requester
+exclusion removed, a second run of the same plugin genuinely in flight (still
+refused), and Start Anyway applying only the evictions the budget needs.
+
+Finding 6's "admissible at roughly 47 GB" is superseded: with the 0.75 share,
+`total` needs 34 GB of physical memory and `total_lowmem` 32 GB.
+
 ## What could not be measured here, and what it would need
 
 | Not measured | Why | To measure it |
@@ -365,5 +511,6 @@ non-evictability is actually isolated.
 | Gemma 4 E4B load, inference, peak | MLX requires a Metal device; the sandbox exposes none and MLX has no CPU fallback. Reported by the adapter as `not_ready`, which is correct behaviour. | Run outside the sandbox on a machine with GPU access. |
 | SAM 3 anything | Weights are behind Meta's licence gate; the adapter correctly refuses to auto-download and returns `license_required`. | Accept the terms, place the checkpoint, rerun. |
 | Any GPU timing | No accelerator visible. | Same run on the desktop. |
-| TotalSegmentator with process pools | Sandbox denies `bind(2)`. | Same run outside the sandbox; expect the wall time to fall. |
+| ~~TotalSegmentator with process pools~~ | Measured October 2026, see "Low-memory settings" above: the tree peak is up to 2 GB above the single-process figure. | — |
+| TotalSegmentator full resolution, `fastest`, `heartchambers_highres` | Weights not declared in the manifest (`fastest`), or behind the academic licence (`heartchambers_highres`); full resolution runs five models. | Licence key or manifest weights, then the same script. |
 | Concurrent-plugin contention | Sequential measurement only, so as not to contaminate timings. | Deliberate concurrency experiment with per-process sampling. |
