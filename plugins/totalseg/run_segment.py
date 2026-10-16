@@ -55,16 +55,19 @@ from _shared.weights import (  # noqa: E402
 PLUGIN_ID = "totalsegmentator"
 
 # Task ids exactly as plugins.json declares them, mapped to the TotalSegmentator
-# task they invoke. The two happen to coincide today; the indirection is kept
-# because the manifest's task ids are part of the host contract and
-# TotalSegmentator's are not.
+# task they invoke. The indirection is kept because the manifest's task ids are
+# part of the host contract and TotalSegmentator's are not, and because
+# `total_lowmem` is the same TotalSegmentator task run with fewer workers.
 TASKS: dict[str, str] = {
     "total": "total",
+    "total_lowmem": "total",
     "heartchambers_highres": "heartchambers_highres",
 }
 
 # Only `total` exposes an option in the manifest. `heartchambers_highres` has
 # no fast variant, and passing --opt-fast to it is ignored rather than refused.
+# `total_lowmem` is always the 3 mm model: its declaration was measured there,
+# and full resolution runs five models whose footprint is unmeasured.
 OPTIONS = {"fast": "bool"}
 
 SEG_FILENAME = "segmentation.dcm"
@@ -138,6 +141,7 @@ def _totalsegmentator_version() -> str:
 # means for a given task.
 TASK_WEIGHTS: dict[str, str] = {
     "total": "Dataset297_TotalSegmentator_total_3mm_1559subj",
+    "total_lowmem": "Dataset297_TotalSegmentator_total_3mm_1559subj",
     "heartchambers_highres": "Dataset301_heart_highres_1559subj",
 }
 
@@ -232,12 +236,57 @@ def _license_registered(home: Path | None = None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _run_totalsegmentator(series_dir: Path, seg_out: Path, ts_task: str,
+# TotalSegmentator's worker counts, `(nr_thr_resamp, nr_thr_saving)`, per task.
+#
+# `nr_thr_saving` sizes two pools: nnU-Net's segmentation-export pool, which is
+# spawned *before* inference and so is alive through the inference peak, and
+# TotalSegmentator's own per-structure NIfTI saving pool. One series is exported
+# by one worker, so on a single study the other export workers only hold memory
+# -- about 1.6-2 GB at the peak -- while the saving pool roughly halves the time
+# spent writing ~117 masks. `total` keeps TotalSegmentator's defaults for speed;
+# `total_lowmem` runs both pools with one worker, which is what lets its
+# declaration fit a 32 GB Mac's one-shot share. Measured in
+# eval/exp3_totalseg_lowmem.py; see eval/results/exp3_FINDINGS.md, "Low-memory
+# settings". force_split was measured too and raises the peak, so it is unused.
+TASK_THREADS: dict[str, tuple[int, int]] = {
+    "total": (1, 6),
+    "total_lowmem": (1, 1),
+}
+DEFAULT_THREADS = (1, 6)  # TotalSegmentator's own defaults
+
+# Evaluation override for the two counts above, so eval/exp3_totalseg_lowmem.py
+# can measure alternatives through the adapter exactly as the host spawns it.
+# The host never sets it.
+THREADS_ENV = "ODV_TOTALSEG_THREADS"
+
+
+def _runtime_settings(task_id: str) -> dict[str, int]:
+    """Worker counts passed to TotalSegmentator, `{nr_thr_resamp, nr_thr_saving}`."""
+    resamp, saving = TASK_THREADS.get(task_id, DEFAULT_THREADS)
+    override = os.environ.get(THREADS_ENV, "").strip()
+    if override:
+        try:
+            resamp, saving = (max(1, int(x)) for x in override.split(","))
+        except ValueError:
+            raise PluginError(
+                ErrorCode.BAD_INPUT,
+                f"{THREADS_ENV} must be '<nr_thr_resamp>,<nr_thr_saving>', "
+                f"got '{override}'",
+                recoverable=False,
+            ) from None
+    return {"nr_thr_resamp": resamp, "nr_thr_saving": saving}
+
+
+def _run_totalsegmentator(series_dir: Path, seg_out: Path, task_id: str,
                           fast: bool, reporter: ProgressReporter) -> None:
     """Segment the series into one NIfTI mask per structure."""
     from totalsegmentator.python_api import totalsegmentator
 
-    reporter.log(f"TotalSegmentator task={ts_task} fast={fast}")
+    ts_task = TASKS[task_id]
+    settings = _runtime_settings(task_id)
+    reporter.log(f"TotalSegmentator task={ts_task} fast={fast} "
+                 f"nr_thr_resamp={settings['nr_thr_resamp']} "
+                 f"nr_thr_saving={settings['nr_thr_saving']}")
     try:
         totalsegmentator(
             input=str(series_dir),
@@ -249,6 +298,7 @@ def _run_totalsegmentator(series_dir: Path, seg_out: Path, ts_task: str,
             # back from filenames avoids depending on label-index ordering.
             ml=False,
             quiet=True,
+            **settings,
         )
     except SystemExit as exc:
         # TotalSegmentator exits the process on a licence rejection instead of
@@ -264,7 +314,7 @@ def _run_totalsegmentator(series_dir: Path, seg_out: Path, ts_task: str,
         raise PluginError(
             ErrorCode.OUT_OF_MEMORY,
             "Ran out of memory during segmentation. Close other plugins, or use "
-            "fast mode for the total task.",
+            "the low-memory variant of the total task.",
         ) from None
 
 
@@ -489,7 +539,10 @@ def _export_dicom_seg(series_dir: Path, masks: list[tuple[str, Path]],
 def pipeline(args: argparse.Namespace, out_dir: Path,
              reporter: ProgressReporter) -> OneShotResult:
     ts_task = TASKS[args.task]
-    fast = option_bool(args, "fast", default=True) if args.task == "total" else False
+    if args.task == "total":
+        fast = option_bool(args, "fast", default=True)
+    else:
+        fast = args.task == "total_lowmem"
 
     series = args.input_series3d
     if not series:
@@ -524,7 +577,7 @@ def pipeline(args: argparse.Namespace, out_dir: Path,
         # Segmentation dominates the wall time by a wide margin, so it is given
         # most of the bar even though it reports nothing from inside.
         reporter.stage(0.05, 0.80, "Running segmentation")
-        _run_totalsegmentator(series_dir, seg_out, ts_task, fast, reporter)
+        _run_totalsegmentator(series_dir, seg_out, args.task, fast, reporter)
 
         reporter.stage(0.80, 0.88, "Measuring structures")
         masks = _structure_masks(seg_out)

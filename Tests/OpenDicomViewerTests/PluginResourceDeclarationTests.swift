@@ -44,11 +44,40 @@ final class PluginResourceDeclarationTests: XCTestCase {
         let totalseg = try XCTUnwrap(manifest.plugin(id: "totalsegmentator"))
         let total = totalseg.declaredRAMGB(forTask: "total")
 
-        // The measured peak was 20.9-23.1 GB. The declaration must cover it:
-        // under-declaring is the direction that admits an impossible job.
+        // Measured with nnU-Net's worker processes running natively, as the
+        // host runs it, the whole process tree peaked at up to 25.41 GB over
+        // five series (eval/results/exp3_totalseg_lowmem.csv). The declaration
+        // must cover it: under-declaring is the direction that admits an
+        // impossible job.
         XCTAssertGreaterThanOrEqual(
-            total, 20.9,
-            "the `total` task declares \(total) GB but was measured at up to 23.1 GB")
+            total, 25.41,
+            "the `total` task declares \(total) GB but was measured at up to 25.41 GB")
+    }
+
+    /// The low-memory variant runs one export worker instead of six. Its
+    /// declaration must cover its own measured peak (23.78 GB) and stay within
+    /// a 32 GB Mac's one-shot share, which is the reason it exists.
+    func testLowMemoryTaskCoversItsPeakAndFitsA32GBMac() throws {
+        let manifest = try manifest()
+        let totalseg = try XCTUnwrap(manifest.plugin(id: "totalsegmentator"))
+        let lowmem = totalseg.declaredRAMGB(forTask: "total_lowmem")
+        XCTAssertGreaterThanOrEqual(
+            lowmem, 23.78,
+            "`total_lowmem` declares \(lowmem) GB but was measured at up to 23.78 GB")
+        XCTAssertLessThan(lowmem, totalseg.declaredRAMGB(forTask: "total"))
+
+        let request = PluginResidency(pluginID: totalseg.id, declaredRamGB: lowmem)
+        let idle32 = ResourceArbiter(probe: { MemoryStatus(physicalGB: 32.0, availableGB: 30.0) })
+        XCTAssertEqual(idle32.admitOneShot(request, residents: []), .admit)
+
+        // The full-speed task does not fit the same machine.
+        let total = PluginResidency(pluginID: totalseg.id,
+                                    declaredRamGB: totalseg.declaredRAMGB(forTask: "total"))
+        XCTAssertNotNil(idle32.admitOneShot(total, residents: []).refusalError)
+
+        // And neither fits 16 GB, whatever is free.
+        let idle16 = ResourceArbiter(probe: { MemoryStatus(physicalGB: 16.0, availableGB: 15.0) })
+        XCTAssertNotNil(idle16.admitOneShot(request, residents: []).refusalError)
     }
 
     /// Every declaration must be positive and plausible; a zero or negative

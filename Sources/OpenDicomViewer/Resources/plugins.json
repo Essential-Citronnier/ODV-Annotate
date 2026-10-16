@@ -210,7 +210,7 @@
       "adapter_dir": "totalseg",
       "entry": "run_segment.py",
       "requirements": "requirements.txt",
-      "ram_gb": 23.5,
+      "ram_gb": 25.5,
       "disk_gb": 3.0,
       "requires_apple_silicon": false,
       "tasks": [
@@ -244,7 +244,32 @@
               "label": "Fast mode (3 mm)"
             }
           },
-          "ram_gb": 23.5
+          "ram_gb": 25.5
+        },
+        {
+          "id": "total_lowmem",
+          "label": "Total, low memory (117 structures)",
+          "summary": "The Total task at 3 mm with one export worker instead of six: about 1.6 GB less memory at its peak, so it fits a 32 GB Mac, at roughly 1.5x the run time.",
+          "inputs": [
+            "series3d"
+          ],
+          "outputs": [
+            "seg3d",
+            "metrics"
+          ],
+          "license": {
+            "gate": "open",
+            "identifier": "Apache-2.0 (code) / CC BY 4.0 (weights)"
+          },
+          "weights": [
+            {
+              "id": "Dataset297_TotalSegmentator_total_3mm_1559subj",
+              "source": "totalseg-task",
+              "task": "total",
+              "size_gb": 0.25
+            }
+          ],
+          "ram_gb": 24.0
         },
         {
           "id": "heartchambers_highres",
