@@ -11,7 +11,7 @@
 > |---|---|---|
 > | 1 · Standard conformance | dcmqi decodes 30/30 structures losslessly, geometry preserved; 15 IOD checks pass on 6 cases; 2 WARNs stand as an interoperability defect | `eval/results/exp1_findings.md` |
 > | 2 · Pipeline fidelity | 689 per-structure comparisons, minimum Dice 1.000000, 0 unplaced frames, over 7 TCIA series | `eval/results/exp2_tables.md` |
-> | 3 · Resources & arbitration | 20 arbitration scenarios, 0 mismatches; declared memory found wrong by 6× | `eval/results/exp3_FINDINGS.md` |
+> | 3 · Resources & arbitration | 38 arbitration scenarios, 0 mismatches (was 20/20); declared memory found wrong by 6×, and by a further 1.9 GB once worker processes are counted (25.41 GB peak; `total` now 25.5 GB, new `total_lowmem` 24.0 GB fits 32 GB) | `eval/results/exp3_FINDINGS.md` |
 > | 4 · Session model | encode costs 17.1× a decode — but the alternative costs 2–5% of a decode, so the ratio does **not** justify the lifecycle on performance grounds | `eval/results/exp4_session_REPORT.md` |
 > | 5 · Deployability | 9/9 checks on the packaged app after fixing three defects that made a shipped build fail | `eval/results/exp5_deployability.jsonl` |
 >

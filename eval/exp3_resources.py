@@ -646,52 +646,62 @@ def phase_bench(recorder: Recorder, repo: Path, paths: EvalPaths,
 # psutil-style external sampling is deliberately not attempted: this sandbox
 # denies the sysctl it needs, so it would report zero and look like a
 # disagreement rather than an unavailable instrument.
+# The driver body sits under a `__main__` guard: nnU-Net's pools use the
+# `spawn` start method, which re-imports the main module in every worker, so
+# an unguarded driver run without --totalseg-threads would start one
+# segmentation per worker (found by exp3_totalseg_lowmem.py).
 CROSSCHECK_DRIVER = r'''
 import json, resource, sys, threading, time
 
-series, out_dir, task, fast = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
-sampled = [0]
-stop = [False]
+def main():
+    series, out_dir, task, fast = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
-
-def sample():
-    while not stop[0]:
-        sampled[0] = max(sampled[0],
-                         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        time.sleep(0.3)
+    sampled = [0]
+    stop = [False]
 
 
-watcher = threading.Thread(target=sample, daemon=True)
-watcher.start()
+    def sample():
+        while not stop[0]:
+            sampled[0] = max(sampled[0],
+                             resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            time.sleep(0.3)
 
-started = time.perf_counter()
-error = None
-try:
-    from totalsegmentator.python_api import totalsegmentator
 
-    totalsegmentator(input=series, output=out_dir, task=task,
-                     fast=(fast == "true"), ml=False, quiet=True)
-except BaseException as exc:
-    error = f"{type(exc).__name__}: {exc}"
-elapsed = time.perf_counter() - started
+    watcher = threading.Thread(target=sample, daemon=True)
+    watcher.start()
 
-stop[0] = True
-watcher.join(timeout=2.0)
+    started = time.perf_counter()
+    error = None
+    try:
+        from totalsegmentator.python_api import totalsegmentator
 
-scale = 1 if sys.platform == "darwin" else 1024
-# Carries `ok` so the shared envelope reader recognises it: the protocol's
-# section 4b disambiguation is what distinguishes a result line from a log line,
-# and a driver that skipped it would be silently unparseable.
-print(json.dumps({
-    "ok": error is None,
-    "getrusage_self_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale,
-    "sampled_self_bytes": sampled[0] * scale,
-    "getrusage_children_bytes":
-        resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * scale,
-    "pipeline_s": round(elapsed, 3),
-    "error": error,
-}))
+        totalsegmentator(input=series, output=out_dir, task=task,
+                         fast=(fast == "true"), ml=False, quiet=True)
+    except BaseException as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    elapsed = time.perf_counter() - started
+
+    stop[0] = True
+    watcher.join(timeout=2.0)
+
+    scale = 1 if sys.platform == "darwin" else 1024
+    # Carries `ok` so the shared envelope reader recognises it: the protocol's
+    # section 4b disambiguation is what distinguishes a result line from a log line,
+    # and a driver that skipped it would be silently unparseable.
+    print(json.dumps({
+        "ok": error is None,
+        "getrusage_self_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale,
+        "sampled_self_bytes": sampled[0] * scale,
+        "getrusage_children_bytes":
+            resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * scale,
+        "pipeline_s": round(elapsed, 3),
+        "error": error,
+    }))
+
+
+if __name__ == "__main__":
+    main()
 '''
 
 
@@ -839,6 +849,7 @@ struct ScenarioIn: Decodable {
     let request: ResidentIn
     let residents: [ResidentIn]?
     let oneShot: Bool?
+    let oneShotFraction: Double?
 }
 
 struct DecisionOut: Encodable {
@@ -851,6 +862,12 @@ struct DecisionOut: Encodable {
     let declaredBudgetGB: Double
     let liveHeadroomGB: Double
     let residentDemandGB: Double
+    let oneShotBudgetGB: Double
+    /// Whether the host would offer "Start Anyway" for this decision.
+    let overridable: Bool
+    /// What a "Start Anyway" would act on: the decision after the override.
+    let overriddenDecision: String
+    let overriddenEvictions: [String]
 }
 
 let epoch = Date(timeIntervalSince1970: 1_700_000_000)
@@ -870,6 +887,7 @@ for scenario in scenarios {
     let available = scenario.availableGB ?? scenario.physicalGB
     let arbiter = ResourceArbiter(
         residentFraction: scenario.residentFraction ?? 0.5,
+        oneShotFraction: scenario.oneShotFraction ?? 0.75,
         safetyMarginGB: scenario.safetyMarginGB ?? 2.0,
         probe: MemoryProbe.fixed(physicalGB: scenario.physicalGB,
                                  availableGB: available))
@@ -888,8 +906,11 @@ for scenario in scenarios {
     case .refuse(let required, let avail):
         label = "refuse"
         requiredGB = required
-        availableOut = avail    case .refuseLiveHeadroom(let required, let avail, _):
-        label = "refuse"  // overridable by the user; see isOverridable
+        availableOut = avail
+    case .refuseLiveHeadroom(let required, let avail, _):
+        // Distinct from `refuse`: only the live reading stands in the way, so
+        // the host offers "Start Anyway" (AdmissionDecision.isOverridable).
+        label = "refuseLiveHeadroom"
         requiredGB = required
         availableOut = avail
     }
@@ -904,7 +925,18 @@ for scenario in scenarios {
         refusalAvailableGB: availableOut,
         declaredBudgetGB: arbiter.declaredBudgetGB(status),
         liveHeadroomGB: arbiter.liveHeadroomGB(status),
-        residentDemandGB: residents.reduce(0) { $0 + $1.declaredRamGB }))
+        residentDemandGB: residents.reduce(0) { $0 + $1.declaredRamGB },
+        oneShotBudgetGB: scenario.physicalGB * arbiter.oneShotFraction,
+        overridable: decision.isOverridable,
+        overriddenDecision: {
+            switch decision.overridden {
+            case .admit: return "admit"
+            case .evictThenAdmit: return "evictThenAdmit"
+            case .refuse: return "refuse"
+            case .refuseLiveHeadroom: return "refuseLiveHeadroom"
+            }
+        }(),
+        overriddenEvictions: decision.overridden.evictions))
 }
 
 let encoder = JSONEncoder()
@@ -919,12 +951,20 @@ def build_arbiter_driver(repo: Path, workdir: Path) -> Path:
     source = workdir / "main.swift"
     source.write_text(ARBITER_DRIVER)
     binary = workdir / "arbiter_driver"
+    # PluginTypes.swift falls back to SwiftPM's generated `Bundle.module` when
+    # loading the bundled manifest. That accessor exists only inside the
+    # package build; compiled standalone, the file does not build without a
+    # stand-in. The driver never loads the manifest, so `.main` is enough.
+    bundle_shim = workdir / "bundle_module_shim.swift"
+    bundle_shim.write_text(
+        "import Foundation\n"
+        "extension Bundle { static var module: Bundle { .main } }\n")
     argv = [
         "swiftc", "-O",
         # A private module cache: the shared one is not writable here, and a
         # failed cache write aborts the build rather than degrading.
         "-module-cache-path", str(workdir / "module-cache"),
-        "-o", str(binary), str(source),
+        "-o", str(binary), str(source), str(bundle_shim),
         str(repo / "Sources/OpenDicomViewer/Plugins/ResourceArbiter.swift"),
         str(repo / "Sources/OpenDicomViewer/Plugins/PluginTypes.swift"),
     ]
@@ -954,6 +994,15 @@ def arbitration_scenarios(manifest: dict) -> list[dict]:
     # result. Pinned here; the scenarios that ARE about the declaration read
     # `ts` live and are expected to track it.
     TS_PRE_CORRECTION = 3.5
+    # The figure commit de234fe corrected it to, from the thread-shim
+    # measurement. Raised again to 25.5 in October 2026, when the pipeline was
+    # measured with nnU-Net's worker processes running natively
+    # (exp3_totalseg_lowmem.py). The rows below that are about the 23.5
+    # correction, the oversized one-shot share, requester exclusion and Start
+    # Anyway are pinned here: read live at 25.5, the 32 GB rows would refuse on
+    # size before reaching the behaviour they test. The rows that track the
+    # current declaration read `ts` live and are grouped separately.
+    TS_CORRECTED = 23.5
 
     def residency(plugin_id: str, last_used: float = 0.0,
                   evictable: bool = True, ram_gb: float | None = None) -> dict:
@@ -980,8 +1029,12 @@ def arbitration_scenarios(manifest: dict) -> list[dict]:
          "residents": [residency("gemma-4-e4b")], "oneShot": True},
         # A plugin mid-request must block admission rather than be stopped
         # under the user.
+        # Pinned since the October 2026 re-run. Read live at 23.5 GB, the
+        # request was refused on size alone and never reached the busy
+        # resident it exists to test; at 3.5 the refusal can only come from
+        # Gemma being non-evictable (3.5 + 5.0 > 8 GiB).
         {"name": "16gb/busy-resident-is-not-evictable", "physicalGB": 16.0,
-         "request": {"id": "totalsegmentator", "ram": ts},
+         "request": {"id": "totalsegmentator", "ram": TS_PRE_CORRECTION},
          "residents": [residency("gemma-4-e4b", evictable=False)],
          "oneShot": True},
         # A session plugin holding open sessions is likewise non-evictable.
@@ -1111,17 +1164,114 @@ def arbitration_scenarios(manifest: dict) -> list[dict]:
         # than a smaller number.
         {"name": "16gb/totalseg-refused-on-corrected-declaration",
          "physicalGB": 16.0,
-         "request": {"id": "totalsegmentator", "ram": ts},
+         "request": {"id": "totalsegmentator", "ram": TS_CORRECTED},
          "residents": [], "oneShot": True},
-        {"name": "32gb/totalseg-refused-on-corrected-declaration",
+        #
+        # Superseded in part by the oversized one-shot share (commit f1dc1b6,
+        # ResourceArbiter.oneShotFraction = 0.75): a one-shot too large for
+        # half the machine is re-decided against three quarters of it. 23.5 GB
+        # then fits a 32 GB machine (24 GiB) and still not a 24 GB one
+        # (18 GiB). The 32 GB row was `32gb/totalseg-refused-on-corrected-
+        # declaration` until that change; it is renamed for what it now
+        # decides, and the old decision is kept in exp3_FINDINGS.md.
+        {"name": "24gb/totalseg-refused-on-corrected-declaration",
+         "physicalGB": 24.0,
+         "request": {"id": "totalsegmentator", "ram": TS_CORRECTED},
+         "residents": [], "oneShot": True},
+        {"name": "32gb/totalseg-admitted-on-corrected-declaration",
          "physicalGB": 32.0,
-         "request": {"id": "totalsegmentator", "ram": ts},
+         "request": {"id": "totalsegmentator", "ram": TS_CORRECTED},
          "residents": [], "oneShot": True},
         {"name": "48gb/totalseg-admitted-on-corrected-declaration",
          "physicalGB": 48.0,
-         "request": {"id": "totalsegmentator", "ram": ts},
+         "request": {"id": "totalsegmentator", "ram": TS_CORRECTED},
          "residents": [], "oneShot": True},
-    ]
+        # --- The oversized one-shot share ----------------------------------
+        # Under the 0.75 share an oversized job still has to make room: a
+        # resident Gemma is evicted (5.0 + 23.5 > 24 GiB), not squeezed in.
+        {"name": "32gb/totalseg-oversized-share-evicts-gemma",
+         "physicalGB": 32.0,
+         "request": {"id": "totalsegmentator", "ram": TS_CORRECTED},
+         "residents": [residency("gemma-4-e4b")], "oneShot": True},
+        # The larger share is for one-shots only. A resident server of the
+        # same size is still held to half the machine.
+        {"name": "32gb/oversized-server-gets-no-oneshot-share",
+         "physicalGB": 32.0,
+         "request": {"id": "hypothetical-server", "ram": TS_CORRECTED}, "residents": []},
+        # --- Requester exclusion -------------------------------------------
+        # By the time admission runs, the host has already marked the
+        # requesting one-shot busy, so it used to appear in its own resident
+        # set as a non-evictable job holding its declared peak: the request
+        # was charged twice (47 GB for a 23.5 GB job). The host now leaves the
+        # requester out (PluginRuntime.oneShotAdmissionResidents). This row is
+        # the set the host used to pass; `32gb/totalseg-admitted-on-corrected-
+        # declaration` is the set it passes now.
+        {"name": "32gb/totalseg-requester-charged-twice-before-fix",
+         "physicalGB": 32.0,
+         "request": {"id": "totalsegmentator", "ram": TS_CORRECTED},
+         "residents": [residency("totalsegmentator", evictable=False,
+                                 ram_gb=TS_CORRECTED)],
+         "oneShot": True},
+        # The exclusion stops at the requester: a second run of the same
+        # plugin genuinely in flight still holds its memory, so the host keeps
+        # it (busyCount > 1) and the arbiter refuses.
+        {"name": "48gb/second-totalseg-run-in-flight-refuses",
+         "physicalGB": 48.0,
+         "request": {"id": "totalsegmentator", "ram": TS_CORRECTED},
+         "residents": [residency("totalsegmentator", evictable=False,
+                                 ram_gb=TS_CORRECTED)],
+         "oneShot": True},
+        # --- Start Anyway ----------------------------------------------------
+        # A refusal now says which constraint failed. When the declared
+        # budget fits and only the live reading is short, the decision is
+        # refuseLiveHeadroom and the user may start anyway; a budget refusal
+        # is final. A 32 GB Mac with ordinary use rarely has 25.5 GB free, so
+        # this is the decision a 32 GB user most often meets for the default
+        # task.
+        {"name": "32gb-in-use/totalseg-start-anyway-offered",
+         "physicalGB": 32.0, "availableGB": 20.0,
+         "request": {"id": "totalsegmentator", "ram": TS_CORRECTED}, "residents": [],
+         "oneShot": True},
+        # Overriding applies the evictions the budget needs, not the ones made
+        # chasing headroom: Gemma is stopped because 5.0 + 23.5 > 24 GiB.
+        {"name": "32gb-in-use/start-anyway-applies-budget-evictions",
+         "physicalGB": 32.0, "availableGB": 20.0,
+         "request": {"id": "totalsegmentator", "ram": TS_CORRECTED},
+         "residents": [residency("gemma-4-e4b")], "oneShot": True},
+        # The budget refusal on 16 GB is not overridable however much memory
+        # happens to be free.
+        {"name": "16gb/totalseg-budget-refusal-not-overridable",
+         "physicalGB": 16.0, "availableGB": 15.0,
+         "request": {"id": "totalsegmentator", "ram": TS_CORRECTED}, "residents": [],
+         "oneShot": True},
+    ] + current_declaration_scenarios(manifest)
+
+
+def current_declaration_scenarios(manifest: dict) -> list[dict]:
+    """TotalSegmentator's tasks admitted on their current per-task figures.
+
+    Read from the manifest's per-task `ram_gb`, exactly as the host resolves
+    it (PluginDescriptor.declaredRAMGB), so these rows track the declaration
+    rather than pinning it: `total` at its native-multiprocessing figure and
+    `total_lowmem`, the one-export-worker variant sized to fit the 0.75
+    one-shot share of a 32 GB Mac.
+    """
+    plugin = next(p for p in manifest["plugins"] if p["id"] == "totalsegmentator")
+    declared = {t["id"]: t.get("ram_gb", plugin["ram_gb"]) for t in plugin["tasks"]}
+    rows = []
+    for task, label in (("total", "total"), ("total_lowmem", "lowmem")):
+        if task not in declared:
+            continue
+        request = {"id": "totalsegmentator", "ram": declared[task]}
+        rows += [{"name": f"{gb}gb/totalseg-{label}-on-current-declaration",
+                  "physicalGB": float(gb), "request": request, "residents": [],
+                  "oneShot": True}
+                 for gb in (16, 24, 32, 48)]
+        # A 32 GB Mac in ordinary use: what the user actually meets.
+        rows.append({"name": f"32gb-in-use/totalseg-{label}-on-current-declaration",
+                     "physicalGB": 32.0, "availableGB": 20.0, "request": request,
+                     "residents": [], "oneShot": True})
+    return rows
 
 
 # What each scenario must decide for the design's section 6 claims to hold.
@@ -1148,7 +1298,9 @@ ARBITRATION_EXPECTATIONS: dict[str, dict[str, Any]] = {
     # and this is what that implies.
     "16gb/oneshot-not-exempt-from-own-resident-sibling":
         {"decision": "evictThenAdmit", "evictions": ["totalsegmentator", "gemma-4-e4b"]},
-    "64gb-but-loaded/live-headroom-refuses": {"decision": "refuse", "evictions": []},
+    # `refuse` until commit 2ce3a9b split out the overridable refusal.
+    "64gb-but-loaded/live-headroom-refuses":
+        {"decision": "refuseLiveHeadroom", "evictions": [], "overridable": True},
     "16gb/refuses-what-cannot-fit-at-all": {"decision": "refuse", "evictions": []},
     "32gb/sam2-then-gemma": {"decision": "admit", "evictions": []},
     # Told the truth, the policy is correct: the running one-shot is
@@ -1173,10 +1325,54 @@ ARBITRATION_EXPECTATIONS: dict[str, dict[str, Any]] = {
     # machine before it is admissible at all.
     "16gb/totalseg-refused-on-corrected-declaration":
         {"decision": "refuse", "evictions": []},
-    "32gb/totalseg-refused-on-corrected-declaration":
+    "24gb/totalseg-refused-on-corrected-declaration":
         {"decision": "refuse", "evictions": []},
+    # Was `32gb/totalseg-refused-on-corrected-declaration` -> refuse, before
+    # the 0.75 one-shot share.
+    "32gb/totalseg-admitted-on-corrected-declaration":
+        {"decision": "admit", "evictions": []},
     "48gb/totalseg-admitted-on-corrected-declaration":
         {"decision": "admit", "evictions": []},
+    "32gb/totalseg-oversized-share-evicts-gemma":
+        {"decision": "evictThenAdmit", "evictions": ["gemma-4-e4b"]},
+    "32gb/oversized-server-gets-no-oneshot-share":
+        {"decision": "refuse", "evictions": []},
+    "32gb/totalseg-requester-charged-twice-before-fix":
+        {"decision": "refuse", "evictions": [], "overridable": False},
+    "48gb/second-totalseg-run-in-flight-refuses":
+        {"decision": "refuse", "evictions": [], "overridable": False},
+    "32gb-in-use/totalseg-start-anyway-offered":
+        {"decision": "refuseLiveHeadroom", "evictions": [], "overridable": True,
+         "overriddenDecision": "admit", "overriddenEvictions": []},
+    "32gb-in-use/start-anyway-applies-budget-evictions":
+        {"decision": "refuseLiveHeadroom", "evictions": [], "overridable": True,
+         "overriddenDecision": "evictThenAdmit",
+         "overriddenEvictions": ["gemma-4-e4b"]},
+    "16gb/totalseg-budget-refusal-not-overridable":
+        {"decision": "refuse", "evictions": [], "overridable": False},
+    # Current declarations: `total` 25.5 GB, `total_lowmem` 24.0 GB, against
+    # one-shot shares of 12, 18, 24 and 36 GiB.
+    "16gb/totalseg-total-on-current-declaration":
+        {"decision": "refuse", "evictions": [], "overridable": False},
+    "24gb/totalseg-total-on-current-declaration":
+        {"decision": "refuse", "evictions": [], "overridable": False},
+    "32gb/totalseg-total-on-current-declaration":
+        {"decision": "refuse", "evictions": [], "overridable": False},
+    "48gb/totalseg-total-on-current-declaration":
+        {"decision": "admit", "evictions": []},
+    "32gb-in-use/totalseg-total-on-current-declaration":
+        {"decision": "refuse", "evictions": [], "overridable": False},
+    "16gb/totalseg-lowmem-on-current-declaration":
+        {"decision": "refuse", "evictions": [], "overridable": False},
+    "24gb/totalseg-lowmem-on-current-declaration":
+        {"decision": "refuse", "evictions": [], "overridable": False},
+    "32gb/totalseg-lowmem-on-current-declaration":
+        {"decision": "admit", "evictions": []},
+    "48gb/totalseg-lowmem-on-current-declaration":
+        {"decision": "admit", "evictions": []},
+    "32gb-in-use/totalseg-lowmem-on-current-declaration":
+        {"decision": "refuseLiveHeadroom", "evictions": [], "overridable": True,
+         "overriddenDecision": "admit"},
 }
 
 
@@ -1219,12 +1415,12 @@ def phase_arbitration(recorder: Recorder, repo: Path, manifest: dict,
             ok, error = True, None
             notes.append("no expectation declared; recorded as observation")
         else:
-            matches = (decision["decision"] == expected["decision"]
-                       and decision["evictions"] == expected["evictions"])
+            matches = all(decision.get(key) == value
+                          for key, value in expected.items())
             ok = matches
             error = None if matches else (
-                f"expected {expected['decision']} {expected['evictions']}, "
-                f"got {decision['decision']} {decision['evictions']}")
+                f"expected {expected}, got "
+                f"{ {key: decision.get(key) for key in expected} }")
             notes.append(f"expected={expected['decision']} {expected['evictions']}")
 
         recorder.write(CaseResult(
@@ -1487,8 +1683,10 @@ def write_summary(results_path: Path, manifest: dict, csv_path: Path) -> None:
     if arbitration:
         arb_path = csv_path.with_name(csv_path.stem + "_arbitration.csv")
         fields = ["scenario", "decision", "evictions", "admitted", "matches_design",
-                  "declaredBudgetGB", "liveHeadroomGB", "residentDemandGB",
-                  "refusalRequiredGB", "refusalAvailableGB", "divergence"]
+                  "overridable", "overriddenDecision", "overriddenEvictions",
+                  "declaredBudgetGB", "oneShotBudgetGB", "liveHeadroomGB",
+                  "residentDemandGB", "refusalRequiredGB", "refusalAvailableGB",
+                  "divergence"]
         with open(arb_path, "w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
@@ -1500,6 +1698,11 @@ def write_summary(results_path: Path, manifest: dict, csv_path: Path) -> None:
                     "evictions": ";".join(metrics.get("evictions", [])),
                     "admitted": metrics.get("admitted"),
                     "matches_design": row["ok"],
+                    "overridable": metrics.get("overridable"),
+                    "overriddenDecision": metrics.get("overriddenDecision"),
+                    "overriddenEvictions": ";".join(
+                        metrics.get("overriddenEvictions") or []),
+                    "oneShotBudgetGB": metrics.get("oneShotBudgetGB"),
                     "declaredBudgetGB": metrics.get("declaredBudgetGB"),
                     "liveHeadroomGB": metrics.get("liveHeadroomGB"),
                     "residentDemandGB": metrics.get("residentDemandGB"),

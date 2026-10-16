@@ -77,10 +77,12 @@ output kind for future overlapping-structure adapters, not as an active bug.
 
 ## 4. Resources and arbitration
 
-**Claim:** the memory arbiter behaves as designed. **Result:** it does — 20
-scenarios, 0 mismatches, audited against the shipped Swift type rather than a
-restatement of it, covering eviction order, non-evictability of busy and
-session-holding plugins, the exact-budget boundary, and live-headroom refusal.
+**Claim:** the memory arbiter behaves as designed. **Result:** it does — 38
+scenarios, 0 mismatches (was 20/20 before the October 2026 admission changes),
+audited against the shipped Swift type rather than a restatement of it,
+covering eviction order, non-evictability of busy and session-holding plugins,
+the exact-budget boundary, live-headroom refusal and its "Start Anyway"
+override, the 0.75 share for oversized one-shots, and requester exclusion.
 
 **And that is the problem.** The policy answers correctly the question it is
 asked, and the question is a manifest declaration. TotalSegmentator declared
@@ -99,6 +101,20 @@ scenarios that were admitted before and refused now are the paper's argument for
 **auditing declared resources rather than trusting them** — invariant 4 of the
 protocol says a plugin that under-declares is starved rather than allowed to
 thrash, and this is what enforcing it actually requires.
+
+**Re-measured with real worker processes (October 2026).** The figures above
+ran nnU-Net under a thread substitution, so they are one process. Run as the
+host runs it, the export pool's workers are alive through the inference peak,
+and the process-tree peak over five series reaches **25.41 GB** (was 22.70 GB
+single-process; the per-process figure reproduces at 23.1–23.7 GB). The `total`
+declaration is therefore raised 23.5 → **25.5 GB**. Of TotalSegmentator's
+low-memory settings, `force_split` raises the peak (up to 26.3 GB) and only a
+single export worker lowers it, to **23.78 GB** at 1.3–1.7× the wall time; that
+is shipped as a `total_lowmem` task declared at **24.0 GB**, which the arbiter's
+0.75 one-shot share admits on a 32 GB Mac where `total` is now refused. On a
+16 GB Mac neither fits; the peak is CPU inference itself and is unchanged by
+thread count or grid size. Details: `eval/results/exp3_FINDINGS.md`,
+"Low-memory settings".
 
 One figure is worth stating separately: 71.2 s is the sum of the adapter's own
 stages and 76.4 s the whole subprocess. The 5.2 s gap is interpreter startup plus

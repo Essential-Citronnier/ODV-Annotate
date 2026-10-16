@@ -26,6 +26,10 @@ about *what* a plugin does while staying defensible about *what it may touch*.
    and disk footprint in the manifest. The host's arbiter uses these numbers to
    decide what may run concurrently; a plugin that under-declares will be
    starved or refused, not silently allowed to thrash the machine.
+   The figure is the peak of the whole process tree -- an adapter whose
+   framework spawns worker processes declares their memory too -- measured as
+   the host runs it, and rounded up to the next 0.5 GB. Where a task's
+   footprint differs materially from the plugin's, it carries its own `ram_gb`.
 5. **Research use.** No plugin output is a diagnosis. The host stamps every
    result surface with a research-use disclaimer; a plugin must not claim
    clinical validity in its own strings.
@@ -75,7 +79,8 @@ Nothing stays resident. Suits heavyweight models used rarely, where holding the
 weights in memory between uses would be wasteful or would collide with a
 resident engine.
 
-*Example: TotalSegmentator — minutes per study, run once, ~2–3 GB peak.*
+*Example: TotalSegmentator — minutes per study, run once, ~24–25 GB peak on CPU
+(measured; see `eval/results/exp3_FINDINGS.md`).*
 
 - Host spawns with CLI arguments, streams progress from stdout, waits for exit.
 - Exit code 0 means the declared output files exist and are valid.
