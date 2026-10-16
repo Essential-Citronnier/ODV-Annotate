@@ -124,7 +124,19 @@ final class ViewerLeftoverTests: XCTestCase {
         // Clamping: a slab at the first slice only reaches forward
         let engine = MPREngine(volume: makeVolume(width: 2, height: 2, depth: depth) { _, _, _ in 0 })
         XCTAssertEqual(engine.slabRange(center: 0, thickness: 4), 0...2)
-        XCTAssertEqual(engine.slabRange(center: 19, thickness: 4), 17...19)
+        XCTAssertEqual(engine.slabRange(center: 19, thickness: 4), 18...19)
+    }
+
+    /// The toolbar shows the thickness as a number of slices: an interior slab
+    /// must project exactly that many (it projected one more for even counts).
+    func testInteriorSlabSpansExactlyThicknessSlices() {
+        let engine = MPREngine(volume: makeVolume(width: 2, height: 2, depth: 40) { _, _, _ in 0 })
+        for thickness in 1...12 {
+            XCTAssertEqual(engine.slabRange(center: 20, thickness: thickness)?.count, thickness,
+                           "thickness \(thickness)")
+        }
+        XCTAssertEqual(engine.slabRange(center: 20, thickness: 10), 16...25)
+        XCTAssertEqual(engine.slabRange(center: 20, thickness: 5), 18...22)
     }
 
     func testReadoutMatchesCPUProjectionPixels() {

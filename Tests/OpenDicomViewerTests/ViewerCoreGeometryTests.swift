@@ -167,7 +167,7 @@ final class ViewerCoreGeometryTests: XCTestCase {
 
     func testAverageSlabOfMixedSignsRounds() {
         let vol = makeVolume(width: 1, height: 1, depth: 3) { _, _, z in [-1000, 20000, 20001][z] }
-        let slab = MPREngine(volume: vol).axialSlabProjection(mode: .average, slabCenter: 1, slabThickness: 2)!
+        let slab = MPREngine(volume: vol).axialSlabProjection(mode: .average, slabCenter: 1, slabThickness: 3)!
         let v = slab.pixelData.withUnsafeBytes { $0.load(as: Int16.self) }
         XCTAssertEqual(v, 13000)
     }

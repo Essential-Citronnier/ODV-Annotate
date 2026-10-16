@@ -878,10 +878,13 @@ extension MPREngine {
     /// Axial slice range a slab covers (clamped to the volume), or nil.
     /// The one slab definition shared by the CPU projection, the GPU
     /// projection (through `gpuSlab`) and the cursor readout.
+    /// `thickness` is a slice count, so an unclamped slab spans exactly that
+    /// many slices; an even count puts the extra slice after the centre.
     func slabRange(center: Int, thickness: Int) -> ClosedRange<Int>? {
-        let halfSlab = thickness / 2
-        let zStart = max(0, center - halfSlab)
-        let zEnd = min(volume.depth - 1, center + halfSlab)
+        let count = max(1, thickness)
+        let first = center - (count - 1) / 2
+        let zStart = max(0, first)
+        let zEnd = min(volume.depth - 1, first + count - 1)
         return zStart <= zEnd ? zStart...zEnd : nil
     }
 

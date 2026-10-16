@@ -162,8 +162,9 @@ def run_install(argv: list[str], defects: Defects, manual: bool = False) -> int:
     if not defects.weight_hook_rejects_flags:
         # THE VIOLATION, when set: an adapter that only tolerates the subset of
         # section 4b flags its own manifest happens to use breaks the moment
-        # that manifest gains a `--repo` or a `--task`.
+        # that manifest gains a `--repo`, a `--revision` or a `--task`.
         parser.add_argument("--repo", default=None)
+        parser.add_argument("--revision", default=None)
         parser.add_argument("--task", default=None)
     args = parser.parse_args(argv)
     if defects.weight_hook_rejects_flags:
