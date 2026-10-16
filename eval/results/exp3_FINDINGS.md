@@ -445,6 +445,14 @@ next 0.5 GB — how 23.23 GB became 23.5 in `de234fe`):
 | `total` (plugin figure too) | 23.5 | **25.5** | 25.41 GB tree peak |
 | `total_lowmem` (new) | — | **24.0** | 23.78 GB tree peak |
 
+**Units.** Measured figures in this document are decimal GB (10^9 bytes); the
+arbiter reads `ram_gb` as GiB (2^30 bytes, the unit it divides
+`physicalMemory` into). The rule above was applied to decimal figures, so the
+declarations carry extra margin when read as GiB: 25.41 GB = 23.66 GiB against
+25.5 (1.84 GiB spare), 23.78 GB = 22.15 GiB against 24.0 (1.85 GiB spare).
+Applied in GiB, the same rule would give 24.0 for `total` and 22.5 for
+`total_lowmem`. See PLUGIN_PROTOCOL.md, invariant 4.
+
 `total` was under-declared by about 1.9 GB for the pipeline as the host really
 runs it; the 23.5 figure was correct only for the thread-shimmed single
 process it was measured on. `total_lowmem` is the same TotalSegmentator task
@@ -502,7 +510,8 @@ exclusion removed, a second run of the same plugin genuinely in flight (still
 refused), and Start Anyway applying only the evictions the budget needs.
 
 Finding 6's "admissible at roughly 47 GB" is superseded: with the 0.75 share,
-`total` needs 34 GB of physical memory and `total_lowmem` 32 GB.
+`total` needs 34 GiB of physical memory (in practice a 36 GB Mac) and
+`total_lowmem` 32 GiB.
 
 ## What could not be measured here, and what it would need
 

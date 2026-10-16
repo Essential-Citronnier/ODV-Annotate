@@ -44,8 +44,12 @@ temp.md
 *.p12
 *.cer
 
-# MLX server runtime
+# MLX server runtime (PID records and the setup lock, when the server's
+# venv sits beside it rather than in Application Support)
 mlx-server/.server.pid
+mlx-server/.odv-server*.pid
+mlx-server/.odv-setup*.lock
+mlx-server/.venv-*/
 
 # Cached Python standalone build (downloaded by package_app.sh)
 .cache/

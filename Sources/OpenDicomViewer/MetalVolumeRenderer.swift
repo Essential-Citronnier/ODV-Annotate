@@ -78,6 +78,10 @@ final class MetalVolumeRenderer {
 
         guard let texture = device.makeTexture(descriptor: desc) else {
             print("MetalVolumeRenderer: Failed to create 3D texture")
+            // Don't leave the previous volume's texture answering for this
+            // one: callers check currentVolumeUID / volumeTexture.
+            volumeTexture = nil
+            currentVolumeUID = nil
             return
         }
 

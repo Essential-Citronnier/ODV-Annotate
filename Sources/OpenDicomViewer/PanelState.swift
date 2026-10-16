@@ -150,7 +150,12 @@ enum AnnotationType {
 
 /// Identifies the exact pixels a panel displays, so an AI result computed on
 /// one slice is never drawn over another.
-struct AnnotationSlice: Equatable, Hashable {
+///
+/// Identity uses the Series Instance UID and, for 2D images, the SOP
+/// Instance UID: array indices shift while a folder scan re-sorts the series
+/// list, and a result keyed on them would jump to another image. The indices
+/// are only the fallback when no UIDs are known (e.g. in tests).
+struct AnnotationSlice: Hashable {
     let seriesIndex: Int
     let panelMode: PanelMode
     /// Image index (2D), voxel index (MPR) or slab centre (MIP).
@@ -159,6 +164,44 @@ struct AnnotationSlice: Equatable, Hashable {
     let frame: Int
     /// MIP slab thickness; 0 for other modes.
     let slab: Int
+    /// Series grouping key (Series Instance UID); "" when unknown.
+    let seriesUID: String
+    /// SOP Instance UID of the 2D image; "" for MPR/MIP or when unknown.
+    let instanceUID: String
+    /// MIP/MinIP/average for projection panels; nil otherwise.
+    let projectionMode: ProjectionMode?
+
+    init(seriesIndex: Int, panelMode: PanelMode, index: Int, frame: Int, slab: Int,
+         seriesUID: String = "", instanceUID: String = "", projectionMode: ProjectionMode? = nil) {
+        self.seriesIndex = seriesIndex
+        self.panelMode = panelMode
+        self.index = index
+        self.frame = frame
+        self.slab = slab
+        self.seriesUID = seriesUID
+        self.instanceUID = instanceUID
+        self.projectionMode = projectionMode
+    }
+
+    private struct Identity: Hashable {
+        let series: String
+        let panelMode: PanelMode
+        let position: String
+        let frame: Int
+        let slab: Int
+        let projectionMode: ProjectionMode?
+    }
+
+    private var identity: Identity {
+        Identity(series: seriesUID.isEmpty ? "#\(seriesIndex)" : seriesUID,
+                 panelMode: panelMode,
+                 position: panelMode == .slice2D && !instanceUID.isEmpty ? instanceUID : "#\(index)",
+                 frame: frame, slab: slab,
+                 projectionMode: panelMode == .mip ? projectionMode : nil)
+    }
+
+    static func == (lhs: AnnotationSlice, rhs: AnnotationSlice) -> Bool { lhs.identity == rhs.identity }
+    func hash(into hasher: inout Hasher) { hasher.combine(identity) }
 }
 
 struct Annotation: Identifiable {
@@ -266,6 +309,9 @@ class PanelState: ObservableObject, Identifiable {
     @Published var cursorPixelX: Int = 0
     @Published var cursorPixelY: Int = 0
     @Published var cursorHU: Double = 0
+    /// False when the pixel under the cursor has no value to read (no pixel
+    /// buffer); the readout then hides the value instead of showing 0.
+    @Published var cursorHasValue: Bool = false
     @Published var cursorPatientX: Double = 0
     @Published var cursorPatientY: Double = 0
     @Published var cursorPatientZ: Double = 0
@@ -373,6 +419,7 @@ class PanelState: ObservableObject, Identifiable {
         cursorPixelX = 0
         cursorPixelY = 0
         cursorHU = 0
+        cursorHasValue = false
         cursorPatientX = 0
         cursorPatientY = 0
         cursorPatientZ = 0
@@ -407,19 +454,27 @@ class PanelState: ObservableObject, Identifiable {
         selectedAnnotationID = nil
     }
 
+    /// Supplies the Series/SOP Instance UIDs of what the panel shows (set by
+    /// DICOMModel, which owns the series list).
+    var sliceUIDs: ((PanelState) -> (series: String, instance: String))? = nil
+
     /// The slice currently on screen, for binding and filtering annotations.
     var currentSlice: AnnotationSlice {
+        let uids = sliceUIDs?(self) ?? (series: "", instance: "")
         switch panelMode {
         case .slice2D:
             return AnnotationSlice(seriesIndex: seriesIndex, panelMode: panelMode,
                                    index: imageIndex,
-                                   frame: isMultiFrame ? currentFrameIndex : 0, slab: 0)
+                                   frame: isMultiFrame ? currentFrameIndex : 0, slab: 0,
+                                   seriesUID: uids.series, instanceUID: uids.instance)
         case .mprSagittal, .mprCoronal:
             return AnnotationSlice(seriesIndex: seriesIndex, panelMode: panelMode,
-                                   index: mprSliceIndex, frame: 0, slab: 0)
+                                   index: mprSliceIndex, frame: 0, slab: 0,
+                                   seriesUID: uids.series)
         case .mip:
             return AnnotationSlice(seriesIndex: seriesIndex, panelMode: panelMode,
-                                   index: mipSlabPosition, frame: 0, slab: mipSlabThickness)
+                                   index: mipSlabPosition, frame: 0, slab: mipSlabThickness,
+                                   seriesUID: uids.series, projectionMode: projectionMode)
         }
     }
 

@@ -61,7 +61,7 @@ class MultiFrameDecoder {
     /// Fragments making up each frame (one or more per frame)
     private var frameTable: [[(offset: Int, length: Int)]] = []
     private let isEncapsulated: Bool
-    private let isSigned: Bool
+    let isSigned: Bool
     private let isBigEndian: Bool
     private let pixelAttributes: DicomPixelAttributes
     private var dcmtkDecoder: DCMTKFrameDecoder?

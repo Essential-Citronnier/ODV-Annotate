@@ -256,11 +256,14 @@ If you choose **Not Now**, open the AI inspector (brain button) and press
 | Gemma plugin | 16 GB (on an 8 GB Mac, use the built-in engine) | 16 GB |
 | SAM 2 plugin | 8 GB (declares 3 GB) | 16 GB |
 | SAM 3 plugin | 16 GB (declares 6 GB) | 16 GB |
-| TotalSegmentator plugin | 32 GB (declares 23.5 GB) | 32 GB or more |
+| TotalSegmentator plugin, Total task | 36 GB (declares 25.5 GB) | 48 GB or more |
+| TotalSegmentator plugin, Total low-memory task | 32 GB (declares 24.0 GB; takes up to about twice as long) | 48 GB or more |
 
 The Plugin Store shows a plugin as unavailable when its declared memory is more
 than half of the Mac's RAM (three quarters for TotalSegmentator, which runs
-once and exits).
+once and exits). On a 32 GB Mac only TotalSegmentator's low-memory task is
+offered; its other tasks need 36 GB. If other apps are using a lot of memory,
+the app may ask before starting a run, and offers **Start Anyway**.
 
 ### Network use
 

@@ -7,7 +7,8 @@
 # guessed.
 #
 # exp3_resources.py established the default `total` (fast, 3 mm) figure at
-# 21.4-23.2 GB and the manifest declares 23.5 GB from it. That keeps the plugin
+# 21.4-23.2 GB and the manifest declared 23.5 GB from it (25.5 after this
+# experiment; see exp3_FINDINGS.md). That keeps the plugin
 # off every 16-32 GB Mac. TotalSegmentator exposes settings that trade time for
 # memory -- `force_split` (segment the volume in three overlapping z-slabs) and
 # the resampling/saving thread counts -- and this script measures each of them
@@ -40,8 +41,7 @@
 #
 # These are per-process-tree measurements, not system-wide ones, so other work
 # on the machine does not enter them. It can still slow them down, which is
-# why each case records the load average and the heaviest other processes at
-# its start.
+# why each case records the load average at its start.
 # Licensed under the MIT License. See LICENSE for details.
 """Peak memory and wall time of TotalSegmentator's low-memory settings."""
 
@@ -304,27 +304,16 @@ def run_measured(argv: list[str], cwd: Path, env: dict[str, str],
 
 
 def contention_snapshot() -> dict[str, Any]:
-    """Load and the heaviest other processes, at the start of a case.
+    """Load average at the start of a case.
 
     Recorded because this machine is shared with other heavy jobs. They do not
-    enter a per-tree memory figure, but they do stretch wall time.
+    enter a per-tree memory figure, but they do stretch wall time. Earlier
+    versions also listed the heaviest other processes by name; that recorded
+    other applications' names in a published file and was dropped (the names
+    were scrubbed from the existing results). Load average carries the part
+    that matters for reading wall times.
     """
-    heavy: list[dict[str, Any]] = []
-    try:
-        out = subprocess.run(["ps", "-Ao", "rss=,pcpu=,comm="], capture_output=True,
-                             text=True, timeout=10).stdout
-        rows = []
-        for line in out.splitlines():
-            parts = line.split(None, 2)
-            if len(parts) == 3:
-                rows.append((int(parts[0]), float(parts[1]), parts[2]))
-        for rss, cpu, comm in sorted(rows, reverse=True)[:3]:
-            heavy.append({"rss_gb": round(rss * 1024 / 1e9, 2), "cpu_pct": cpu,
-                          "command": Path(comm).name[:60]})
-    except Exception:  # noqa: BLE001 -- context, not a measurement
-        pass
-    return {"loadavg": [round(x, 2) for x in os.getloadavg()],
-            "heaviest_other_processes": heavy}
+    return {"loadavg": [round(x, 2) for x in os.getloadavg()]}
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +604,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.summary_only:
         paths = EvalPaths(args.env_root or repo / ".eval/plugin-envs")
         manifest = load_manifest(repo)
-        recorder = Recorder(results, EXPERIMENT)
+        recorder = Recorder(results, EXPERIMENT,
+                            target_python=paths.venv_python(PLUGIN_ID))
         env = adapter_environment(paths, PLUGIN_ID, repo)
         # What the host sets; the adapter resolves TOTALSEG_HOME_DIR from it.
         env["ODV_WEIGHTS_DIR"] = str(paths.weights_root(PLUGIN_ID))

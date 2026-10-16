@@ -153,6 +153,8 @@ extension DICOMModel {
     /// Add a click prompt at a pixel location in the panel's image.
     func addPromptPoint(_ pixel: CGPoint, isForeground: Bool, for panel: PanelState) {
         guard let session = promptSession(for: panel) else {
+            // Nothing for the inspector's Retry to repeat.
+            panel.lastAIAction = .none
             panel.aiError = "Install a promptable segmentation plugin "
                 + "(SAM 2 or SAM 3) from the Plugin Store first."
             return
@@ -172,6 +174,8 @@ extension DICOMModel {
     /// Submit a box prompt covering a pixel-space rect.
     func addPromptBox(_ rect: CGRect, for panel: PanelState) {
         guard let session = promptSession(for: panel) else {
+            // Nothing for the inspector's Retry to repeat.
+            panel.lastAIAction = .none
             panel.aiError = "Install a promptable segmentation plugin "
                 + "(SAM 2 or SAM 3) from the Plugin Store first."
             return
@@ -226,6 +230,8 @@ extension DICOMModel {
     /// translucent overlays of the same structure.
     private func applyPromptMask(_ mask: PluginMask2D, to panel: PanelState) {
         guard let decoded = mask.decodeMask() else {
+            // Nothing for the inspector's Retry to repeat.
+            panel.lastAIAction = .none
             panel.aiError = "The plugin returned a malformed mask."
             return
         }
@@ -235,6 +241,8 @@ extension DICOMModel {
         }
         let bounds = Self.maskBounds(decoded, width: mask.width, height: mask.height)
         guard bounds.width > 0, bounds.height > 0 else {
+            // Nothing for the inspector's Retry to repeat.
+            panel.lastAIAction = .none
             panel.aiError = "The prompt produced an empty mask."
             return
         }

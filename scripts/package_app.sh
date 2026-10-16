@@ -4,6 +4,7 @@
 # Use --notarize to sign with Developer ID and notarize with Apple.
 # Licensed under the MIT License. See LICENSE for details.
 set -e
+set -o pipefail
 
 # EXECUTABLE_NAME: Swift target name (must match Package.swift)
 EXECUTABLE_NAME="OpenDicomViewer"
@@ -300,17 +301,24 @@ PYTHON_ENTITLEMENTS="scripts/Python.entitlements"
 if $NOTARIZE; then
     echo "Code signing with Developer ID..."
 
+    # The loops below read find's output through process substitution, not a
+    # pipe: a `find | while` body runs in a subshell, where a failed codesign
+    # (or an `exit`) ends only the subshell and the build went on to notarize
+    # a bundle with unsigned code in it. Each failure now stops the build.
+
     # 1) Sign all shared libraries inside bundled Python (innermost first)
     echo "  Signing bundled Python shared libraries..."
-    find "${RESOURCES_DIR}/python" -type f \( -name "*.so" -o -name "*.dylib" \) | while read -r lib; do
-        codesign --force --timestamp --options runtime --sign "${SIGNING_IDENTITY}" "$lib"
-    done
+    while IFS= read -r -d '' lib; do
+        codesign --force --timestamp --options runtime --sign "${SIGNING_IDENTITY}" "$lib" \
+            || { echo "ERROR: codesign failed for ${lib}" >&2; exit 1; }
+    done < <(find "${RESOURCES_DIR}/python" -type f \( -name "*.so" -o -name "*.dylib" \) -print0)
 
     # 2) Sign Python executables with the Python-only entitlements
     echo "  Signing bundled Python executables..."
-    find "${RESOURCES_DIR}/python/bin" -type f -perm +111 ! -name "*.py" | while read -r bin; do
-        codesign --force --timestamp --options runtime --entitlements "${PYTHON_ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "$bin"
-    done
+    while IFS= read -r -d '' bin; do
+        codesign --force --timestamp --options runtime --entitlements "${PYTHON_ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "$bin" \
+            || { echo "ERROR: codesign failed for ${bin}" >&2; exit 1; }
+    done < <(find "${RESOURCES_DIR}/python/bin" -type f -perm +111 ! -name "*.py" -print0)
 
     # 3) Sign the main app executable with the app entitlements
     codesign --force --timestamp --options runtime --entitlements "${APP_ENTITLEMENTS}" --sign "${SIGNING_IDENTITY}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
@@ -339,8 +347,10 @@ notarize() {
         --keychain-profile "${NOTARY_PROFILE}" \
         --wait 2>&1)" || failed=1
     echo "${output}"
-    id="$(echo "${output}" | awk '/^ *id:/ {print $2; exit}')"
-    if [ -n "${failed}" ] || ! echo "${output}" | grep -q "status: Accepted"; then
+    # Here-strings rather than `echo | ...`: under pipefail, a reader that
+    # stops early (awk's exit, grep -q) could fail the pipeline with SIGPIPE.
+    id="$(awk '/^ *id:/ {print $2; exit}' <<< "${output}")"
+    if [ -n "${failed}" ] || ! grep -q "status: Accepted" <<< "${output}"; then
         echo "ERROR: notarization of ${target} failed." >&2
         if [ -n "${id}" ]; then
             echo "Notary log for submission ${id}:" >&2

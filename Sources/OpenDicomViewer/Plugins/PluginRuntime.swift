@@ -452,13 +452,36 @@ final class PluginRuntime: ObservableObject {
 
     private func refreshInstallStates() {
         var states: [PluginTaskRef: PluginInstallState] = [:]
+        var stale: Set<PluginTaskRef> = []
         for plugin in manifest.plugins {
+            var venvCurrent: Bool?
             for task in plugin.tasks {
                 let ref = PluginTaskRef(pluginID: plugin.id, taskID: task.id)
                 states[ref] = store.state(for: ref)
+                // Demoted at launch because an update changed the adapter's
+                // requirements: the record keeps its venv path, the venv is
+                // still there, it just no longer matches.
+                if let record = store.record(for: ref), record.phase == .notInstalled,
+                   let venv = record.venvPath, FileManager.default.fileExists(atPath: venv) {
+                    if venvCurrent == nil { venvCurrent = installer.venvMatchesRequirements(plugin) }
+                    if venvCurrent == false { stale.insert(ref) }
+                }
             }
         }
+        reinstallNeeded = stale
         installStates = states
+    }
+
+    /// Tasks an update demoted because their dependencies changed, whose venv
+    /// and weights are still on disk. Kept apart from `.notInstalled` so the
+    /// AI buttons can say "needs reinstalling" instead of acting as if the
+    /// plugin had never been installed. See `needsReinstall`.
+    private(set) var reinstallNeeded: Set<PluginTaskRef> = []
+
+    /// Whether `ref` is not installed only because an app update changed its
+    /// dependencies; reinstalling reuses the downloaded weights.
+    func needsReinstall(_ ref: PluginTaskRef) -> Bool {
+        installState(ref) == .notInstalled && reinstallNeeded.contains(ref)
     }
 
     // MARK: Accessors
@@ -705,6 +728,13 @@ final class PluginRuntime: ObservableObject {
         // A process left over from a failed or wedged start is not ours to
         // reuse; clear it before admission counts it.
         if processes[pluginID] != nil { await stop(pluginID, cancelStart: false) }
+
+        // The arbiter's share of a Mac below 12 GB can never hold Gemma; say
+        // why in words, and where to go instead, not as a bare GB figure.
+        if pluginID == AIAnalysisEngine.pluginID,
+           let reason = GemmaPluginSupport.unsupportedReason(physicalGB: arbiter.probe().physicalGB) {
+            throw PluginError.notReady(reason)
+        }
 
         // e.g. stop the built-in AI server before the Gemma plugin loads the
         // same model, whatever the memory arithmetic says.

@@ -1361,7 +1361,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     stages = [s.strip() for s in args.stages.split(",") if s.strip()]
-    recorder = Recorder(args.results, EXPERIMENT)
+    recorder = Recorder(args.results, EXPERIMENT, target_python=args.python)
     done = recorder.done_case_ids()
 
     series = ([Path(p) for p in args.series] if args.series

@@ -43,10 +43,11 @@ from _shared.coerce import (  # noqa: E402
     coerce_findings,
     coerce_text,
     extract_json,
+    raw_corners,
 )
 from _shared.errors import describe_failure  # noqa: E402
 from _shared.lifeline import start_parent_watch  # noqa: E402
-from _shared.vlm import generate_text  # noqa: E402
+from _shared.vlm import GenerationCancelled, generate_text  # noqa: E402
 from _shared.weights import (  # noqa: E402
     WEIGHTS_DIR_ENV,
     adopt_snapshot,
@@ -165,10 +166,13 @@ Return multiple bounding_boxes, one per structure.""",
 
 DEFAULT_ANALYZE_MODE = "clinical"
 
+# The ROI is drawn onto the image as a red rectangle (mark_roi) and the prompt
+# points at it: coordinates alone were not something the model could locate,
+# so it described the whole slice. Same text as mlx-server's; a test checks.
 DESCRIBE_ROI_PROMPT_TEMPLATE = """\
-Describe the highlighted region in this medical image.
-The region of interest is marked at normalized coordinates: \
-x={x:.3f}, y={y:.3f}, width={w:.3f}, height={h:.3f}.
+Describe the region of interest outlined by the red rectangle in this medical image.
+Its normalized coordinates are x={x:.3f}, y={y:.3f}, width={w:.3f}, height={h:.3f}.
+Describe only what is inside the rectangle; the red outline itself is not part of the image.
 Context: {context}
 
 Respond in this exact JSON format:
@@ -276,9 +280,16 @@ class GemmaModel:
             return
         logger.info("Model loaded in %.1fs", time.time() - started)
 
-    def generate(self, image, prompt: str) -> str:
+    def generate(self, image, prompt: str,
+                 cancel: threading.Event | None = None) -> str:
+        """Serialized generation; raises GenerationCancelled once `cancel` is set.
+
+        `cancel` is set by the serve layer when the host disconnects (its
+        timeout fired, or the user retried), so an abandoned run gives the
+        model back between tokens instead of holding it to completion.
+        """
         return generate_text(self._model, self._processor, SYSTEM_PROMPT, prompt, image,
-                             self._lock, max_tokens=MAX_TOKENS,
+                             self._lock, cancel, max_tokens=MAX_TOKENS,
                              temperature=TEMPERATURE, top_p=TOP_P)
 
     def memory_mb(self) -> float | None:
@@ -308,6 +319,42 @@ def decode_image(data: bytes):
         scale = MAX_IMAGE_SIZE / max(width, height)
         image = image.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
     return image
+
+
+def mark_roi(image, roi: tuple[float, float, float, float]):
+    """Return a copy of `image` with the normalized ROI outlined in red.
+
+    Ported from mlx-server's _mark_roi so both engines show the model the
+    same picture for the same request.
+    """
+    from PIL import ImageDraw
+
+    x, y, w, h = roi
+    width, height = image.size
+    marked = image.copy()
+    draw = ImageDraw.Draw(marked)
+    line = max(2, round(max(width, height) / 300))
+    draw.rectangle(
+        [x * width, y * height, (x + w) * width, (y + h) * height],
+        outline=(255, 0, 0), width=line,
+    )
+    return marked
+
+
+def coerce_roi(roi) -> tuple[float, float, float, float]:
+    """Validate a requested ROI the way mlx-server does; bad_input otherwise."""
+    corners = raw_corners({"x": roi.x, "y": roi.y,
+                           "width": roi.width, "height": roi.height})
+    boxes = [] if corners is None else coerce_boxes(
+        [{"x": corners[0], "y": corners[1],
+          "width": corners[2] - corners[0], "height": corners[3] - corners[1]}])
+    if not boxes or max(abs(v) for v in corners) > 1.0 + 1e-3:
+        raise PluginError(
+            ErrorCode.BAD_INPUT, "roi must be a non-empty normalized (0-1) rectangle",
+            recoverable=False,
+        )
+    box = boxes[0]
+    return box["x"], box["y"], box["width"], box["height"]
 
 
 # Model output is parsed by _shared/coerce.py, the same code the built-in
@@ -399,21 +446,23 @@ class GemmaAdapter:
         if not self.model.is_ready:
             raise PluginError(ErrorCode.NOT_READY, "The model is still loading.")
 
-    def run_task(self, task_id: str, request: TaskRequest) -> dict:
+    def run_task(self, task_id: str, request: TaskRequest,
+                 cancel: threading.Event | None = None) -> dict:
         self._require_ready()
         if task_id == "analyze":
-            return self.analyze(request)
+            return self.analyze(request, cancel)
         if task_id == "describe-roi":
-            return self.describe_roi(request)
+            return self.describe_roi(request, cancel)
         if task_id == "detect-abnormalities":
-            return self.detect_abnormalities(request)
+            return self.detect_abnormalities(request, cancel)
         raise PluginError(
             ErrorCode.BAD_INPUT, f"unknown task '{task_id}'", recoverable=False
         )
 
     # -- tasks -------------------------------------------------------------
 
-    def analyze(self, request: TaskRequest) -> dict:
+    def analyze(self, request: TaskRequest,
+                cancel: threading.Event | None = None) -> dict:
         image = decode_image(request.slice2d_bytes())
         mode_key = request.option_enum("mode", list(ANALYZE_MODES), DEFAULT_ANALYZE_MODE)
         # `text` carries whatever clinical context the host has: modality,
@@ -427,27 +476,29 @@ class GemmaAdapter:
             json_format=ANALYZE_JSON_FORMAT,
         )
 
-        raw = self.model.generate(image, prompt)
+        raw = self.model.generate(image, prompt, cancel)
         return build_analyze_outputs(raw, image.size)
 
-    def describe_roi(self, request: TaskRequest) -> dict:
-        image = decode_image(request.slice2d_bytes())
-        roi = request.rect("roi", required=True)
+    def describe_roi(self, request: TaskRequest,
+                     cancel: threading.Event | None = None) -> dict:
+        roi = coerce_roi(request.rect("roi", required=True))
+        image = mark_roi(decode_image(request.slice2d_bytes()), roi)
         prompt = DESCRIBE_ROI_PROMPT_TEMPLATE.format(
-            x=roi.x, y=roi.y, w=roi.width, h=roi.height,
-            context=request.text(),
+            x=roi[0], y=roi[1], w=roi[2], h=roi[3],
+            context=request.text() or "none",
         )
 
-        raw = self.model.generate(image, prompt)
+        raw = self.model.generate(image, prompt, cancel)
         return build_roi_outputs(raw)
 
-    def detect_abnormalities(self, request: TaskRequest) -> dict:
+    def detect_abnormalities(self, request: TaskRequest,
+                             cancel: threading.Event | None = None) -> dict:
         image = decode_image(request.slice2d_bytes())
         prompt = DETECT_ABNORMALITIES_PROMPT_TEMPLATE.format(
             modality=request.text(default="Unknown") or "Unknown"
         )
 
-        raw = self.model.generate(image, prompt)
+        raw = self.model.generate(image, prompt, cancel)
         return build_abnormality_outputs(raw, image.size)
 
 
@@ -467,7 +518,21 @@ def attach_legacy_routes(app, adapter: GemmaAdapter) -> None:
     from fastapi import Request
     from fastapi.responses import JSONResponse
 
+    from _shared.serve import CANCELLED_STATUS, run_cancellable
+
+    def takes_request(handler):
+        # This module uses `from __future__ import annotations`, so FastAPI
+        # resolves `request: Request` through the module's globals, where the
+        # function-local import above is invisible: the body was reinterpreted
+        # as a required query parameter and every legacy POST answered 422.
+        # Binding the real class here keeps fastapi out of module scope.
+        handler.__annotations__["request"] = Request
+        return handler
+
     def _fail(exc: BaseException) -> JSONResponse:
+        if isinstance(exc, GenerationCancelled):
+            return JSONResponse(status_code=CANCELLED_STATUS,
+                                content={"detail": "Request cancelled"})
         if isinstance(exc, PluginError):
             return JSONResponse(status_code=400 if exc.code is ErrorCode.BAD_INPUT else 503,
                                 content={"detail": exc.message})
@@ -482,6 +547,7 @@ def attach_legacy_routes(app, adapter: GemmaAdapter) -> None:
         }
 
     @app.post("/analyze")
+    @takes_request
     async def legacy_analyze(request: Request):
         body = await request.json()
         info = body.get("window_info") or {}
@@ -495,13 +561,15 @@ def attach_legacy_routes(app, adapter: GemmaAdapter) -> None:
         })
         try:
             adapter._require_ready()
-            outputs = adapter.analyze(envelope)
+            # Off the event loop, and cancelled if the client hangs up.
+            outputs = await run_cancellable(request, adapter.analyze, envelope)
         except BaseException as exc:  # noqa: BLE001
             return _fail(exc)
         return {"findings": [], "bounding_boxes": outputs["bbox"],
                 "description": outputs["text"]}
 
     @app.post("/describe-roi")
+    @takes_request
     async def legacy_describe_roi(request: Request):
         body = await request.json()
         envelope = TaskRequest({"inputs": {"slice2d": body.get("image"),
@@ -509,19 +577,20 @@ def attach_legacy_routes(app, adapter: GemmaAdapter) -> None:
                                            "text": body.get("context", "")}})
         try:
             adapter._require_ready()
-            outputs = adapter.describe_roi(envelope)
+            outputs = await run_cancellable(request, adapter.describe_roi, envelope)
         except BaseException as exc:  # noqa: BLE001
             return _fail(exc)
         return {"label": "", "description": outputs["text"], "confidence": 0.0}
 
     @app.post("/detect-abnormalities")
+    @takes_request
     async def legacy_detect(request: Request):
         body = await request.json()
         envelope = TaskRequest({"inputs": {"slice2d": body.get("image"),
                                            "text": body.get("modality", "Unknown")}})
         try:
             adapter._require_ready()
-            outputs = adapter.detect_abnormalities(envelope)
+            outputs = await run_cancellable(request, adapter.detect_abnormalities, envelope)
         except BaseException as exc:  # noqa: BLE001
             return _fail(exc)
         return {"regions": outputs["bbox"]}

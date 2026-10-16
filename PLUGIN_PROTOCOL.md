@@ -30,6 +30,20 @@ about *what* a plugin does while staying defensible about *what it may touch*.
    framework spawns worker processes declares their memory too -- measured as
    the host runs it, and rounded up to the next 0.5 GB. Where a task's
    footprint differs materially from the plugin's, it carries its own `ram_gb`.
+
+   **Unit.** `ram_gb` and `disk_gb` are in **GiB (2^30 bytes)**, despite the
+   key names. The arbiter (`ResourceArbiter.swift`) divides
+   `ProcessInfo.physicalMemory` by 2^30 and compares the declaration with
+   that figure directly, so a "32 GB" Mac is 32.0 and its one-shot share
+   (0.75) is 24.0. Measurement tools commonly report decimal gigabytes
+   (10^9 bytes; the `eval/` scripts do): divide bytes by 2^30, not 10^9,
+   before rounding. A peak of 25.41 × 10^9 bytes is 23.66 GiB.
+
+   The shipped declarations predate this note and were rounded from decimal
+   figures, so they read about 7% high as GiB: TotalSegmentator `total`
+   declares 25.5 against a measured 23.66 GiB (25.41 GB), `total_lowmem` 24.0
+   against 22.15 GiB (23.78 GB). The error is on the safe side (the plugin is
+   held back, never over-admitted).
 5. **Research use.** No plugin output is a diagnosis. The host stamps every
    result surface with a research-use disclaimer; a plugin must not claim
    clinical validity in its own strings.
@@ -79,8 +93,11 @@ Nothing stays resident. Suits heavyweight models used rarely, where holding the
 weights in memory between uses would be wasteful or would collide with a
 resident engine.
 
-*Example: TotalSegmentator — minutes per study, run once, ~24–25 GB peak on CPU
-(measured; see `eval/results/exp3_FINDINGS.md`).*
+*Example: TotalSegmentator — one to two and a half minutes per study on CPU, run once;
+process-tree peak up to 25.41 GB (23.66 GiB) for `total` and 23.78 GB
+(22.15 GiB) for `total_lowmem` (measured; see `eval/results/exp3_FINDINGS.md`).
+It ships CPU-only: the adapter leaves TotalSegmentator's device at its default,
+which uses CUDA when present and otherwise the CPU, never Apple's GPU.*
 
 - Host spawns with CLI arguments, streams progress from stdout, waits for exit.
 - Exit code 0 means the declared output files exist and are valid.
@@ -106,7 +123,7 @@ paths are returned.
 | Output kind | Transport | Host rendering |
 |---|---|---|
 | `text` | inline string | AI inspector panel |
-| `bbox` | inline list of normalized rects + label + confidence | annotation overlay |
+| `bbox` | inline list of normalized rects + label + confidence, optional severity | annotation overlay |
 | `mask2d` | inline RLE (see §5) over the slice grid | per-panel mask overlay |
 | `seg3d` | **path** to a binary DICOM SEG file referencing source SOP instances | existing DICOM SEG renderer |
 | `metrics` | inline JSON object of scalar values + units | metrics panel |
@@ -128,6 +145,29 @@ rather than choose one.
 
 All endpoints are on `http://127.0.0.1:<assigned port>`. Bodies are JSON.
 The server must bind to loopback only.
+
+**Caller check.** The host generates a random token for each runtime (32
+bytes, hex) and passes it to every resident adapter it spawns in
+`ODV_PLUGIN_TOKEN` (§4d). Every request the host sends, `/health` included,
+carries it in the `X-ODV-Token` header. When `ODV_PLUGIN_TOKEN` is set and
+non-empty, the server must, before routing any request:
+
+1. Refuse with **403** unless the `Host` header names loopback: `127.0.0.1`
+   or `localhost`, with or without a port (`_shared/serve.py` also accepts
+   `[::1]`). A missing `Host` is refused. This defeats DNS-rebinding pages,
+   which can reach a loopback port from a browser but cannot forge `Host`.
+2. Refuse with **401** unless `X-ODV-Token` equals the token, compared in
+   constant time. This keeps other local processes out.
+
+Both refusals use the error body below with code `bad_input` and
+`recoverable: false`. No CORS headers are sent. Started by hand without the
+variable (development, `plugins/conformance/`), an adapter stays open.
+`_shared.serve.build_app` implements this; an adapter built on it needs no code
+of its own. The built-in AI server (`mlx-server/server.py`) applies the same
+check unconditionally, with its own per-launch token taken from
+`ODV_AI_TOKEN` (generated and logged when unset), and answers
+`{"detail": ...}` rather than the protocol error body. It accepts IPv4
+loopback names only.
 
 ### `GET /health`
 
@@ -191,6 +231,14 @@ Response, on success (HTTP 200):
 ```
 
 Only the keys the task declared need be present.
+
+A `bbox` item may carry an optional `"severity"` string, for abnormality-style
+tasks: one of `normal`, `mild`, `moderate`, `severe`, `critical`
+(case-insensitive; anything else is read as `unknown`). The host draws a box
+with a severity as a finding coloured by it (green, yellow, orange, red, red;
+`unknown` grey, so an unrecognised value never looks benign), and a box without
+one as a labelled structure with its confidence. `_shared.coerce.coerce_severity`
+normalizes model output to this set.
 
 `mask2d` may be either a single object or a list of them. A list expresses
 candidate masks for one prompt — SAM's `multimask` output — ordered
@@ -320,6 +368,7 @@ inherits the host's environment plus:
 | `ODV_PARENT_PID` | the host's pid | Parent-death watch, below. |
 | `ODV_PLUGIN_LICENSE_KEY` | licence key | §4b; install hooks only, and only when the user entered one. |
 | `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | `1` | Servers and one-shots only (not install hooks): invariant 3, enforced. |
+| `ODV_PLUGIN_TOKEN` | per-runtime random token | Resident servers only (`resident-server`, `session`). Required in `X-ODV-Token` on every request; see §3, "Caller check". |
 
 **Weights are loaded from `ODV_WEIGHTS_DIR`, never from a guessed path or a hub
 id.** The host owns the on-disk layout and may change it; the variable is the

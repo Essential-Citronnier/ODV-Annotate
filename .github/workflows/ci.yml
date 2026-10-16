@@ -18,3 +18,46 @@ jobs:
 
       - name: Test
         run: swift test --arch arm64
+
+  python-tests:
+    # macOS like the app: the adapters and mlx-server target Apple Silicon.
+    # No test loads MLX or model weights -- mlx_vlm is stubbed where it is
+    # imported -- so only the web stack, Pillow and numpy are installed, pinned
+    # to the versions in mlx-server/requirements.txt.
+    runs-on: macos-15
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # The interpreter the app bundles (scripts/package_app.sh).
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            fastapi==0.139.0 starlette==1.6.0 uvicorn==0.50.2 httpx==0.28.1 \
+            pydantic==2.13.5 pillow==12.3.0 numpy==2.4.6 pytest
+
+      # One pytest run per suite: mlx-server and the gemma plugin both have a
+      # top-level module named `server`, which a shared session would conflate.
+      - name: plugins/_shared
+        run: python -m pytest -q -p no:cacheprovider plugins/_shared/tests
+
+      - name: plugins/conformance
+        run: python -m pytest -q -p no:cacheprovider plugins/conformance/tests
+
+      - name: plugins/gemma
+        run: python -m pytest -q -p no:cacheprovider plugins/gemma/tests
+
+      - name: plugins/sam3
+        run: python -m pytest -q -p no:cacheprovider plugins/sam3/tests
+
+      - name: mlx-server
+        working-directory: mlx-server
+        run: python -m pytest -q -p no:cacheprovider test_server.py

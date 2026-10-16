@@ -428,11 +428,14 @@ An adapter's `tests/` directory is not copied into the packaged app.
 | `gemma-4-e4b` | 5.0 | 16 GB (8 GB Macs use the built-in engine) | mlx 0.32.0, mlx-vlm 0.6.5, transformers 5.14.1 |
 | `sam2` | 3.0 | 8 GB | torch 2.14.1, transformers 5.19.0 |
 | `sam3` | 6.0 | 16 GB | torch 2.14.1, transformers 5.19.0 |
-| `totalsegmentator` | 23.5 | 32 GB | TotalSegmentator 2.18.0, nnunetv2 2.8.1, torch 2.14.1 |
+| `totalsegmentator` | 25.5 (`total`, `heartchambers_highres`); 24.0 (`total_lowmem`) | 36 GB; 32 GB for `total_lowmem` | TotalSegmentator 2.18.0, nnunetv2 2.8.1, torch 2.14.1 |
 
 The minimum follows the store's rule: a plugin is offered only when its
 declared memory is at most half of the Mac's RAM (three quarters for one-shot
-plugins).
+plugins). `ram_gb` is in GiB (2^30 bytes), the unit `ProcessInfo.physicalMemory`
+is divided into, so `total` at 25.5 needs 25.5 / 0.75 = 34 GiB (the smallest
+such Mac has 36 GB) and `total_lowmem` at 24.0 needs exactly 32. See
+PLUGIN_PROTOCOL.md for how to derive a declaration from a measurement.
 
 The only network activity a plugin may perform is downloading its declared
 weights and dependencies (invariant 3). Inference must not reach the network --

@@ -100,6 +100,56 @@ def _gpu_visible() -> dict:
     return out
 
 
+# Packages whose version changes a figure in this evaluation. Recorded in every
+# result file's header so a number can be tied to the stack that produced it:
+# the October TotalSegmentator memory runs used torch 2.13.0 while the plugin
+# had moved on to a 2.14 lock, and nothing in the file said so.
+TRACKED_PACKAGES = (
+    "torch", "TotalSegmentator", "nnunetv2", "numpy", "SimpleITK", "nibabel",
+    "pydicom", "highdicom", "transformers", "mlx", "mlx-vlm", "fastapi",
+    "matplotlib",
+)
+
+_VERSIONS_SNIPPET = (
+    "import json, platform, sys\n"
+    "from importlib import metadata\n"
+    "out = {'python': platform.python_version()}\n"
+    "for name in sys.argv[1:]:\n"
+    "    try:\n"
+    "        out[name] = metadata.version(name)\n"
+    "    except Exception:\n"
+    "        out[name] = None\n"
+    "print(json.dumps(out))\n"
+)
+
+
+def package_versions(python: str | os.PathLike | None = None) -> dict:
+    """Versions of TRACKED_PACKAGES in an interpreter (None = not installed).
+
+    With `python` unset, the interpreter running the harness; otherwise that
+    interpreter is asked in a subprocess -- the experiments that pass
+    `--python` run the model there, not here. Never raises: a header that
+    could not be completed is still written, with the failure recorded.
+    """
+    if python is None:
+        from importlib import metadata  # noqa: PLC0415
+
+        out: dict[str, Any] = {"python": platform.python_version()}
+        for name in TRACKED_PACKAGES:
+            try:
+                out[name] = metadata.version(name)
+            except Exception:  # noqa: BLE001 -- absence is a valid answer
+                out[name] = None
+        return out
+    try:
+        proc = subprocess.run([str(python), "-I", "-c", _VERSIONS_SNIPPET,
+                               *TRACKED_PACKAGES],
+                              capture_output=True, text=True, timeout=60)
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+    except Exception as exc:  # noqa: BLE001 -- recorded, not fatal
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 @dataclass
 class StageTimer:
     """Accumulates named stage durations within one case."""
@@ -137,13 +187,23 @@ class Recorder:
     the cases it finished on disk.
     """
 
-    def __init__(self, path: Path, experiment: str):
+    def __init__(self, path: Path, experiment: str,
+                 target_python: str | os.PathLike | None = None):
+        """`target_python` is the interpreter the experiment runs models in
+        (its `--python`, or a plugin venv), when that is not this one."""
         self.path = Path(path)
         self.experiment = experiment
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
+            packages: dict[str, Any] = {"harness": package_versions()}
+            # abspath, not resolve: a venv's python is a symlink to its base
+            # interpreter, and resolving it would mistake the venv for this one.
+            if target_python is not None and (
+                    os.path.abspath(target_python) != os.path.abspath(sys.executable)):
+                packages["target"] = package_versions(target_python)
             header = {"_header": True, "experiment": experiment,
                       "machine": machine_profile(),
+                      "packages": packages,
                       "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
             with open(self.path, "w") as f:
                 f.write(json.dumps(header) + "\n")

@@ -1,6 +1,0 @@
-plugin,execution,weights_gb,ram_gb,licence,outputs,status
-Gemma 4 E4B (MLX),resident-server,4.5,5.0,Apache-2.0,"text, boxes",protocol verified; MLX inference not run in sandbox
-SAM 2 (hiera-small),session,0.18,3.0,Apache-2.0,2D masks,encode/decode path run on real SAM 2 code; pretrained weights unavailable
-SAM 3,session,3.4,6.0,SAM Licence (gated),2D masks,licence gate verified; inference not run
-"TotalSegmentator (total, 3 mm)",one-shot,0.16,3.5,Apache-2.0 / CC BY 4.0,"DICOM SEG, volumes","end-to-end run: 61 structures, 2080-frame SEG, 112 refs"
-"TotalSegmentator (heart, high-res)",one-shot,0.23,3.5,academic key,"DICOM SEG, volumes",licence path exercised; ran on non-cardiac scan

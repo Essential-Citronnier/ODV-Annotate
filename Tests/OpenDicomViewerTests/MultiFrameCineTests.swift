@@ -3,8 +3,10 @@ import Testing
 import AppKit
 @testable import OpenDicomViewer
 
-/// Skipped when the fixture volume is not mounted so CI stays green.
-private let s42Fixture = "/Volumes/RazorDrive/Downloads/S42"
+/// A local folder of multi-frame cine files. Set ODV_CINE_FIXTURE to point
+/// at one; both tests are reported as skipped (not passed) when it's missing.
+private let s42Fixture = ProcessInfo.processInfo.environment["ODV_CINE_FIXTURE"]
+    ?? "/Volumes/RazorDrive/Downloads/S42"
 
 private func s42FixtureAvailable() -> Bool {
     var isDir: ObjCBool = false
@@ -15,9 +17,8 @@ private func s42FixtureAvailable() -> Bool {
     return files.contains(where: { $0.hasSuffix(".dcm") })
 }
 
-@Test
+@Test(.enabled(if: s42FixtureAvailable(), "cine fixture not available (set ODV_CINE_FIXTURE)"))
 func s42FixtureDecoderInitializesAndYieldsFirstFrame() throws {
-    guard s42FixtureAvailable() else { return }  // fixture not mounted — treat as skipped
     let files = try FileManager.default
         .contentsOfDirectory(atPath: s42Fixture)
         .filter { $0.hasSuffix(".dcm") }
@@ -44,9 +45,8 @@ func s42FixtureDecoderInitializesAndYieldsFirstFrame() throws {
     #expect(decoder.frameCGImage(at: lastIdx) != nil, "frameCGImage at last frame returned nil")
 }
 
-@Test
+@Test(.enabled(if: s42FixtureAvailable(), "cine fixture not available (set ODV_CINE_FIXTURE)"))
 func s42FixtureGroupingProducesOneSeriesPerFile() throws {
-    guard s42FixtureAvailable() else { return }  // fixture not mounted — treat as skipped
 
     let files = try FileManager.default
         .contentsOfDirectory(atPath: s42Fixture)

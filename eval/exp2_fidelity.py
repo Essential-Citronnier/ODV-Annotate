@@ -38,7 +38,7 @@ that kind of failure before a reviewer does.
 Usage:
     PYTHONPATH=eval python eval/exp2_fidelity.py \\
         --data-root .eval/data/tcia --out eval/results/exp2_fidelity.jsonl \\
-        --python /path/to/seg-engine/.venv/bin/python
+        --python <ts-python>   # see eval/README.md
 """
 from __future__ import annotations
 
@@ -1287,7 +1287,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args.scratch.mkdir(parents=True, exist_ok=True)
     shim_dir = write_sitecustomize(args.scratch)
-    recorder = Recorder(args.out, EXPERIMENT)
+    recorder = Recorder(args.out, EXPERIMENT, target_python=args.python)
     done = recorder.done_case_ids() if args.resume else set()
 
     print(f"{EXPERIMENT}: {len(series)} series -> {args.out}", flush=True)

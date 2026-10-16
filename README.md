@@ -116,7 +116,8 @@ Declared memory is the figure each plugin states in the manifest
 (`Sources/OpenDicomViewer/Resources/plugins.json`). The Plugin Store shows a
 plugin as unavailable when its declared memory exceeds half of the Mac's RAM
 (three quarters for one-shot jobs such as TotalSegmentator), which is what sets
-the minimums below.
+the minimums below. Memory sizes here are in the units macOS reports RAM in
+(1 GB = 2^30 bytes, so a "32 GB" Mac has exactly 32 of them).
 
 | Engine | Declared memory | Minimum Mac RAM | Recommended |
 |---|---|---|---|
@@ -124,7 +125,8 @@ the minimums below.
 | Gemma 4 E4B plugin | 5 GB | 16 GB (on an 8 GB Mac use the built-in engine instead) | 16 GB |
 | SAM 2 plugin | 3 GB | 8 GB | 16 GB |
 | SAM 3 plugin | 6 GB | 16 GB | 16 GB |
-| TotalSegmentator plugin | 23.5 GB | 32 GB | 32 GB or more |
+| TotalSegmentator plugin, `total` task | 25.5 GB | 36 GB (needs 34 GB: 25.5 ÷ 0.75) | 48 GB or more |
+| TotalSegmentator plugin, `total_lowmem` task (same model, one export worker, 1.3–2.2× the run time) | 24.0 GB | 32 GB (exactly 24.0 ÷ 0.75) | 48 GB or more |
 
 ### For Developers
 
@@ -303,16 +305,16 @@ than fetched at runtime, and each plugin gets its own virtualenv.
 | Gemma 4 E4B (MLX) | resident-server | text, boxes | 5.2 GB | Apache-2.0 |
 | SAM 2 | session | 2D masks | 0.2 GB | Apache-2.0 |
 | SAM 3 | session | 2D masks | 3.4 GB | SAM Licence — accept terms, place checkpoint |
-| TotalSegmentator (total) | one-shot | DICOM SEG, volumes | 0.2 GB | Apache-2.0 / CC BY 4.0 |
+| TotalSegmentator (total; total, low memory) | one-shot | DICOM SEG, volumes | 0.2 GB | Apache-2.0 / CC BY 4.0 |
 | TotalSegmentator (heart, high-res) | one-shot | DICOM SEG, volumes | 0.2 GB | free academic licence number |
 
 Open the store from **AI ▸ Plugin Store**, or from the sidebar. Tasks whose
 weights require a licence show what is needed and where to obtain it; the
 application never transmits your credentials to the licensing site.
 
-Memory is arbitrated from the declared figures: on a 16 GB machine, starting a
-segmentation stops a resident language model for the duration and restarts it
-afterwards, rather than letting both compete. The built-in AI server counts
+Memory is arbitrated from the declared figures: on a 32 GB machine, starting a
+low-memory TotalSegmentator run stops a resident language model for the
+duration and restarts it afterwards, rather than letting both compete. The built-in AI server counts
 too, and it and the Gemma plugin never run at the same time (starting one stops
 the other), so the model is never loaded twice. A plugin that declares more
 memory than plugins may use on this Mac (half of it; three quarters for one-shot

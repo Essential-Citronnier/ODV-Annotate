@@ -4,7 +4,7 @@
 > have run on public data requiring no ethics approval, plus a fifth on
 > deployability. What follows is updated to record what they established. The
 > headline is not the plugin store; it is that **evaluating the architecture
-> found three defects in it that reading the code did not**, and that is the
+> found four defects in it that reading the code did not**, and that is the
 > paper's strongest argument for the approach.
 >
 > | Experiment | Result | Where |
@@ -21,7 +21,10 @@
 > arbiter; a DICOM SEG export that failed on **every** series in a public
 > collection because it required an attribute the standard makes optional; and a
 > packaged application that bundled no adapters and broke its own code signature
-> on first launch.
+> on first launch. A later native re-measurement (October 2026) found the
+> corrected memory figure still about 1.9 GB low once nnU-Net's worker
+> processes were counted; `total` is now declared at 25.5 and a
+> `total_lowmem` task at 24.0 was added.
 >
 > **Claims that must be weakened from the original framing.** The session
 > execution model was justified in the architecture document by the
@@ -81,9 +84,18 @@ time on consumer hardware.
 adapter families, with the isolation and licence layer beneath.
 (`plugin_architecture.png`)
 
-**Figure 2 — resources and arbitration.** Declared footprints per plugin, and
-the admission outcome on a 16 GB machine showing eviction.
-(`plugin_resources.png`)
+**Figure 2 — resources and arbitration.** Panel A: declared `ram_gb` against
+measured peak for TotalSegmentator at each stage of its declaration (3.5 →
+23.5 → 25.5 / 24.0) and for SAM 2, both axes in GiB. Panel B: the compiled
+arbiter's decisions — on a 16 GB machine the 3.5 GB declaration is admitted
+and the measured figure refused, and a resident server started beside an
+unreported one-shot is admitted; on a 32 GB machine today's `total` (25.5) is
+refused and `total_lowmem` (24.0) admitted. Under the current declarations no
+TotalSegmentator task fits a 16 GB machine at all, so the figure does not show a
+16 GB eviction; the eviction exp3 does exercise with real figures is a
+resident Gemma stopped for a TotalSegmentator run on 32 GB
+(`32gb/totalseg-oversized-share-evicts-gemma`).
+(`figures/fig_declared_vs_measured.png`, drawn by `eval/exp3_figures.py`)
 
 **Table 1 — heterogeneity.** The axes on which the three model families differ.
 This table *is* the argument: it should appear early, because a reader who
