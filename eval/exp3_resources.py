@@ -57,6 +57,13 @@ EXPERIMENT = "exp3_resources"
 # without the Command Line Tools it is a shim that opens an installer dialog.
 PYTHON_CANDIDATES = ("/opt/homebrew/bin/python3", "/usr/local/bin/python3")
 
+# The bundled interpreter inside a packaged build (scripts/package_app.sh),
+# relative to the repository. The plugin locks are resolved for it (CPython
+# 3.11), so environments built from Homebrew's newer Python install a different
+# stack than users get: found by exp6, whose Gemma requests all failed under a
+# Python 3.14 venv that had drifted from the lock.
+BUNDLED_PYTHON = "OpenDicomViewer-Annotate.app/Contents/Resources/python/bin/python3"
+
 
 # ---------------------------------------------------------------------------
 # Manifest
@@ -75,7 +82,9 @@ def plugin_by_id(manifest: dict, plugin_id: str) -> dict:
     raise KeyError(f"no plugin '{plugin_id}' in the manifest")
 
 
-def find_python() -> str:
+def find_python(repo: Path | None = None) -> str:
+    if repo is not None and (repo / BUNDLED_PYTHON).is_file():
+        return str(repo / BUNDLED_PYTHON)
     for candidate in PYTHON_CANDIDATES:
         if Path(candidate).is_file():
             return candidate
@@ -326,7 +335,7 @@ def phase_install(recorder: Recorder, repo: Path, paths: EvalPaths,
     is network and disk work, unaffected by the sandbox's lack of a GPU -- and
     it is the number a user waits through once per plugin.
     """
-    python = find_python()
+    python = find_python(repo)
     version = subprocess.run([python, "--version"], capture_output=True,
                              text=True).stdout.strip()
 
@@ -1506,12 +1515,13 @@ def phase_restart(recorder: Recorder, repo: Path, paths: EvalPaths,
 # ---------------------------------------------------------------------------
 
 
-def prepare_slice(series_dir: Path, out_png: Path) -> Path:
-    """Render one mid-series slice to PNG, as the host does before a request.
+def prepare_slice(series_dir: Path, out_png: Path, fraction: float = 0.5) -> Path:
+    """Render one slice to PNG, as the host does before a request.
 
     The host sends `slice2d` as a rendered PNG (PLUGIN_PROTOCOL.md section 2),
-    so the benchmark's input is a rendering rather than raw pixel data. A
-    mid-series slice is used because the ends of a CT are often air.
+    so the benchmark's input is a rendering rather than raw pixel data. The
+    default is the mid-series slice because the ends of a CT are often air;
+    `fraction` picks another position in instance order (exp6 samples several).
     """
     import numpy as np
     import pydicom
@@ -1533,7 +1543,8 @@ def prepare_slice(series_dir: Path, out_png: Path) -> Path:
     if not datasets:
         raise RuntimeError(f"no readable DICOM in {series_dir}")
     datasets.sort(key=lambda item: item[0])
-    chosen = datasets[len(datasets) // 2][1]
+    index = min(len(datasets) - 1, max(0, int(len(datasets) * fraction)))
+    chosen = datasets[index][1]
 
     dataset = pydicom.dcmread(str(chosen))
     pixels = dataset.pixel_array.astype(np.float32)

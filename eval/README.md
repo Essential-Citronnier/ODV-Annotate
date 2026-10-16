@@ -13,6 +13,7 @@ needs no ethics approval or data use agreement.
 | `exp3_totalseg_lowmem.py` | 3 · TotalSegmentator process-tree memory and low-memory settings | `exp3_totalseg_lowmem.*` | `exp3_FINDINGS.md`, "Low-memory settings" |
 | `exp4_session.py` | 4 · session model (encode/decode cost, implicit cache) | `exp4_session*` | `exp4_session_REPORT.md` |
 | `exp5_deployability.py` | 5 · packaged-app checks | `exp5_deployability.jsonl` | `docs/EVALUATION.md` §6 |
+| `exp6_latency.py` | 6 · end-to-end latency per engine and stage, driven through the HTTP/CLI contract | `exp6_latency_<machine>.{jsonl,csv}` | — (in progress) |
 
 `harness.py` is shared: one JSON object per case, failures recorded rather
 than dropped, and a header line per file with the machine profile,
@@ -90,7 +91,44 @@ PYTHONPATH=eval python eval/exp4_session.py \
 # 5 (needs a packaged build from scripts/package_app.sh)
 PYTHONPATH=eval python eval/exp5_deployability.py \
     --app OpenDicomViewer-Annotate.app --out eval/results
+
+# 6 (one run per machine; see "Experiment 6" below)
+sudo -v   # only with --purge
+PYTHONPATH=eval python eval/exp6_latency.py \
+    --series .eval/data/tcia/tcia_1556218467652708 \
+             .eval/data/tcia/tcia_2121018880599426 \
+             .eval/data/tcia/tcia_7962814028413347 \
+    --builtin-python .eval/plugin-envs/gemma-4-e4b/.venv/bin/python3 \
+    --purge
 ```
+
+### Experiment 6 on a test machine
+
+- **Environments must match the locks.** `exp6_latency.py` compares each
+  engine's interpreter and installed packages with its `requirements.txt` and
+  skips an engine that differs (`--allow-env-drift` overrides, for dry runs
+  only; the check is recorded on every row and drifted rows are excluded from
+  the summary). Build the environments with the interpreter the app ships:
+  `exp3_resources.py --phases install` now uses the packaged app's bundled
+  Python when `OpenDicomViewer-Annotate.app` is in the repository root, so run
+  `scripts/package_app.sh` (or copy a release build there) first. The built-in
+  engine's lock is identical to the Gemma plugin's below the header, so the
+  plugin's venv serves as `--builtin-python`.
+- **Weights.** Gemma, SAM 2 and TotalSegmentator are fetched by
+  `exp3_resources.py --phases weights`. SAM 3's checkpoint is licence-gated:
+  accept the terms on Hugging Face and place `sam3.pt` under
+  `.eval/plugin-envs/sam3/weights/sam3-checkpoint/` by hand.
+- **Idle machine.** On AC power, Low Power Mode off, other apps quit. Each case
+  waits for a 1-minute load average ≤ 2.0 (`--max-load`, up to `--idle-wait`
+  seconds) and records whether it got there; `--gated-only` drops cases that
+  did not from the summary. The script holds `caffeinate` for its lifetime.
+- **Cold starts.** `--purge` drops the file cache before each case so weights
+  are read from disk; it needs `sudo -v` beforehand, and whether it succeeded
+  is recorded per row.
+- Results go to `eval/results/exp6_latency_<chip>-<memory>.jsonl` with a CSV of
+  median (IQR) per engine and measure beside it; `--summary-only` rebuilds the
+  CSV. Defaults: 5 cold starts per server engine, 3 slices per series, 5 clicks
+  per SAM session, 3 runs per TotalSegmentator task and series.
 
 Each script appends to its JSONL and resumes by case id; delete the file to
 start over. `--summary-only` on the exp3 scripts rewrites the CSVs from the
