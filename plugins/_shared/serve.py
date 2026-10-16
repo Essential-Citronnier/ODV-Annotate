@@ -15,9 +15,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hmac
+import inspect
 import json
 import os
+import threading
 import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -31,6 +34,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import Headers
 
 # Re-exported so that `serve` remains the single place to look for the HTTP
 # execution models. Adapters import it from `_shared.cli` instead, because
@@ -48,9 +52,11 @@ from .protocol import (
     health_payload,
     success_payload,
 )
+from .vlm import GenerationCancelled
 
-__all__ = ["Adapter", "build_app", "run_adapter", "parse_server_args",
-           "start_parent_watch", "TOKEN_ENV", "TOKEN_HEADER"]
+__all__ = ["Adapter", "build_app", "run_adapter", "run_cancellable",
+           "parse_server_args", "start_parent_watch", "GenerationCancelled",
+           "TOKEN_ENV", "TOKEN_HEADER", "CANCELLED_STATUS"]
 
 # The host generates a token per launch and passes it in this variable; every
 # request must then carry it in TOKEN_HEADER and name loopback in its Host
@@ -74,6 +80,38 @@ def _host_allowed(host_header: str | None) -> bool:
     return host.rsplit(":", 1)[0] in _ALLOWED_HOSTS
 
 
+class _RequireLocalCaller:
+    """Refuse requests not addressed to loopback or lacking the launch token.
+
+    A pure ASGI middleware rather than ``@app.middleware("http")``: Starlette's
+    BaseHTTPMiddleware hands the route a receive channel that never reports
+    ``http.disconnect``, so ``Request.is_disconnected()`` stayed False and a
+    run the host had abandoned could not be cancelled. ``receive`` is passed
+    through untouched here.
+    """
+
+    def __init__(self, app, expected: str) -> None:
+        self.app = app
+        self.expected = expected
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        if not _host_allowed(headers.get("host")):
+            response = JSONResponse(status_code=403, content=error_payload(
+                ErrorCode.BAD_INPUT, "Forbidden host", recoverable=False))
+        elif not hmac.compare_digest(headers.get(TOKEN_HEADER, "").encode(),
+                                     self.expected.encode()):
+            response = JSONResponse(status_code=401, content=error_payload(
+                ErrorCode.BAD_INPUT, "Missing or invalid token", recoverable=False))
+        else:
+            await self.app(scope, receive, send)
+            return
+        await response(scope, receive, send)
+
+
 class Adapter(Protocol):
     """What an adapter must provide for `build_app` to serve it."""
 
@@ -86,7 +124,14 @@ class Adapter(Protocol):
         """Return ``(status, detail, memory_mb)``; status is loading/ready/error."""
 
     def run_task(self, task_id: str, request: TaskRequest) -> Mapping[str, Any]:
-        """Execute a task and return its `outputs` object."""
+        """Execute a task and return its `outputs` object.
+
+        An adapter may declare a third parameter, ``cancel`` (a
+        ``threading.Event``); it is then set when the client disconnects, and a
+        long-running handler should stop at its next check by raising
+        ``GenerationCancelled``. Adapters without the parameter are called
+        exactly as before.
+        """
 
 
 class SessionAdapter(Adapter, Protocol):
@@ -99,6 +144,54 @@ class SessionAdapter(Adapter, Protocol):
         """Release cached state. Returns False if it was already gone."""
 
 
+# Status for a request whose client went away before the answer was ready
+# (nginx's "client closed request"). Nobody reads it; it marks the log line.
+CANCELLED_STATUS = 499
+# How often a running task checks whether its client is still connected.
+DISCONNECT_POLL_SECONDS = 0.5
+
+
+def _accepts_cancel(fn: Callable[..., Any]) -> bool:
+    """Whether `fn` declares a ``cancel`` parameter (by name)."""
+    try:
+        return "cancel" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+async def run_cancellable(request: Request, fn: Callable[..., Any], *args: Any,
+                          poll_seconds: float | None = None) -> Any:
+    """Run blocking `fn(*args)` off the event loop; cancel it on disconnect.
+
+    When `fn` declares a ``cancel`` parameter it receives a threading.Event
+    that is set as soon as the client hangs up (the host's timeout fired, or
+    the user retried). Otherwise `fn` runs to completion as before. Either way
+    a disconnected request ends in GenerationCancelled once `fn` returns, so
+    the worker thread is never left unaccounted for.
+    """
+    poll = DISCONNECT_POLL_SECONDS if poll_seconds is None else poll_seconds
+    cancel = threading.Event()
+    kwargs = {"cancel": cancel} if _accepts_cancel(fn) else {}
+    task = asyncio.ensure_future(run_in_threadpool(fn, *args, **kwargs))
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=poll)
+            if done:
+                return task.result()
+            if await request.is_disconnected():
+                cancel.set()
+                break
+        # The handler stops at its next check; wait for it so a cancelled run
+        # has released the model before the next request is admitted.
+        try:
+            await task
+        except Exception:  # noqa: BLE001 - the client is gone either way
+            pass
+        raise GenerationCancelled()
+    finally:
+        cancel.set()
+
+
 def _as_error_response(exc: BaseException) -> JSONResponse:
     """Map any exception to the protocol's error body.
 
@@ -109,6 +202,10 @@ def _as_error_response(exc: BaseException) -> JSONResponse:
     """
     if isinstance(exc, PluginError):
         return JSONResponse(status_code=exc.http_status, content=exc.to_payload())
+    if isinstance(exc, GenerationCancelled):
+        return JSONResponse(status_code=CANCELLED_STATUS, content=error_payload(
+            ErrorCode.INTERNAL, "Request cancelled: the client disconnected.",
+            recoverable=True))
     message = f"{type(exc).__name__}: {exc}"
     return JSONResponse(
         status_code=200,
@@ -136,16 +233,7 @@ def build_app(adapter: Adapter, on_startup: Callable[[], None] | None = None,
 
     expected = (token if token is not None else os.environ.get(TOKEN_ENV, "")).strip()
     if expected:
-        @app.middleware("http")
-        async def require_local_caller(request: Request, call_next):
-            if not _host_allowed(request.headers.get("host")):
-                return JSONResponse(status_code=403, content=error_payload(
-                    ErrorCode.BAD_INPUT, "Forbidden host", recoverable=False))
-            supplied = request.headers.get(TOKEN_HEADER, "")
-            if not hmac.compare_digest(supplied.encode(), expected.encode()):
-                return JSONResponse(status_code=401, content=error_payload(
-                    ErrorCode.BAD_INPUT, "Missing or invalid token", recoverable=False))
-            return await call_next(request)
+        app.add_middleware(_RequireLocalCaller, expected=expected)
 
     @app.get("/health")
     async def health() -> dict:
@@ -170,7 +258,8 @@ def build_app(adapter: Adapter, on_startup: Callable[[], None] | None = None,
                     recoverable=False,
                     http_status=404,
                 )
-            outputs = await _in_threadpool(adapter.run_task, task_id, TaskRequest(body))
+            outputs = await run_cancellable(request, adapter.run_task, task_id,
+                                            TaskRequest(body))
         except BaseException as exc:  # noqa: BLE001 - every failure gets an envelope
             return _as_error_response(exc)
         return success_payload(outputs, (time.perf_counter() - started) * 1000.0)

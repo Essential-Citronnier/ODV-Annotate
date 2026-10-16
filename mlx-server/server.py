@@ -45,6 +45,7 @@ import sys
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers
 from PIL import Image, ImageDraw, UnidentifiedImageError
 
 # Model-output parsing, cancellable generation and failure hints are shared
@@ -674,18 +675,38 @@ def _host_allowed(host_header: str | None) -> bool:
     return host.rsplit(":", 1)[0] in ALLOWED_HOSTS
 
 
-@app.middleware("http")
-async def require_local_caller(request: Request, call_next):
+class RequireLocalCaller:
     """Reject requests not addressed to loopback or lacking the launch token.
 
     No CORS headers are ever sent, so browsers cannot read responses either.
+
+    A pure ASGI middleware rather than ``@app.middleware("http")``: Starlette's
+    BaseHTTPMiddleware hands the route a receive channel that never reports
+    ``http.disconnect``, so ``Request.is_disconnected()`` stayed False and an
+    abandoned run kept the model to completion. Passing ``receive`` through
+    untouched lets _run_generate see the client hang up.
     """
-    if not _host_allowed(request.headers.get("host")):
-        return JSONResponse({"detail": "Forbidden host"}, status_code=403)
-    supplied = request.headers.get(TOKEN_HEADER, "")
-    if not hmac.compare_digest(supplied.encode(), API_TOKEN.encode()):
-        return JSONResponse({"detail": "Missing or invalid token"}, status_code=401)
-    return await call_next(request)
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        if not _host_allowed(headers.get("host")):
+            response = JSONResponse({"detail": "Forbidden host"}, status_code=403)
+        elif not hmac.compare_digest(headers.get(TOKEN_HEADER, "").encode(),
+                                     API_TOKEN.encode()):
+            response = JSONResponse({"detail": "Missing or invalid token"}, status_code=401)
+        else:
+            await self.app(scope, receive, send)
+            return
+        await response(scope, receive, send)
+
+
+app.add_middleware(RequireLocalCaller)
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -470,6 +471,103 @@ class CancellationTests(unittest.TestCase):
         finally:
             server._generate = original
         self.assertEqual(cancelled, [True])
+
+
+def _serve_in_thread(app):
+    """Run `app` under a real uvicorn on an ephemeral loopback port.
+
+    Returns ``(base_url, stop)``. TestClient cannot show a client hanging up:
+    it never closes the connection under a running request, so disconnect
+    handling is only observable through a real socket.
+    """
+    import socket
+
+    import uvicorn
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    # No lifespan: the server's startup would start loading the real model.
+    config = uvicorn.Config(app, lifespan="off", log_level="warning")
+    uv = uvicorn.Server(config)
+    thread = threading.Thread(target=uv.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not uv.started:
+        if time.monotonic() > deadline or not thread.is_alive():
+            raise RuntimeError("uvicorn did not start")
+        time.sleep(0.02)
+
+    def stop():
+        uv.should_exit = True
+        thread.join(10)
+        sock.close()
+
+    return f"http://127.0.0.1:{port}", stop
+
+
+class DisconnectOverRealSocketTests(unittest.TestCase):
+    """A client that hangs up mid-generation must stop the generation.
+
+    This runs through the whole stack -- uvicorn, the token middleware, the
+    route and _run_generate -- because the failure it guards against lived in
+    the middleware: Starlette's BaseHTTPMiddleware hands the route a receive
+    channel that never reports http.disconnect, so is_disconnected() stayed
+    False and an abandoned run held the model lock to completion.
+    """
+
+    def test_hanging_up_cancels_the_generation(self):
+        import httpx
+
+        started = threading.Event()
+        stopped = threading.Event()
+        finished_uncancelled = threading.Event()
+
+        def slow(image, prompt, cancel=None):
+            started.set()
+            # Stand-in for the token loop: runs ~20 s unless told to stop.
+            for _ in range(200):
+                if cancel is not None and cancel.wait(0.1):
+                    stopped.set()
+                    raise server.GenerationCancelled()
+            finished_uncancelled.set()
+            return "{}"
+
+        original = server._generate
+        server._generate = slow
+        server._model = object()
+        base_url, stop = _serve_in_thread(server.app)
+        try:
+            # The read timeout is the hang-up: httpx gives up waiting for the
+            # response and closes the connection while the run is in progress.
+            with self.assertRaises(httpx.ReadTimeout):
+                httpx.post(f"{base_url}/describe-roi", headers=AUTH,
+                           json={"image": png_b64(),
+                                 "roi": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2}},
+                           timeout=httpx.Timeout(10.0, read=1.0))
+            self.assertTrue(started.is_set(), "generation never started")
+            # Poll interval is DISCONNECT_POLL_SECONDS; allow generous slack.
+            self.assertTrue(stopped.wait(5), "client hang-up did not cancel the run")
+            self.assertFalse(finished_uncancelled.is_set())
+        finally:
+            stop()
+            server._generate = original
+            server._model = None
+
+    def test_token_and_host_checks_still_apply_over_a_real_socket(self):
+        import httpx
+
+        base_url, stop = _serve_in_thread(server.app)
+        try:
+            self.assertEqual(httpx.get(f"{base_url}/health").status_code, 401)
+            response = httpx.get(f"{base_url}/health",
+                                 headers={**AUTH, "Host": "evil.example"})
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.json(), {"detail": "Forbidden host"})
+            self.assertEqual(httpx.get(f"{base_url}/health", headers=AUTH).status_code, 200)
+        finally:
+            stop()
 
 
 class ErrorBodyTests(unittest.TestCase):
