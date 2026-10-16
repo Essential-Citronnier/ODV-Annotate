@@ -462,7 +462,7 @@ enum PluginNetworkCheck {
 
 /// Weight acquisition hook, spawned as
 /// `<venv python> <entry> --install-weights --weight-id <id> --source <source>
-///  --dest <dir> [--repo <repo>] [--task <task>]`.
+///  --dest <dir> [--repo <repo>] [--revision <commit>] [--task <task>]`.
 ///
 /// One documented hook rather than per-source host code: the host knows nothing
 /// about Hugging Face authentication or TotalSegmentator's downloader, and

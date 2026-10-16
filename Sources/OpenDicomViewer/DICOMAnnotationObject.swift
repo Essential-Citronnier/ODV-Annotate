@@ -466,10 +466,34 @@ struct DICOMTreeElement {
         data.robustString()?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Binary VRs decode as binary. Trying text first misreads them: US 49 is
+    /// `31 00`, which reads as "1" once the NUL is trimmed, so SEG segment
+    /// numbers 48–57 became 0–9. Implicit-VR elements arrive as UN, so text is
+    /// accepted only when every byte is one a DICOM IS value can hold (text VRs
+    /// pad with a space, never a NUL).
     var intValue: Int? {
-        if let str = stringValue, let value = Int(str.trimmingCharacters(in: .whitespacesAndNewlines)) {
+        switch vr {
+        case .US, .UL: return unsignedBinaryValue
+        case .SS:
+            guard data.count == 2 else { return nil }
+            return Int(Int16(bitPattern: UInt16(unsignedBinaryValue ?? 0)))
+        case .SL:
+            guard data.count == 4 else { return nil }
+            return Int(Int32(bitPattern: UInt32(unsignedBinaryValue ?? 0)))
+        default:
+            break
+        }
+        let isTextInteger = !data.isEmpty && data.allSatisfy {
+            ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x20 || $0 == 0x2B || $0 == 0x2D
+        }
+        if isTextInteger || vr == .IS,
+           let str = stringValue, let value = Int(str.trimmingCharacters(in: .whitespacesAndNewlines)) {
             return value
         }
+        return unsignedBinaryValue
+    }
+
+    private var unsignedBinaryValue: Int? {
         if data.count == 2 {
             var val: UInt16 = 0
             _ = withUnsafeMutableBytes(of: &val) { data.copyBytes(to: $0) }

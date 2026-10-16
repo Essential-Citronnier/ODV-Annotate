@@ -597,6 +597,25 @@ final class SimpleDICOMTests: XCTestCase {
         }
     }
 
+    func testTreeElementIntValueDecodesBinaryVRsAsBinary() {
+        let tag = DicomTag(group: 0x0062, element: 0x0004)
+        func element(_ vr: VR, _ bytes: [UInt8]) -> DICOMTreeElement {
+            DICOMTreeElement(tag: tag, vr: vr, data: Data(bytes), items: [])
+        }
+        // US 48–57 are the bytes "0"–"9" followed by a NUL.
+        for number in 48...57 {
+            XCTAssertEqual(element(.US, [UInt8(number), 0]).intValue, number)
+            XCTAssertEqual(element(.UN, [UInt8(number), 0]).intValue, number)
+        }
+        XCTAssertEqual(element(.US, [0x31, 0x31]).intValue, 0x3131)
+        XCTAssertEqual(element(.SS, [0xFF, 0xFF]).intValue, -1)
+        XCTAssertEqual(element(.SL, [0xFE, 0xFF, 0xFF, 0xFF]).intValue, -2)
+        XCTAssertEqual(element(.UL, [0x00, 0x00, 0x01, 0x00]).intValue, 65536)
+        // Text integers still read as text, explicit or implicit.
+        XCTAssertEqual(element(.IS, Array("12".utf8)).intValue, 12)
+        XCTAssertEqual(element(.UN, Array("7 ".utf8)).intValue, 7)
+    }
+
     func testDICOMSegmentationParserReadsBinaryMaskFrame() throws {
         let referencedSOP = "1.2.826.0.1.3680043.10.99.400"
 

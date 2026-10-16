@@ -477,7 +477,7 @@ class Checker:
         if not weights:
             reason = "the manifest declares no weights for this adapter"
             for check_id, title in (
-                ("W1", "Weight hook accepts --weight-id/--source/--dest/--repo/--task"),
+                ("W1", "Weight hook accepts --weight-id/--source/--dest/--repo/--revision/--task"),
                 ("W2", "Weight hook reports progress in the section 4 line format"),
             ):
                 self.record(check_id, title, "4b", Status.SKIP, reason)
@@ -496,6 +496,8 @@ class Checker:
                 "--source", str(weight.get("source", "huggingface")),
                 "--dest", dest,
                 "--repo", str(weight.get("repo") or "odv-conformance/none"),
+                # The host appends --revision whenever the manifest pins one.
+                "--revision", str(weight.get("revision") or "0" * 40),
                 "--task", str(weight.get("task") or "total")]
         run = self._run("weight hook (declared weight)", argv, timeout=150.0,
                         extra_env={"HF_HUB_OFFLINE": "1",
@@ -504,19 +506,19 @@ class Checker:
 
         if run.rejected_as_unknown_flag:
             self.record(
-                "W1", "Weight hook accepts --weight-id/--source/--dest/--repo/--task",
+                "W1", "Weight hook accepts --weight-id/--source/--dest/--repo/--revision/--task",
                 "4b", Status.FAIL,
                 "the hook rejected one of the section 4b flags as unrecognized: "
                 + run.summary())
         elif run.timed_out:
             self.record(
-                "W1", "Weight hook accepts --weight-id/--source/--dest/--repo/--task",
+                "W1", "Weight hook accepts --weight-id/--source/--dest/--repo/--revision/--task",
                 "4b", Status.FAIL, "the hook did not return within the timeout")
         else:
             self.record(
-                "W1", "Weight hook accepts --weight-id/--source/--dest/--repo/--task",
+                "W1", "Weight hook accepts --weight-id/--source/--dest/--repo/--revision/--task",
                 "4b", Status.PASS,
-                f"all five flags accepted (exit {run.returncode} offline, which "
+                f"all six flags accepted (exit {run.returncode} offline, which "
                 f"the hook reported in protocol terms)")
 
         # Section 4b constrains the FORMAT of progress ("the same stdout line
@@ -1559,7 +1561,7 @@ _TITLES.update({
     "M4": "Peak memory and disk footprint are declared",
     "B1": "`--help` works on a bare interpreter, without the heavy stack",
     "B2": "`--install-weights` parses and dispatches on a bare interpreter",
-    "W1": "Weight hook accepts --weight-id/--source/--dest/--repo/--task",
+    "W1": "Weight hook accepts --weight-id/--source/--dest/--repo/--revision/--task",
     "W2": "Weight hook reports progress in the section 4 line format",
     "W3": "A `manual` weight source verifies without downloading",
     "E1": "A failing run emits one error envelope as a single stdout line",

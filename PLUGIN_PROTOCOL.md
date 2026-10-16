@@ -316,11 +316,12 @@ therefore implements one additional CLI mode:
 
 ```
 <venv python> <entry> --install-weights --weight-id <id> --source <source> \
-    --dest <dir> [--repo <repo>] [--task <task>]
+    --dest <dir> [--repo <repo>] [--revision <commit>] [--task <task>]
 ```
 
-`--weight-id`, `--source`, `--repo`, and `--task` carry the corresponding
-manifest fields verbatim. `--dest` is the host-owned directory the weights must
+`--weight-id`, `--source`, `--repo`, `--revision`, and `--task` carry the
+corresponding manifest fields verbatim. The host passes `--revision` whenever
+the manifest pins one, so a hook must accept it even if it has no use for it. `--dest` is the host-owned directory the weights must
 land in.
 
 - Progress is reported with the same stdout line format as §4.

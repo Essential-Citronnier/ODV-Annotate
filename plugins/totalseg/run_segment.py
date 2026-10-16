@@ -472,10 +472,15 @@ def _export_dicom_seg(series_dir: Path, masks: list[tuple[str, Path]],
         family=codes.cid7162.ArtificialIntelligence,
     )
 
-    for index, (name, path) in enumerate(masks, start=1):
-        if index > 255:
+    # BINARY SEG segment numbers must run 1..N with no gap (highdicom refuses
+    # anything else), so a structure that ends up with no voxels must not use
+    # up a number. Numbers are therefore assigned only to structures that
+    # survive, and compacted again after the labelmap is built.
+    kept: list[str] = []
+    for position, (name, path) in enumerate(masks):
+        if len(kept) == 255:
             reporter.log(
-                f"Truncating at 255 segments; {len(masks) - 255} structures omitted."
+                f"Truncating at 255 segments; {len(masks) - position} structures omitted."
             )
             break
         mask = sitk.ReadImage(str(path))
@@ -485,11 +490,23 @@ def _export_dicom_seg(series_dir: Path, masks: list[tuple[str, Path]],
         if not array.any():
             # Resampling onto a coarser or differently cropped source grid can
             # empty a structure that was non-empty natively.
+            reporter.log(f"Omitting {name}: no voxels on the source grid.")
             continue
-        label[array] = index
+        kept.append(name)
+        label[array] = len(kept)
+
+    # A structure entirely overwritten by later ones in the labelmap has no
+    # voxels left either.
+    present = set(np.unique(label).tolist())
+    renumber = np.zeros(256, dtype=np.uint8)
+    for number, name in enumerate(kept, start=1):
+        if number not in present:
+            reporter.log(f"Omitting {name}: fully overlapped by later structures.")
+            continue
+        renumber[number] = len(descriptions) + 1
         descriptions.append(
             hd.seg.SegmentDescription(
-                segment_number=index,
+                segment_number=len(descriptions) + 1,
                 segment_label=name,
                 # Structure names are TotalSegmentator's own vocabulary, which
                 # has no complete SNOMED mapping. The category and type are
@@ -501,6 +518,7 @@ def _export_dicom_seg(series_dir: Path, masks: list[tuple[str, Path]],
                 algorithm_identification=algorithm,
             )
         )
+    label = renumber[label]
 
     if not descriptions:
         raise PluginError(
