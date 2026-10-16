@@ -2252,7 +2252,14 @@ struct AIInspectorView: View {
             Group {
                 if panelHasAIContent || engine == .gemmaPlugin {
                     VStack(spacing: 0) {
-                        if engine == .builtIn && builtInBusy {
+                        // A failed engine must stay visible even when the
+                        // panel still shows earlier results: they are why
+                        // the new run never started.
+                        if engine == .builtIn, case .failed(let message) = aiServerManager.setupState {
+                            AISetupFailedView(message: message)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Divider()
+                        } else if engine == .builtIn && builtInBusy {
                             AIBusyBanner()
                         }
                         panelContent
@@ -2267,8 +2274,10 @@ struct AIInspectorView: View {
             // Bottom action bar
             HStack {
                 Button(action: {
+                    // Earlier results on this slice are replaced when the new
+                    // ones arrive, not here: a declined consent, a queued run
+                    // or a failure must not wipe them.
                     if let panel = panel {
-                        panel.clearAIAnnotations()
                         model.triggerPreferredAIAnalysis(for: panel)
                     }
                 }) {
@@ -2278,7 +2287,7 @@ struct AIInspectorView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(!canRun)
-                .help("Analyze this slice (G / ⌘G)")
+                .help("Analyze this slice (⌘⇧G, or ⌘G in the viewer)")
 
                 Button(action: {
                     if let panel = panel {
@@ -2388,9 +2397,9 @@ struct AIInspectorView: View {
                         .foregroundStyle(.red)
                         .multilineTextAlignment(.center)
                         .textSelection(.enabled)
-                    Button("Retry") {
-                        panel.clearAIAnnotations()
-                        model.triggerPreferredAIAnalysis(for: panel)
+                    Button(panel.lastAIAction.retryTitle) {
+                        // The new result replaces the old one when it arrives.
+                        model.triggerPreferredAI(panel.lastAIAction, for: panel)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -2402,9 +2411,9 @@ struct AIInspectorView: View {
                     Label("No Analysis", systemImage: "brain")
                 } description: {
                     if offSliceAIAnnotationCount > 0 {
-                        Text("AI results on this panel belong to other slices. Press G or ⌘G to analyze this one.")
+                        Text("AI results on this panel belong to other slices. Press ⌘⇧G to analyze this one.")
                     } else {
-                        Text("Press G or ⌘G to analyze the current image")
+                        Text("Press ⌘⇧G (AI ▸ Analyze Image) to analyze the current image, or press G and click the image")
                     }
                 }
             } else {
@@ -2999,10 +3008,11 @@ struct AnnotationOverlay: View {
                     .position(x: screenRect.midX, y: screenRect.midY)
 
                 // Stats label below the rectangle
+                let unit = panel.valueUnit
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Mean: \(PixelValues.format(mean))")
-                    Text("SD: \(PixelValues.format(stdDev))")
-                    Text("Min: \(PixelValues.format(minV))  Max: \(PixelValues.format(maxV))")
+                    Text("Mean: \(PixelValueUnit.format(mean, unit: unit))")
+                    Text("SD: \(PixelValueUnit.format(stdDev, unit: unit))")
+                    Text("Min: \(PixelValues.format(minV))  Max: \(PixelValueUnit.format(maxV, unit: unit))")
                     Text("N: \(count)")
                 }
                 .font(.system(.caption2, design: .monospaced))
@@ -3281,7 +3291,7 @@ struct ToolPalette: View {
     }
 }
 
-// MARK: - Cursor Info Overlay (HU Readout)
+// MARK: - Cursor Info Overlay (Value Readout)
 
 struct CursorInfoOverlay: View {
     @ObservedObject var panel: PanelState
@@ -3295,7 +3305,7 @@ struct CursorInfoOverlay: View {
                         Text(String(format: "x: %.1f  y: %.1f  z: %.1f",
                              panel.cursorPatientX, panel.cursorPatientY, panel.cursorPatientZ))
                     }
-                    Text("HU: \(PixelValues.format(panel.cursorHU))  [\(panel.cursorPixelX), \(panel.cursorPixelY)]")
+                    Text("Value: \(PixelValueUnit.format(panel.cursorHU, unit: panel.valueUnit))  [\(panel.cursorPixelX), \(panel.cursorPixelY)]")
                 }
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.white)

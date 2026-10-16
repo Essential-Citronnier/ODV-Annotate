@@ -319,6 +319,9 @@ class PanelState: ObservableObject, Identifiable {
     // AI Analysis State
     @Published var aiAnalysisInProgress: Bool = false
     @Published var aiError: String? = nil
+    /// The AI action the user last asked for on this panel, so Retry repeats
+    /// that action rather than always running a full analysis.
+    var lastAIAction: AIAction = .analyze
     @Published var aiDescription: String? = nil
     /// The slice `aiDescription` was computed on.
     @Published var aiDescriptionSlice: AnnotationSlice? = nil
@@ -460,6 +463,20 @@ class PanelState: ObservableObject, Identifiable {
             aiDescriptionSlice = nil
         }
         aiError = nil
+    }
+
+    /// Drop the AI boxes (structures and findings) already on `slice`, so a
+    /// new analysis replaces them instead of piling up beside them -- what
+    /// plugin results do too. Called when a result arrives, not when the run
+    /// is requested, so a run that is declined, queued or fails keeps them.
+    func replaceAIBoxes(on slice: AnnotationSlice) {
+        annotations.removeAll { annotation in
+            guard annotation.isAI, annotation.slice == slice else { return false }
+            switch annotation.type {
+            case .aiStructure, .aiFinding: return true
+            default: return false
+            }
+        }
     }
 
     /// Whether `clearAIAnnotations()` would remove anything.

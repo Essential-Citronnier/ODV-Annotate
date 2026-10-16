@@ -7,12 +7,14 @@
 <p align="center">
   <strong>AI-powered DICOM annotation on your Mac — fully local, fully private.</strong><br>
   Built on <a href="https://github.com/jnheo-md/open-dicom-viewer">OpenDicomViewer</a>, enhanced with <strong>Gemma 4 E4B</strong> running on Apple Silicon via MLX.<br>
-  No cloud. No uploads. Your medical images never leave your machine.
+  No cloud inference. Your images, DICOM metadata and AI results stay on your Mac
+  (see <a href="#privacy-and-network-use">Privacy and network use</a> for the downloads and update check that do use the network).
 </p>
 
 <p align="center">
-  <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v1.2.1/OpenDicomViewer-Annotate.dmg">Download DMG</a> &middot;
-  <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v1.2.1">Releases</a>
+  <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v2.0.0/OpenDicomViewer-Annotate.dmg">Download DMG (v2.0.0)</a> &middot;
+  <a href="https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v2.0.0">Release notes</a><br>
+  <sub>Apple Silicon only (M1 or later), macOS 14+</sub>
 </p>
 
 ![Screenshot](screenshot1.png)
@@ -23,7 +25,7 @@
 
 OpenDicomViewer-Annotate extends the open-source [OpenDicomViewer](https://github.com/jnheo-md/open-dicom-viewer) with **on-device AI annotation** powered by Google's **Gemma 4 E4B** vision-language model. The AI runs entirely on your Mac through [MLX](https://github.com/ml-explore/mlx) — Apple's machine learning framework optimized for Apple Silicon.
 
-This means you can analyze DICOM images, detect anatomical structures, identify potential abnormalities, and get natural language descriptions of regions of interest — all without sending a single byte to the cloud.
+This means you can analyze DICOM images, detect anatomical structures, identify potential abnormalities, and get natural language descriptions of regions of interest — all without sending your images to the cloud.
 
 ## Key Features
 
@@ -62,22 +64,30 @@ All the capabilities of OpenDicomViewer are included:
 
 ### Download & Run
 
-Download the latest `.dmg` from [Releases](../../releases), open it, and drag **OpenDicomViewer-Annotate** to your Applications folder.
+Download [`OpenDicomViewer-Annotate.dmg`](https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v2.0.0/OpenDicomViewer-Annotate.dmg)
+from the [v2.0.0 release](https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v2.0.0) (**Apple Silicon only (M1 or later), macOS 14+**),
+open it, and drag **OpenDicomViewer-Annotate** to your Applications folder.
 
-> The app is signed and notarized — no Gatekeeper warnings.
+> The app and the DMG are signed with a Developer ID and notarized by Apple.
+> macOS still asks for confirmation the first time you open an app downloaded
+> from the Internet.
 
 ### First-Run AI Setup
 
-Nothing is downloaded at launch. The first time you use AI (press `G`, `⌘G`,
-or choose an item in the **AI** menu), the app asks once whether to enable
+Nothing is downloaded at launch. The first time you use AI (`⌘⇧G` for
+**AI ▸ Analyze Image**, `⌘G` while the viewer has focus, the **AI Analyze** tool
+selected with `G` and a click on the image, or any item in the **AI** menu), the app asks once whether to enable
 local AI. If you agree, it:
 
-1. Creates an isolated virtual environment from the Python 3.11 runtime that
+1. Creates an isolated virtual environment from the CPython 3.11.17 runtime that
    ships inside the app (it is already unpacked; there is nothing to extract)
    in `~/Library/Application Support/OpenDicomViewer/mlx-server/.venv`
-2. Installs MLX and the other pinned Python packages (~1.5 GB)
-3. Starts the AI server on `http://127.0.0.1:8741`, which downloads the Gemma 4
-   E4B model (~5.2 GB, one-time) into the Hugging Face cache,
+2. Installs MLX and the other pinned Python packages from PyPI (~1.5 GB; the
+   full lock is `mlx-server/requirements.txt`: mlx 0.32.0, mlx-vlm 0.6.5,
+   transformers 5.14.1, ...)
+3. Starts the AI server on a free loopback port (`127.0.0.1`), which downloads the Gemma 4
+   E4B model (`mlx-community/gemma-4-E4B-it-4bit` at revision `475b9088…`,
+   ~5.2 GB, one-time) from Hugging Face into the Hugging Face cache,
    `~/.cache/huggingface/hub` -- unless the Gemma plugin already installed the
    same pinned model, in which case the server loads that copy and downloads
    nothing (see "Where the model lives" below)
@@ -91,13 +101,30 @@ start, restart or stop the server from the **AI** menu.
 
 ### System Requirements
 
-- **Apple Silicon Mac** (M1 Pro or better recommended)
+- **Apple Silicon only (M1 or later)**; Intel Macs are not supported
 - **macOS 14.0+** (Sonoma)
-- **16GB+ RAM** recommended (the model uses ~5 GB while loaded)
+- **RAM:** 8 GB runs the built-in AI; 16 GB recommended (see the table below)
 - **~8 GB free disk space** for a first AI setup: ~1.5 GB of Python packages
   plus the ~5.2 GB model, with headroom for the download
 
-> No Python installation required — a standalone Python runtime is bundled with the app.
+> No Python installation required — a standalone CPython 3.11.17 runtime
+> (python-build-standalone `20261013`) is bundled with the app.
+
+#### Memory per engine
+
+Declared memory is the figure each plugin states in the manifest
+(`Sources/OpenDicomViewer/Resources/plugins.json`). The Plugin Store shows a
+plugin as unavailable when its declared memory exceeds half of the Mac's RAM
+(three quarters for one-shot jobs such as TotalSegmentator), which is what sets
+the minimums below.
+
+| Engine | Declared memory | Minimum Mac RAM | Recommended |
+|---|---|---|---|
+| Built-in Gemma 4 E4B (AI menu) | ~5 GB while loaded | 8 GB: works, but close other apps; the app warns on Macs with less than 12 GiB | 16 GB |
+| Gemma 4 E4B plugin | 5 GB | 16 GB (on an 8 GB Mac use the built-in engine instead) | 16 GB |
+| SAM 2 plugin | 3 GB | 8 GB | 16 GB |
+| SAM 3 plugin | 6 GB | 16 GB | 16 GB |
+| TotalSegmentator plugin | 23.5 GB | 32 GB | 32 GB or more |
 
 ### For Developers
 
@@ -128,9 +155,85 @@ To rebuild native dependencies from source:
 ./scripts/setup_native_deps.sh
 ```
 
+## Privacy and network use
+
+All AI inference runs on your Mac; images, DICOM metadata and results are never
+uploaded. The app uses the network only for:
+
+- **One-time downloads you agree to.** Enabling local AI, or installing a plugin
+  from the Plugin Store, downloads pinned Python packages from PyPI and model
+  weights from Hugging Face (TotalSegmentator fetches its weights from the
+  TotalSegmentator project's release servers). Nothing is downloaded until you
+  consent, and the system proxy is used.
+- **The update check.** At launch, at most once every 24 hours, and whenever
+  you choose **Check for Updates...**, the app requests
+  `https://api.github.com/repos/Essential-Citronnier/ODV-Annotate/releases/latest`
+  to compare the latest release's version with its own. It sends no data about
+  you or your images beyond what any HTTPS request carries (your IP address);
+  if a newer version exists it offers to open the download page, and never
+  downloads or installs anything by itself.
+
+After setup, AI analysis works offline.
+
 ## Releases
 
-### [v1.2.1](https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v1.2.1) — 2025-04-07
+### [v2.0.0](https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v2.0.0)
+
+**Plugin system and built-in local Gemma 4 E4B.** Download:
+[`OpenDicomViewer-Annotate.dmg`](https://github.com/Essential-Citronnier/ODV-Annotate/releases/download/v2.0.0/OpenDicomViewer-Annotate.dmg)
+(Apple Silicon only (M1 or later), macOS 14+).
+
+| What's new | Details |
+|------------|---------|
+| **Plugin system** | AI models are plugins described by a manifest and a versioned protocol ([`PLUGIN_PROTOCOL.md`](PLUGIN_PROTOCOL.md)); three execution models (resident server, session, one-shot), each plugin in its own virtualenv with fully pinned requirements |
+| **Plugin Store** | Gemma 4 E4B, SAM 2, SAM 3 and TotalSegmentator, installable from **AI ▸ Plugin Store** or the sidebar; licence gates for SAM 3 and TotalSegmentator's high-res tasks |
+| **Built-in local Gemma 4 E4B** | `mlx-community/gemma-4-E4B-it-4bit` pinned to revision `475b9088…` on mlx 0.32.0 / mlx-vlm 0.6.5 / transformers 5.14.1; one copy on disk shared with the Gemma plugin |
+| **Consent-gated setup** | Nothing is downloaded at launch; the first AI use asks once, checks disk space and architecture, and shows progress and the server log |
+| **Segmentation** | Promptable 2D masks (SAM 2 / SAM 3, click or box) and whole-body CT segmentation written as binary DICOM SEG (TotalSegmentator) |
+| **Memory arbitration** | Declared memory is arbitrated across the built-in server and plugins; a resident model is paused for a segmentation job rather than competing with it |
+| **AI result safety** | Results are bound to the slice they were computed on; a research-use notice is shown before the first analysis |
+| **Viewer** | DICOM detection by content, nested undefined-length sequences, multi-frame decoding by frame table (incl. JPEG 2000), RTSTRUCT/SEG overlay matching, MPR geometry and measurement fixes, modality-derived value units |
+| **Packaging** | Bundled CPython 3.11.17, verified by SHA-256; the plugin adapters ship inside the app; the stdlib is precompiled before signing so the signature stays valid; app and DMG signed, notarized and stapled; the app opens DICOM files and folders from Finder |
+
+**Binary contents (what's inside the DMG):**
+
+```
+OpenDicomViewer-Annotate.app/
+├── Contents/MacOS/OpenDicomViewer       # Swift executable (arm64)
+└── Contents/Resources/
+    ├── AppIcon.icns
+    ├── dicom.dic                         # DCMTK DICOM dictionary
+    ├── LICENSE, THIRD_PARTY_LICENSES.md
+    ├── plugins.json                      # Plugin Store manifest
+    ├── plugins/                          # Plugin adapters (gemma, sam2, sam3, totalseg, _shared)
+    ├── mlx-server/
+    │   ├── server.py                     # FastAPI + mlx-vlm inference server
+    │   └── requirements.txt              # Full lock
+    └── python/                           # Bundled CPython 3.11.17 runtime
+        └── bin/python3
+```
+
+> Python packages are installed on first AI use into `~/Library/Application Support/OpenDicomViewer/`; the Gemma 4 E4B model is downloaded into the Hugging Face cache, `~/.cache/huggingface/hub`. Model weights are not part of the DMG.
+
+#### Where the model lives
+
+There is one ~5.2 GB copy of Gemma 4 E4B (revision `475b9088…`) on disk,
+whichever engine fetched it first:
+
+| Installed first | Location | The other engine |
+|-----------------|----------|------------------|
+| Built-in AI server | `~/.cache/huggingface/hub/models--mlx-community--gemma-4-E4B-it-4bit/` (`HF_HOME` / `HF_HUB_CACHE` move it) | The Gemma plugin's installer hard-links those files into its weight directory instead of downloading |
+| Gemma plugin (Plugin Store) | `~/Library/Application Support/OpenDicomViewer/plugins/gemma-4-e4b/weights/gemma-4-e4b-it-4bit/` | The built-in server loads that directory (`ODV_MODEL_DIR`) instead of downloading |
+
+The built-in server uses the plugin's directory only when its
+`.odv-download-complete` marker records the same pinned revision. Hard links
+share their blocks, so removing either path (clearing the hub cache, or
+removing the plugin) frees nothing until the other is removed too, and leaves
+the other engine's copy intact. If the plugin is removed while the built-in
+server has no hub-cache copy, the server downloads the model again on its next
+start.
+
+### [v1.2.1](https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v1.2.1) — 2026-04-06
 
 **Zero-dependency install.** Python 3.11 is now bundled inside the app — no Homebrew, Xcode CLT, or system Python required. Drag to Applications and launch.
 
@@ -159,24 +262,6 @@ OpenDicomViewer-Annotate.app/
 
 > Python packages (MLX, mlx-vlm, FastAPI) are installed on first AI use into `~/Library/Application Support/OpenDicomViewer/`; the Gemma 4 E4B model is downloaded into the Hugging Face cache, `~/.cache/huggingface/hub`.
 
-#### Where the model lives
-
-There is one ~5.2 GB copy of Gemma 4 E4B (revision `475b9088…`) on disk,
-whichever engine fetched it first:
-
-| Installed first | Location | The other engine |
-|-----------------|----------|------------------|
-| Built-in AI server | `~/.cache/huggingface/hub/models--mlx-community--gemma-4-E4B-it-4bit/` (`HF_HOME` / `HF_HUB_CACHE` move it) | The Gemma plugin's installer hard-links those files into its weight directory instead of downloading |
-| Gemma plugin (Plugin Store) | `~/Library/Application Support/OpenDicomViewer/plugins/gemma-4-e4b/weights/gemma-4-e4b-it-4bit/` | The built-in server loads that directory (`ODV_MODEL_DIR`) instead of downloading |
-
-The built-in server uses the plugin's directory only when its
-`.odv-download-complete` marker records the same pinned revision. Hard links
-share their blocks, so removing either path (clearing the hub cache, or
-removing the plugin) frees nothing until the other is removed too, and leaves
-the other engine's copy intact. If the plugin is removed while the built-in
-server has no hub-cache copy, the server downloads the model again on its next
-start.
-
 ### [v1.2.0](https://github.com/Essential-Citronnier/ODV-Annotate/releases/tag/v1.2.0)
 
 Initial public release with AI annotation, MPR, and full DICOM viewer.
@@ -203,9 +288,11 @@ not mean adding a code path to the viewer.
    text + boxes            2D masks         DICOM SEG + volumes
 ```
 
-Every plugin runs on this machine. The only data that crosses the network is
-model weights, downloaded from the sources the manifest names; images, DICOM
-metadata, and results never leave the computer. The manifest ships inside the
+Every plugin runs on this machine. What crosses the network is the plugin's
+pinned Python packages (from PyPI) and its model weights (from the sources the
+manifest names), each downloaded once when you install it, plus the app's
+update check (see [Privacy and network use](#privacy-and-network-use)); images,
+DICOM metadata, and results never leave the computer. The manifest ships inside the
 application, so the set of installable plugins is fixed at build time rather
 than fetched at runtime, and each plugin gets its own virtualenv.
 
@@ -273,8 +360,9 @@ design is shaped this way.
 | `D` | Ruler (distance) |
 | `N` | Angle |
 | `E` | Eraser |
-| `G` | AI Analyze |
-| `Cmd+Shift+G` | Analyze Image (menu) |
+| `G` | AI Analyze tool (then click the image to analyze it) |
+| `Cmd+Shift+G` | AI ▸ Analyze Image (menu) |
+| `Cmd+G` | Analyze Image while the viewer has focus |
 
 ### Display
 
@@ -349,11 +437,25 @@ This project is built on top of [OpenDicomViewer](https://github.com/jnheo-md/op
 This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
 
 - [OpenDicomViewer](https://github.com/jnheo-md/open-dicom-viewer) (original project) — MIT License
-- [Gemma 4](https://deepmind.google/models/gemma/gemma-4/) — Apache 2.0 License
+- [Gemma 4](https://deepmind.google/models/gemma/gemma-4/) — Apache 2.0 License (model weights; not included in the DMG)
+- CPython 3.11.17 (python-build-standalone, bundled) — PSF License, with OpenSSL, SQLite, Tcl/Tk and other libraries under their own licences
 - DCMTK — BSD License
 - OpenJPEG — BSD-2-Clause License
 
 See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full license texts.
+
+> **Gemma model terms.** The Gemma 4 E4B weights are not redistributed with
+> this app: the app downloads them from Hugging Face
+> ([`mlx-community/gemma-4-E4B-it-4bit`](https://huggingface.co/mlx-community/gemma-4-E4B-it-4bit),
+> a 4-bit MLX conversion of Google's `google/gemma-4-E4B-it`) only after you
+> agree. Google publishes Gemma 4 under the
+> [Apache License 2.0](https://ai.google.dev/gemma/docs/gemma_4_license); earlier
+> Gemma generations were published under the
+> [Gemma Terms of Use](https://ai.google.dev/gemma/terms) and
+> [Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy). You
+> are responsible for complying with the terms on the model card of the weights
+> you download. SAM 2, SAM 3 and TotalSegmentator weights likewise come from
+> their publishers under their own licences (see the plugin table above).
 
 ## Dependencies
 
@@ -361,8 +463,10 @@ See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full license texts.
 |---------|---------|---------|---------|
 | [DCMTK](https://dicom.offis.de/dcmtk.php.en) | 3.6.8 | DICOM image decoding, JPEG/JPEG-LS decompression | BSD |
 | [OpenJPEG](https://www.openjpeg.org/) | 2.5.0 | JPEG 2000 decompression | BSD-2-Clause |
-| [MLX](https://github.com/ml-explore/mlx) | latest | Apple Silicon ML framework for local inference | MIT |
-| [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) | latest | Vision-language model inference on MLX | MIT |
-| [Gemma 4 E4B](https://huggingface.co/mlx-community/gemma-4-E4B-it-4bit) | 4-bit | Vision-language model for DICOM annotation | Apache 2.0 |
+| [CPython](https://www.python.org/) ([python-build-standalone](https://github.com/astral-sh/python-build-standalone)) | 3.11.17 (build 20261013) | Bundled runtime for the AI server and plugins | PSF |
+| [MLX](https://github.com/ml-explore/mlx) | 0.32.0 | Apple Silicon ML framework for local inference | MIT |
+| [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) | 0.6.5 | Vision-language model inference on MLX | MIT |
+| [Transformers](https://github.com/huggingface/transformers) | 5.14.1 | Processor and tokenizer library used by mlx-vlm | Apache 2.0 |
+| [Gemma 4 E4B](https://huggingface.co/mlx-community/gemma-4-E4B-it-4bit) | 4-bit, revision `475b9088d29754a3379866cf5aeb6b41acd313c2` | Vision-language model for DICOM annotation | Apache 2.0 |
 
-DCMTK and OpenJPEG are included as pre-built static libraries (`libs/`). Python 3.11, MLX, and Gemma are bundled with or automatically downloaded by the app.
+DCMTK and OpenJPEG are included as pre-built static libraries (`libs/`). CPython is bundled in the app; MLX and the other Python packages (pinned exactly in `mlx-server/requirements.txt` and each plugin's `requirements.txt`) and the Gemma weights are downloaded on first use, after you agree.

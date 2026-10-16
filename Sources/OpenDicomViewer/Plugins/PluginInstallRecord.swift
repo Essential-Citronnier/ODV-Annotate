@@ -80,6 +80,16 @@ struct PluginPaths: Sendable, Equatable {
     /// (PLUGIN_PROTOCOL.md section 7).
     static let weightCompletionMarker = ".odv-download-complete"
 
+    /// File the host writes into a plugin's venv once `pip install -r` has
+    /// succeeded, holding the SHA-256 of the requirements file it installed.
+    /// A mismatch with the adapter's current requirements means the venv was
+    /// built for an older lock and must be reinstalled.
+    static let requirementsMarker = ".odv-requirements-sha256"
+
+    func requirementsMarker(_ pluginID: String) -> URL {
+        venv(pluginID).appendingPathComponent(Self.requirementsMarker, isDirectory: false)
+    }
+
     /// Absolute path a `gated-download` checkpoint must be placed at. The store
     /// shows this string verbatim, so it has to be stable and predictable.
     func manualWeightPath(pluginID: String, weight: PluginWeight) -> URL {
@@ -336,6 +346,7 @@ final class PluginInstallStore: @unchecked Sendable {
     @discardableResult
     func reverify(
         manifest: PluginManifest,
+        venvIsCurrent: (PluginDescriptor) -> Bool = { _ in true },
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> [PluginTaskRef] {
         lock.lock()
@@ -362,6 +373,11 @@ final class PluginInstallStore: @unchecked Sendable {
                 if let demoted = Self.demotion(for: record, task: task, fileExists: fileExists,
                                                adoptLegacy: adoptLegacyDownload) {
                     revised.installState = demoted
+                } else if record.venvPath != nil && !venvIsCurrent(plugin) {
+                    // The adapter's requirements changed since this venv was
+                    // built (an app update moved the lock). Reinstalling re-runs
+                    // pip into a fresh venv and reuses the weights on disk.
+                    revised.installState = .notInstalled
                 }
             default:
                 break

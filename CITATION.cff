@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+title: ODV-Annotate
+abstract: >-
+  OpenDicomViewer-Annotate: a native macOS DICOM viewer for Apple Silicon with
+  on-device AI annotation (Gemma 4 E4B via MLX) and a plugin system for local
+  segmentation models (SAM 2, SAM 3, TotalSegmentator). For research and
+  education only; not for clinical use.
+authors:
+  - family-names: Kim
+    given-names: Daeseong
+    website: "https://www.lemonaa.com/cv"
+version: 2.0.0
+repository-code: "https://github.com/Essential-Citronnier/ODV-Annotate"
+url: "https://github.com/Essential-Citronnier/ODV-Annotate"
+license: MIT
+keywords:
+  - DICOM
+  - medical imaging
+  - viewer
+  - on-device AI
+  - Apple Silicon
+  - MLX
+  - segmentation
+references:
+  - type: software
+    title: OpenDicomViewer
+    authors:
+      - family-names: Heo
+        given-names: JoonNyung
+    repository-code: "https://github.com/jnheo-md/open-dicom-viewer"
+    license: MIT

@@ -17,6 +17,12 @@
 # to exactly this set; installing it on 3.11 was verified. The viewer
 # re-runs setup whenever this file changes (the setup marker stores its hash).
 # plugins/gemma/requirements.txt must stay identical below this header.
+#
+# mlx-vlm must be >= 0.6.5: 0.6.4 transposes the audio tower's conv weights
+# that the pinned mlx-community checkpoint already stores in MLX layout, and
+# the model then fails to load ("Expected shape (128, 3, 3, 1) but received
+# (128, 3, 1, 3)"). Importing the packages is not enough to catch this; load
+# the model after changing a pin.
 
 aiohappyeyeballs==2.7.1   # via aiohttp
 aiohttp==3.14.5           # via fsspec
@@ -48,10 +54,10 @@ markdown-it-py==4.2.0     # via rich
 markupsafe==3.0.4         # via jinja2
 mdurl==0.1.2              # via markdown-it-py
 miniaudio==1.71           # via mlx-audio, mlx-vlm
-mlx-audio==0.4.6          # via mlx-vlm
+mlx-audio==0.5.9          # via mlx-vlm
 mlx-lm==0.31.3            # via mlx-audio, mlx-vlm, -r top.in
 mlx-metal==0.32.0         # via mlx
-mlx-vlm==0.6.4            # via -r top.in
+mlx-vlm==0.6.5            # via -r top.in
 mlx==0.32.0               # via mlx-audio, mlx-lm, mlx-vlm, -r top.in
 multidict==7.1.0          # via aiohttp, yarl
 multiprocess==0.70.19     # via datasets
@@ -83,7 +89,7 @@ sounddevice==0.5.6        # via mlx-audio
 starlette==1.6.0          # via fastapi, mlx-vlm, -r top.in
 tokenizers==0.22.2        # via transformers
 tqdm==4.70.1              # via datasets, huggingface-hub, mlx-audio, mlx-vlm, transformers
-transformers==5.12.1      # via mlx-audio, mlx-lm, mlx-vlm, -r top.in
+transformers==5.14.1      # via mlx-audio, mlx-lm, mlx-vlm, -r top.in
 typer==0.27.3             # via transformers
 typing-extensions==4.16.0  # via aiohttp, aiosignal, anyio, fastapi, huggingface-hub, pydantic, pydantic-core, starlette, typing-inspection
 typing-inspection==0.4.4  # via fastapi, pydantic

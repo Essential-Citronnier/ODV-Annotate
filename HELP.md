@@ -1,6 +1,6 @@
 # OpenDicomViewer Help
 
-A native macOS DICOM viewer with multi-panel layouts, MPR reconstruction, measurement annotations, and clinical-grade tools.
+A native macOS DICOM viewer with multi-panel layouts, MPR reconstruction, measurement annotations, and on-device AI for research and education (not for clinical use).
 
 ---
 
@@ -220,16 +220,21 @@ These labels automatically update when you rotate or flip the image.
 
 The AI assistant describes the slice on screen, flags possible abnormalities
 and describes a region you select, using Google's Gemma 4 E4B model running
-entirely on your Mac. Images never leave the machine.
+entirely on your Mac. Images, DICOM metadata and results are never uploaded;
+see **Network use** below for what does use the network.
 
 ### First use
 
-Nothing is downloaded until you ask for AI. The first time you press `G`,
-`Cmd+G`, the brain button, or an item in the **AI** menu, the app asks once
+Nothing is downloaded until you ask for AI. The first time you press `Cmd+Shift+G`
+(or `Cmd+G` while the viewer has focus), click the image with the **AI Analyze**
+tool (`G`), press the brain button, or choose an item in the **AI** menu, the
+app asks once
 whether to enable local AI:
 
-- **What it downloads:** about 1.5 GB of Python packages and the 5.2 GB model,
-  once. You need about 8 GB of free disk space.
+- **What it downloads:** about 1.5 GB of pinned Python packages from PyPI
+  (mlx 0.32.0, mlx-vlm 0.6.5, transformers 5.14.1, ...) and the 5.2 GB model
+  (`mlx-community/gemma-4-E4B-it-4bit`, revision `475b9088…`) from Hugging
+  Face, once. You need about 8 GB of free disk space.
 - **How long it takes:** usually 10–30 minutes, depending on your connection.
   The AI inspector shows the installation, then the model download with its
   progress; expand **Server log** to see details. You can keep viewing images
@@ -243,11 +248,38 @@ whether to enable local AI:
 If you choose **Not Now**, open the AI inspector (brain button) and press
 **Enable Local AI** whenever you like.
 
+### Memory
+
+| Engine | Minimum Mac RAM | Recommended |
+|--------|-----------------|-------------|
+| Built-in Gemma 4 E4B | 8 GB (close other apps; the app warns on Macs with less than 12 GiB) | 16 GB |
+| Gemma plugin | 16 GB (on an 8 GB Mac, use the built-in engine) | 16 GB |
+| SAM 2 plugin | 8 GB (declares 3 GB) | 16 GB |
+| SAM 3 plugin | 16 GB (declares 6 GB) | 16 GB |
+| TotalSegmentator plugin | 32 GB (declares 23.5 GB) | 32 GB or more |
+
+The Plugin Store shows a plugin as unavailable when its declared memory is more
+than half of the Mac's RAM (three quarters for TotalSegmentator, which runs
+once and exits).
+
+### Network use
+
+- **Setup downloads:** the Python packages (PyPI) and model weights (Hugging
+  Face; TotalSegmentator's own release servers for its weights) are downloaded
+  once, only after you agree, for local AI or for a plugin you install.
+- **Update check:** at launch, at most once every 24 hours, and when you choose
+  **Check for Updates...**, the app asks GitHub's releases API
+  (`api.github.com/repos/Essential-Citronnier/ODV-Annotate/releases/latest`)
+  for the latest version number. It sends nothing about you or your images and
+  never installs anything by itself.
+
+Once set up, AI analysis works offline.
+
 ### Using it
 
 | Action | How |
 |--------|-----|
-| Analyze the current slice | `G` or `Cmd+G`, or **AI ▸ Analyze Image** |
+| Analyze the current slice | **AI ▸ Analyze Image** (`Cmd+Shift+G`; `Cmd+G` also works while the viewer has focus), or select the **AI Analyze** tool with `G` and click the image |
 | Flag possible abnormalities | **AI ▸ Detect Abnormalities** |
 | Describe a region | Draw a rectangle with the **ROI Stats** tool (`S`) on the slice, then **AI ▸ Describe ROI** (or **Describe ROI** in the AI inspector) |
 | Change what the analysis focuses on | **Mode** in the AI inspector, or **AI ▸ Analysis Mode** |
@@ -291,8 +323,9 @@ choice.
 - **Describe ROI is unavailable:** draw a rectangle with **ROI Stats** (`S`)
   on the slice you are looking at first.
 - **No results on this slice:** results belong to the slice they were computed
-  on. Scroll back, or press `G` to analyze this slice.
-- **Requires Apple Silicon:** the local model runs only on M-series Macs.
+  on. Scroll back, or press `Cmd+Shift+G` (or choose the AI Analyze tool with `G` and click the image) to analyze this slice.
+- **Requires Apple Silicon:** the app runs only on Apple Silicon Macs (M1 or
+  later) with macOS 14 or later.
 - **Still stuck:** **AI ▸ Restart AI Server**; expand **Server
   log** in the inspector for details.
 

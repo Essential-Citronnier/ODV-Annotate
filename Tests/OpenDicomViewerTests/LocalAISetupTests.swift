@@ -345,7 +345,10 @@ final class LocalAISetupTests: XCTestCase {
         for line in server {
             XCTAssertTrue(line.contains("=="), "not pinned exactly: \(line)")
         }
-        for package in ["mlx==0.32.0", "mlx-vlm==0.6.4", "transformers==5.12.1", "huggingface-hub==1.31.0"] {
+        // mlx-vlm 0.6.4 transposes the audio tower's conv weights even though
+        // the pinned mlx-community checkpoint already stores them in MLX
+        // layout, so loading fails; 0.6.5 checks the shape first.
+        for package in ["mlx==0.32.0", "mlx-vlm==0.6.5", "transformers==5.14.1", "huggingface-hub==1.31.0"] {
             XCTAssertTrue(server.contains(package), "\(package) missing")
         }
     }

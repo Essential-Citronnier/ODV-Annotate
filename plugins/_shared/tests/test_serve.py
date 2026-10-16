@@ -363,3 +363,31 @@ def test_a_geometric_only_adapter_does_not_declare_text():
     inputs = _client(_session_adapter()).get(
         "/capabilities").json()["tasks"][0]["inputs"]
     assert "text" not in inputs
+
+
+def test_host_token_is_enforced_when_set():
+    from fastapi.testclient import TestClient
+
+    app = build_app(StubAdapter(), token="secret")
+    client = TestClient(app, base_url="http://127.0.0.1:9000")
+    assert client.get("/health").status_code == 401
+    assert client.get("/health", headers={"X-ODV-Token": "wrong"}).status_code == 401
+    assert client.get("/health", headers={"X-ODV-Token": "secret"}).status_code == 200
+    foreign = client.get("/health", headers={"X-ODV-Token": "secret",
+                                             "Host": "evil.example:9000"})
+    assert foreign.status_code == 403
+    assert foreign.json()["ok"] is False
+
+
+def test_token_comes_from_the_environment(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("ODV_PLUGIN_TOKEN", "from-env")
+    client = TestClient(build_app(StubAdapter()), base_url="http://localhost:9000")
+    assert client.get("/health").status_code == 401
+    assert client.get("/health", headers={"X-ODV-Token": "from-env"}).status_code == 200
+
+
+def test_no_token_leaves_a_hand_started_adapter_open(monkeypatch):
+    monkeypatch.delenv("ODV_PLUGIN_TOKEN", raising=False)
+    assert _client(StubAdapter()).get("/health").status_code == 200

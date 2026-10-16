@@ -1,7 +1,9 @@
 # Third-Party Licenses
 
 OpenDicomViewer includes the following third-party libraries as pre-built
-static libraries in the `libs/` directory.
+static libraries in the `libs/` directory, and bundles the CPython runtime
+described below. This file is copied into the app as
+`Contents/Resources/THIRD_PARTY_LICENSES.md`.
 
 ---
 
@@ -124,3 +126,64 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ```
+
+---
+
+## CPython (python-build-standalone) — bundled Python runtime
+
+- **Version**: CPython 3.11.17, python-build-standalone release `20261013`
+  (`cpython-3.11.17+20261013-aarch64-apple-darwin-install_only.tar.gz`,
+  SHA-256 `d81d757a9785850393cd695a9a686c765a6370fbdc83738589ef2ecd3e5c44b3`)
+- **Location in the app**: `Contents/Resources/python/`
+- **Source**: https://github.com/python/cpython,
+  https://github.com/astral-sh/python-build-standalone
+- **License**: Python Software Foundation License Version 2 (CPython);
+  BSD 3-Clause (python-build-standalone build scripts). The full CPython
+  license text, including the licenses of code incorporated into CPython, is
+  shipped as `Contents/Resources/python/lib/python3.11/LICENSE.txt`, and at
+  https://docs.python.org/3.11/license.html.
+
+python-build-standalone links the following libraries into the runtime. They
+are distributed under their own licenses:
+
+| Library | Version in this build | License |
+|---|---|---|
+| OpenSSL | 3.5.9 | Apache License 2.0 |
+| SQLite | 3.53.1 | Public domain |
+| libffi | (statically linked; version not exposed) | MIT |
+| XZ Utils (liblzma) | 5.8.4 | 0BSD / public domain (liblzma) |
+| bzip2 (libbz2) | 1.0.8 | bzip2 license (BSD-style) |
+| Expat | 2.9.0 | MIT |
+| mpdecimal (libmpdec) | 4.0.0 | BSD 2-Clause |
+| Tcl / Tk (incl. Itcl, Thread) | 9.0 | Tcl/Tk license (BSD-style) |
+| pip, setuptools (site-packages) | 26.2.1, 84.0.0 | MIT |
+
+On macOS the runtime uses the operating system's zlib, ncurses and libedit
+(`/usr/lib`) rather than bundling them, so they are not redistributed. The
+`tkinter`, `idlelib`, `turtledemo`, `lib2to3` and `test` packages are removed
+from the bundle; the Tcl/Tk shared libraries remain. See the
+[python-build-standalone documentation](https://gregoryszorc.com/docs/python-build-standalone/main/running.html#licensing)
+for the licensing of each component.
+
+---
+
+## Gemma model weights — notice
+
+The app does **not** redistribute Gemma model weights: the DMG contains none.
+When the user enables local AI, or installs the Gemma plugin, the app
+downloads `mlx-community/gemma-4-E4B-it-4bit` (revision
+`475b9088d29754a3379866cf5aeb6b41acd313c2`), a 4-bit MLX conversion of
+Google's `google/gemma-4-E4B-it`, from Hugging Face on the user's behalf.
+
+Google publishes Gemma 4 under the Apache License 2.0
+(https://ai.google.dev/gemma/docs/gemma_4_license). Earlier Gemma generations
+are provided under the Gemma Terms of Use (https://ai.google.dev/gemma/terms)
+and the Gemma Prohibited Use Policy
+(https://ai.google.dev/gemma/prohibited_use_policy). The user is responsible
+for complying with the terms stated on the model card of the weights they
+download. Gemma is a trademark of Google LLC.
+
+The SAM 2 (Apache 2.0), SAM 3 (SAM License, Meta) and TotalSegmentator
+(Apache 2.0 code, CC BY 4.0 weights; some tasks require a free academic
+licence) weights are likewise downloaded or placed by the user from their
+publishers, under those publishers' terms, and are not included in the DMG.

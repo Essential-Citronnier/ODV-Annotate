@@ -257,6 +257,23 @@ final class PluginRuntimeTests: XCTestCase {
         XCTAssertEqual(store.state(for: Self.gemmaRef), .ready)
     }
 
+    func testReverifyDemotesReadyTaskWhoseVenvPredatesTheRequirements() throws {
+        let store = PluginInstallStore(paths: makePaths())
+        let manifest = try fixtureManifest()
+
+        try store.update(Self.gemmaRef) { record in
+            record.installState = .ready
+            record.venvPath = "/present/.venv/bin/python3"
+            record.weightPaths = ["gemma-weights": "/present/weights"]
+            record.installedWeightIDs = ["gemma-weights"]
+        }
+
+        let changed = store.reverify(manifest: manifest, venvIsCurrent: { _ in false }) { _ in true }
+        XCTAssertEqual(changed, [Self.gemmaRef])
+        XCTAssertEqual(store.state(for: Self.gemmaRef), .notInstalled,
+                       "a venv built from an older requirements lock must be reinstalled")
+    }
+
     /// Section 7: a downloaded weight directory without the host's completion
     /// marker may hold a download a crash cut short; it is not ready.
     func testReverifyRequiresTheDownloadCompletionMarker() throws {

@@ -265,7 +265,7 @@ def install_weights(args, dest: Path, reporter) -> list[Path]:
             recoverable=False,
         )
     download_huggingface(args.repo or MODEL_REPO, dest, reporter,
-                         allow_patterns=WEIGHT_FILE_PATTERNS)
+                         allow_patterns=WEIGHT_FILE_PATTERNS, revision=args.revision)
     # Report what the adapter actually requires at load time, so that exit 0
     # means this plugin can start rather than merely that files arrived.
     return [dest / "config.json", dest / "model.safetensors"]

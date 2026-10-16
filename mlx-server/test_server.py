@@ -6,7 +6,11 @@ Run from mlx-server/ with the server's venv:
 
 import base64
 import io
+import json
 import os
+import sys
+import threading
+import types
 import unittest
 from pathlib import Path
 
@@ -187,6 +191,16 @@ class HTTPTests(unittest.TestCase):
                 (snapshot / "model.safetensors").write_bytes(b"w")
                 self.assertTrue(server.snapshot_present())
 
+                # A sharded model is complete only when every indexed shard is.
+                (snapshot / "model.safetensors").unlink()
+                (snapshot / "model.safetensors.index.json").write_text(json.dumps(
+                    {"weight_map": {"a": "model-00001-of-00002.safetensors",
+                                    "b": "model-00002-of-00002.safetensors"}}))
+                (snapshot / "model-00001-of-00002.safetensors").write_bytes(b"w")
+                self.assertFalse(server.snapshot_present())
+                (snapshot / "model-00002-of-00002.safetensors").write_bytes(b"w")
+                self.assertTrue(server.snapshot_present())
+
         server._phase = "loading"
         body = self.client.get("/health", headers=AUTH).json()
         self.assertEqual(body["phase"], "loading")
@@ -256,7 +270,7 @@ class HTTPTests(unittest.TestCase):
     def test_analyze_end_to_end_with_stub_generate(self):
         server._model = object()
         original = server._generate
-        server._generate = lambda image, prompt: (
+        server._generate = lambda image, prompt, cancel=None: (
             '{"findings": ["f"], "description": "d", "bounding_boxes": '
             '[{"x": 100, "y": 100, "width": 200, "height": 200, "label": "a", '
             '"confidence": 80}]}')
@@ -274,7 +288,7 @@ class HTTPTests(unittest.TestCase):
         server._model = object()
         seen = {}
 
-        def fake(image, prompt):
+        def fake(image, prompt, cancel=None):
             seen["pixel"] = image.getpixel((10, 5))
             return '{"label": "l", "description": "d", "confidence": 0.5}'
 
@@ -290,6 +304,236 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(bad.status_code, 400)
         self.assertEqual(ok.status_code, 200)
         self.assertEqual(seen["pixel"], (255, 0, 0))  # top-left corner of the outline
+
+
+class FakeProcessor:
+    """Records the chat messages the server formats."""
+
+    def __init__(self):
+        self.messages = None
+
+    def apply_chat_template(self, messages, add_generation_prompt=False):
+        self.messages = messages
+        return "FORMATTED"
+
+
+def _fake_mlx_vlm(reply, seen):
+    module = types.ModuleType("mlx_vlm")
+
+    def stream_generate(model, processor, prompt, image=None, **kwargs):
+        seen["prompt"] = prompt
+        seen["kwargs"] = kwargs
+        for piece in (reply[: len(reply) // 2], reply[len(reply) // 2:]):
+            yield types.SimpleNamespace(text=piece)
+
+    module.stream_generate = stream_generate
+    return module
+
+
+class FinalPromptTests(unittest.TestCase):
+    """The text the model receives, captured below the real _generate."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(server.app, base_url="http://127.0.0.1:8741")
+
+    def setUp(self):
+        self.processor = FakeProcessor()
+        server._model = object()
+        server._processor = self.processor
+        server._load_error = None
+
+    def tearDown(self):
+        server._model = None
+        server._processor = None
+
+    def _user_text(self):
+        user = self.processor.messages[-1]
+        return next(part["text"] for part in user["content"] if part["type"] == "text")
+
+    def _post(self, path, body, reply):
+        from unittest import mock
+
+        seen = {}
+        with mock.patch.dict(sys.modules, {"mlx_vlm": _fake_mlx_vlm(reply, seen)}):
+            response = self.client.post(path, headers=AUTH, json=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(seen["prompt"], "FORMATTED")
+        return response, self._user_text()
+
+    def test_every_analyze_mode_shows_single_braces(self):
+        for mode in server.ANALYZE_MODES:
+            with self.subTest(mode=mode):
+                response, text = self._post(
+                    "/analyze",
+                    {"image": png_b64(), "mode": mode,
+                     "window_info": {"modality": "CT", "description": "Head"}},
+                    '{"findings": [], "bounding_boxes": [], "description": "ok"}')
+                self.assertNotIn("{{", text)
+                self.assertNotIn("}}", text)
+                self.assertIn("CT, Head", text)
+                # The example the model is told to copy is valid JSON.
+                example = text[text.index("{"): text.rindex("}") + 1]
+                self.assertEqual(set(json.loads(example)),
+                                 {"findings", "bounding_boxes", "description"})
+                self.assertEqual(response.json()["description"], "ok")
+
+    def test_roi_and_abnormality_prompts_show_single_braces(self):
+        _, roi_text = self._post(
+            "/describe-roi",
+            {"image": png_b64(), "roi": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2}},
+            '{"label": "l", "description": "d", "confidence": 0.5}')
+        _, detect_text = self._post(
+            "/detect-abnormalities", {"image": png_b64(), "modality": "MR"},
+            '{"regions": [{"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2, '
+            '"label": "a", "severity": "CRITICAL"}]}')
+        for text in (roi_text, detect_text):
+            self.assertNotIn("{{", text)
+            self.assertNotIn("}}", text)
+        self.assertIn('{"regions": []}', detect_text)
+
+    def test_generation_options_are_passed(self):
+        from unittest import mock
+
+        seen = {}
+        with mock.patch.dict(sys.modules, {"mlx_vlm": _fake_mlx_vlm("x", seen)}):
+            server._generate(png_image(), "p")
+        self.assertEqual(seen["kwargs"]["max_tokens"], server.MAX_TOKENS)
+        self.assertEqual(seen["kwargs"]["temperature"], server.TEMPERATURE)
+
+
+def png_image():
+    return Image.new("RGB", (8, 8))
+
+
+class CancellationTests(unittest.TestCase):
+    def setUp(self):
+        server._model = object()
+        server._processor = FakeProcessor()
+
+    def tearDown(self):
+        server._model = None
+        server._processor = None
+
+    def test_cancelled_before_the_lock_never_generates(self):
+        from unittest import mock
+
+        seen = {}
+        cancel = threading.Event()
+        cancel.set()
+        with mock.patch.dict(sys.modules, {"mlx_vlm": _fake_mlx_vlm("x", seen)}):
+            with self.assertRaises(server.GenerationCancelled):
+                server._generate(png_image(), "p", cancel)
+        self.assertNotIn("prompt", seen)
+
+    def test_cancel_stops_between_tokens(self):
+        from unittest import mock
+
+        cancel = threading.Event()
+        produced = []
+        module = types.ModuleType("mlx_vlm")
+
+        def stream_generate(*_a, **_k):
+            for index in range(100):
+                produced.append(index)
+                if index == 2:
+                    cancel.set()
+                yield types.SimpleNamespace(text="t")
+
+        module.stream_generate = stream_generate
+        with mock.patch.dict(sys.modules, {"mlx_vlm": module}):
+            with self.assertRaises(server.GenerationCancelled):
+                server._generate(png_image(), "p", cancel)
+        self.assertLess(len(produced), 10)
+
+    def test_disconnected_client_cancels_the_run(self):
+        import asyncio
+
+        started = threading.Event()
+        cancelled = []
+
+        def slow(image, prompt, cancel=None):
+            started.set()
+            cancel.wait(5)
+            cancelled.append(cancel.is_set())
+            return ""
+
+        class GoneRequest:
+            async def is_disconnected(self):
+                return started.is_set()
+
+        original = server._generate
+        server._generate = slow
+        try:
+            with self.assertRaises(server.GenerationCancelled):
+                asyncio.run(server._run_generate(png_image(), "p", GoneRequest()))
+        finally:
+            server._generate = original
+        self.assertEqual(cancelled, [True])
+
+
+class ErrorBodyTests(unittest.TestCase):
+    def test_unexpected_failure_answers_detail_with_a_hint(self):
+        server._model = object()
+        original = server._generate
+
+        def boom(image, prompt, cancel=None):
+            raise RuntimeError("[metal::malloc] Attempting to allocate 9GB")
+
+        server._generate = boom
+        try:
+            client = TestClient(server.app, base_url="http://127.0.0.1:8741",
+                                raise_server_exceptions=False)
+            response = client.post("/analyze", headers=AUTH, json={"image": png_b64()})
+        finally:
+            server._generate = original
+            server._model = None
+        self.assertEqual(response.status_code, 500)
+        detail = response.json()["detail"]
+        self.assertIn("metal::malloc", detail)
+        self.assertIn("ran out of memory", detail)
+
+    def test_offline_load_failure_carries_a_network_hint(self):
+        from unittest import mock
+
+        fake_hub = types.ModuleType("huggingface_hub")
+
+        def offline(*_a, **_k):
+            raise OSError("LocalEntryNotFoundError: Max retries exceeded with url")
+
+        fake_hub.snapshot_download = offline
+        fake_hub.HfApi = lambda: (_ for _ in ()).throw(OSError("offline"))
+        with mock.patch.dict(sys.modules, {"huggingface_hub": fake_hub}), \
+                mock.patch.object(server, "complete_snapshot", return_value=None), \
+                mock.patch.dict(os.environ, {server.LOCAL_MODEL_DIR_ENV: ""}):
+            server.load_model()
+        try:
+            self.assertIn("Could not reach Hugging Face", server._load_error)
+        finally:
+            server._load_error = None
+            server._phase = "starting"
+
+
+class OfflineRelaunchTests(unittest.TestCase):
+    def test_complete_snapshot_loads_by_path_without_the_hub(self):
+        from unittest import mock
+
+        loaded = []
+        fake_vlm = types.ModuleType("mlx_vlm")
+        fake_vlm.load = lambda source, **kwargs: (loaded.append((source, kwargs)) or ("m", "p"))
+        fake_hub = types.ModuleType("huggingface_hub")
+        fake_hub.snapshot_download = lambda *_a, **_k: self.fail("must not download")
+        snapshot = Path("/cached/snapshot")
+        with mock.patch.dict(sys.modules, {"mlx_vlm": fake_vlm, "huggingface_hub": fake_hub}), \
+                mock.patch.object(server, "complete_snapshot", return_value=snapshot), \
+                mock.patch.dict(os.environ, {server.LOCAL_MODEL_DIR_ENV: ""}):
+            server.load_model()
+        try:
+            self.assertEqual(loaded, [(str(snapshot), {})])
+        finally:
+            server._model = None
+            server._processor = None
+            server._phase = "starting"
 
 
 if __name__ == "__main__":

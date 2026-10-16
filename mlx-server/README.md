@@ -4,12 +4,21 @@ Local AI inference server for DICOM annotation using **Gemma 4 E4B** (4-bit quan
 
 ## Requirements
 
-- **Apple Silicon Mac** (M1 Pro or better recommended)
+- **Apple Silicon only (M1 or later)**
 - **macOS 14.0+** (Sonoma)
-- **Python 3.11–3.13** (the app bundles CPython 3.11; `requirements.txt` is a
-  full lock resolved for it)
-- **16GB+ RAM** recommended (model uses ~5GB)
+- **Python 3.11–3.13** (the app bundles CPython 3.11.17 from
+  python-build-standalone `20261013`; `requirements.txt` is a full lock
+  resolved for 3.11: mlx 0.32.0, mlx-vlm 0.6.5, transformers 5.14.1,
+  huggingface-hub 1.31.0, ...)
+- **RAM:** 8 GB works (close other apps; the app warns on Macs with less than
+  12 GiB); 16 GB recommended. The model uses ~5 GB while loaded
 - **~8GB free disk** on first run (~1.5GB packages + ~5.2GB model)
+
+The model is `mlx-community/gemma-4-E4B-it-4bit` at revision
+`475b9088d29754a3379866cf5aeb6b41acd313c2`. Its weights are downloaded from
+Hugging Face, not shipped with the app; Google publishes Gemma 4 under the
+[Apache License 2.0](https://ai.google.dev/gemma/docs/gemma_4_license), and you
+are responsible for complying with the terms on the model card.
 
 ## Quick Start
 
@@ -20,7 +29,7 @@ cd mlx-server
 
 First run will:
 1. Create a Python virtual environment
-2. Install dependencies (mlx, mlx-vlm, fastapi, etc.)
+2. Install the pinned dependencies from PyPI (mlx, mlx-vlm, fastapi, etc.)
 3. Download the model from Hugging Face (~5.2GB, one-time) into
    `~/.cache/huggingface/hub` (`HF_HOME` / `HF_HUB_CACHE` move it). While it
    downloads, `/health` reports `"phase": "downloading"` with
@@ -29,6 +38,13 @@ First run will:
    sets it to the Gemma plugin's installed weights when their completion marker
    records the pinned revision), the server loads that and downloads nothing.
 4. Start the server on `http://127.0.0.1:8741`
+
+8741 is only the port `launch.sh` uses (`server.py` reads `ODV_AI_PORT`, default 8741). The app
+does not use a fixed port: it picks a free loopback port for the server it
+spawns and passes it as `ODV_AI_PORT`. The app adopts a server started by
+`launch.sh` only if both were started with the same `ODV_AI_TOKEN` (export it
+in the shell that runs `launch.sh` and in the environment the viewer is
+launched from); otherwise it starts its own.
 
 A successful install writes `.venv/.odv-setup-complete` holding the SHA-256
 of `requirements.txt`, the same marker the app writes, so a development build
@@ -66,6 +82,12 @@ start is never adopted unless it was started with the same token (export
 The model revision is pinned in `server.py` (`MODEL_REVISION`, overridable
 with the `ODV_MODEL_REVISION` environment variable) and Python dependencies
 are pinned exactly in `requirements.txt`.
+
+Network use: the server reaches the network only to download the model from
+Hugging Face when no complete local copy exists (and `launch.sh` / the app
+reach PyPI to install packages). Inference requests and images stay on
+`127.0.0.1`. The viewer itself separately checks GitHub's releases API for a
+newer version (at launch, at most once a day, and on **Check for Updates...**).
 
 ## API Endpoints
 
