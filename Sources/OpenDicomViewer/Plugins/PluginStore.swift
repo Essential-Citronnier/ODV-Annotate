@@ -355,6 +355,14 @@ final class PluginStore: ObservableObject {
     /// so such a plugin can never run here and is worth saying so before a
     /// multi-gigabyte download: Gemma's 5 GB on an 8 GB Mac, for one.
     private func unsupportedReason(for descriptor: PluginDescriptor) -> String? {
+        Self.unsupportedReason(for: descriptor, machine: machine, arbiter: arbiter)
+    }
+
+    /// The same check without a store instance (the built-in engine's
+    /// low-memory warning lists the plugins this Mac cannot run).
+    nonisolated static func unsupportedReason(for descriptor: PluginDescriptor,
+                                  machine: PluginMachineProfile,
+                                  arbiter: ResourceArbiter) -> String? {
         if descriptor.requiresAppleSilicon && !machine.isAppleSilicon {
             return "\(descriptor.name) requires Apple Silicon. "
                 + "This Mac reports \(machine.architectureName)."
@@ -369,6 +377,13 @@ final class PluginStore: ObservableObject {
         let fraction = descriptor.execution == .oneShot
             ? arbiter.oneShotFraction : arbiter.residentFraction
         let budget = machine.physicalMemoryGB * fraction
+        // Gemma is the one plugin with a built-in twin that does run on such
+        // a Mac; the reason says so (see `GemmaPluginSupport`).
+        if descriptor.id == AIAnalysisEngine.pluginID,
+           let reason = GemmaPluginSupport.unsupportedReason(physicalGB: machine.physicalMemoryGB) {
+            return reason + String(format: " (The plugin declares %.1f GB peak memory; "
+                                       + "plugins may use %.1f GB of this Mac.)", lightest, budget)
+        }
         if lightest > budget + 1e-9 {
             return String(
                 format: "%@ declares %.1f GB peak memory for its smallest task; "

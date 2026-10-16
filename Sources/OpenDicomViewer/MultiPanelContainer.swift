@@ -209,8 +209,9 @@ struct PanelView: View {
                     .zIndex(12)
             }
 
-            // Selected DICOM-derived annotation overlay (GSPS, RTSTRUCT, SEG)
-            if panel.image != nil && !panel.importedOverlays.isEmpty {
+            // Selected DICOM-derived annotation overlay (GSPS, RTSTRUCT, SEG).
+            // Their coordinates belong to the source image, so only 2D slices.
+            if panel.image != nil && panel.panelMode == .slice2D && !panel.importedOverlays.isEmpty {
                 ImportedDICOMOverlay(panel: panel)
                     .zIndex(12.5)
             }
@@ -1383,7 +1384,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             guard px != panel.cursorPixelX || py != panel.cursorPixelY else { return }
 
             // Look up the pixel value (modality units; 8/16/32-bit, RGB mean)
-            var huValue: Double = 0
+            var huValue: Double? = nil
             if let data = panel.rawPixelData,
                let v = PixelValues.value(in: data, index: py * panel.imageWidth + px,
                                          bits: panel.bitDepth, isSigned: panel.isSigned, samples: panel.samples) {
@@ -1395,7 +1396,10 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
 
             panel.cursorPixelX = px
             panel.cursorPixelY = py
-            panel.cursorHU = huValue
+            // No pixel buffer (cine, display-only image): show the position
+            // but no value, rather than a made-up 0.
+            panel.cursorHU = huValue ?? 0
+            panel.cursorHasValue = huValue != nil
             panel.showCursorInfo = true
 
             // Compute patient coordinates if spatial metadata available
@@ -2095,21 +2099,32 @@ struct AIInspectorView: View {
     @ObservedObject private var aiServerManager = AIServerManager.shared
     @ObservedObject private var pluginRuntime = PluginRuntime.shared
     @State private var dotCount: Int = 0
-    /// Mirrors AIAnalysisEngine.preference so the picker redraws.
-    @State private var enginePreference: AIAnalysisEngine? = AIAnalysisEngine.preference
+    /// AIAnalysisEngine.preference, bound so the view redraws whenever it
+    /// changes (from the picker or from a run that records the default).
+    @AppStorage(AIAnalysisEngine.preferenceKey) private var enginePreferenceRaw: String?
 
     private let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
 
     private var panel: PanelState? { model.activePanel }
 
+    /// The engine the AI buttons will use: the same resolution as
+    /// `AIAnalysisEngine.current` (built-in "set up" is a completed install,
+    /// not the live setup state), from the observed inputs.
     private var engine: AIAnalysisEngine {
-        AIAnalysisEngine.resolve(preference: enginePreference,
+        AIAnalysisEngine.resolve(preference: enginePreferenceRaw.flatMap(AIAnalysisEngine.init),
                                  pluginInstalled: pluginInstalled,
-                                 builtInSetUp: aiServerManager.setupState == .ready)
+                                 builtInSetUp: aiServerManager.hasCompletedSetup)
     }
 
+    /// Ready, or awaiting a reinstall after an update (`isPluginAvailable`).
     private var pluginInstalled: Bool {
-        pluginRuntime.installState(AIAnalysisEngine.pluginAnalyze).isReady
+        _ = pluginRuntime.installStates
+        return AIAnalysisEngine.isPluginAvailable
+    }
+
+    private var pluginNeedsReinstall: Bool {
+        _ = pluginRuntime.installStates
+        return AIAnalysisEngine.pluginNeedsReinstall
     }
 
     /// AI annotations computed on the slice currently on screen.
@@ -2141,6 +2156,7 @@ struct AIInspectorView: View {
     private var statusText: String {
         if panel?.aiAnalysisInProgress == true { return "Analyzing…" }
         if engine == .gemmaPlugin {
+            if pluginNeedsReinstall { return "Plugin needs reinstalling" }
             return pluginRuntime.runtimeState(AIAnalysisEngine.pluginID).isReady
                 ? "Plugin ready" : "Plugin starts on first use"
         }
@@ -2217,10 +2233,7 @@ struct AIInspectorView: View {
             if pluginInstalled {
                 Picker("Engine", selection: Binding(
                     get: { engine },
-                    set: { newValue in
-                        AIAnalysisEngine.preference = newValue
-                        enginePreference = newValue
-                    })) {
+                    set: { newValue in enginePreferenceRaw = newValue.rawValue })) {
                     ForEach(AIAnalysisEngine.allCases) { option in
                         Text(option.label).tag(option)
                     }
@@ -2378,6 +2391,13 @@ struct AIInspectorView: View {
                         .foregroundStyle(.secondary)
                         .onReceive(timer) { _ in dotCount = (dotCount % 3) + 1 }
                     if engine == .gemmaPlugin
+                        && pluginRuntime.installState(AIAnalysisEngine.pluginAnalyze).isBusy {
+                        Text("Reinstalling the Gemma plugin's Python packages; the downloaded model is reused.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    } else if engine == .gemmaPlugin
                         && !pluginRuntime.runtimeState(AIAnalysisEngine.pluginID).isReady {
                         Text("Starting the Gemma plugin — loading the model takes a little while the first time.")
                             .font(.caption)
@@ -2397,12 +2417,16 @@ struct AIInspectorView: View {
                         .foregroundStyle(.red)
                         .multilineTextAlignment(.center)
                         .textSelection(.enabled)
-                    Button(panel.lastAIAction.retryTitle) {
-                        // The new result replaces the old one when it arrives.
-                        model.triggerPreferredAI(panel.lastAIAction, for: panel)
+                    // Hidden when there is nothing to repeat; a plugin task
+                    // retries that task, never the built-in analysis.
+                    if let retryTitle = panel.lastAIAction.retryTitle {
+                        Button(retryTitle) {
+                            // The new result replaces the old one when it arrives.
+                            model.triggerPreferredAI(panel.lastAIAction, for: panel)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
                 .padding()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3305,7 +3329,11 @@ struct CursorInfoOverlay: View {
                         Text(String(format: "x: %.1f  y: %.1f  z: %.1f",
                              panel.cursorPatientX, panel.cursorPatientY, panel.cursorPatientZ))
                     }
-                    Text("Value: \(PixelValueUnit.format(panel.cursorHU, unit: panel.valueUnit))  [\(panel.cursorPixelX), \(panel.cursorPixelY)]")
+                    if panel.cursorHasValue {
+                        Text("Value: \(PixelValueUnit.format(panel.cursorHU, unit: panel.valueUnit))  [\(panel.cursorPixelX), \(panel.cursorPixelY)]")
+                    } else {
+                        Text("[\(panel.cursorPixelX), \(panel.cursorPixelY)]")
+                    }
                 }
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.white)

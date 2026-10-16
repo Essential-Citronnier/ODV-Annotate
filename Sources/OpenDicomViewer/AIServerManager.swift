@@ -218,8 +218,12 @@ class AIServerManager: ObservableObject {
 
     /// Writable directory for the Python venv.
     /// - Development: same as serverDirectory (source tree is writable)
-    /// - Bundled app: ~/Library/Application Support/OpenDicomViewer/mlx-server/.venv
-    private var venvDirectory: URL {
+    /// - Bundled app: ~/Library/Application Support/OpenDicomViewer/mlx-server/,
+    ///   in a venv keyed by the bundled interpreter (see `bundledVenvDirectory`).
+    /// Chosen once per process, so it cannot move under a running server.
+    private let venvDirectory: URL = AIServerManager.resolveVenvDirectory()
+
+    private static func resolveVenvDirectory() -> URL {
         let execURL = Bundle.main.executableURL
             ?? URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
         let devMLXPath = execURL
@@ -233,10 +237,48 @@ class AIServerManager: ObservableObject {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!
-        return appSupport
+        let base = appSupport
             .appendingPathComponent("OpenDicomViewer")
             .appendingPathComponent("mlx-server")
-            .appendingPathComponent(".venv")
+        let python = bundledPython
+        let legacy = base.appendingPathComponent(legacyVenvName)
+        return bundledVenvDirectory(
+            base: base, interpreterPath: python,
+            legacyUsable: python != nil && PythonVenvCheck.isUsable(venv: legacy, python: python))
+    }
+
+    static let legacyVenvName = ".venv"
+
+    /// The venv for the interpreter at `interpreterPath`.
+    ///
+    /// Every copy of the app used to share one `.venv`. A venv belongs to the
+    /// interpreter it was made from, so a second copy (another path, another
+    /// version) found it "incomplete" and rebuilt it with `venv --clear` --
+    /// while the first copy's server was running from it. Each interpreter
+    /// now gets its own venv, named by a hash of the interpreter's path. An
+    /// existing shared venv that already belongs to this interpreter is kept,
+    /// so updating in place does not reinstall 1.5 GB of packages.
+    static func bundledVenvDirectory(base: URL, interpreterPath: String?, legacyUsable: Bool) -> URL {
+        guard let interpreterPath, !legacyUsable else {
+            return base.appendingPathComponent(legacyVenvName)
+        }
+        return base.appendingPathComponent(".venv-" + interpreterKey(interpreterPath))
+    }
+
+    /// Short, stable key for an interpreter: its canonical path, hashed.
+    static func interpreterKey(_ path: String) -> String {
+        let canonical = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+        return SHA256.hash(data: Data(canonical.utf8)).prefix(6)
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The setup lock for `venv`: per venv, beside it (which `venv --clear`
+    /// would wipe), so copies with different interpreters never wait on
+    /// each other.
+    static func setupLockURL(forVenv venv: URL) -> URL {
+        let name = venv.lastPathComponent
+        let suffix = name == legacyVenvName ? "" : name
+        return venv.deletingLastPathComponent().appendingPathComponent(".odv-setup\(suffix).lock")
     }
 
     private var venvPythonPath: String {
@@ -262,15 +304,21 @@ class AIServerManager: ObservableObject {
     /// Held while a setup runs, so two copies of the app never rebuild the
     /// same venv at once. Beside the venv, which `venv --clear` would wipe.
     private var setupLockURL: URL {
-        venvDirectory.deletingLastPathComponent().appendingPathComponent(".odv-setup.lock")
+        Self.setupLockURL(forVenv: venvDirectory)
     }
+
+    /// How long a setup waits for another copy's setup of the same venv
+    /// before failing with Retry, rather than spinning forever.
+    static let setupLockTimeout: TimeInterval = 30 * 60
 
     private var requirementsURL: URL {
         serverDirectory.appendingPathComponent("requirements.txt")
     }
 
     /// Path to the standalone Python bundled inside the .app (Resources/python/bin/python3).
-    private var bundledPythonPath: String? {
+    private var bundledPythonPath: String? { Self.bundledPython }
+
+    private static var bundledPython: String? {
         guard let resourceURL = Bundle.main.resourceURL else { return nil }
         let path = resourceURL.appendingPathComponent("python/bin/python3").path
         return FileManager.default.fileExists(atPath: path) ? path : nil
@@ -442,6 +490,27 @@ class AIServerManager: ObservableObject {
         "\(Int((Double(bytes) / 1_073_741_824).rounded())) GB"
     }
 
+    /// Body of the low-memory warning: what the engine needs against what
+    /// this Mac has, and which store plugins cannot run here at all.
+    static func lowMemoryWarningText(physicalBytes: UInt64, availableGB: Double?,
+                                     unrunnablePlugins: [String]) -> String {
+        let model = String(format: "%.0f", declaredRamGB)
+        var text = "Gemma 4 holds about \(model) GB of memory while it runs, on top of "
+            + "macOS and the viewer: at least \(lowMemoryThresholdBytes / 1_073_741_824) GB "
+            + "of memory is needed to run it comfortably, and \(recommendedMemoryGB) GB is "
+            + "recommended. This Mac has \(memoryGBText(physicalBytes)) in total"
+        if let availableGB {
+            text += String(format: ", about %.1f GB of it free right now", max(0, availableGB))
+        }
+        text += ". It will run, but slowly (a first answer can take several minutes), "
+            + "and other apps may slow down. Quit other apps before starting it."
+        if !unrunnablePlugins.isEmpty {
+            text += "\n\nNot available on this Mac (they need more memory than it can give "
+                + "them): " + unrunnablePlugins.joined(separator: ", ") + "."
+        }
+        return text
+    }
+
     /// Asked before the built-in engine starts on a low-memory Mac, once per
     /// launch. Returns whether to go ahead.
     @MainActor
@@ -450,19 +519,26 @@ class AIServerManager: ObservableObject {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "This Mac has \(Self.memoryGBText()) of memory"
-        alert.informativeText = """
-            The AI model needs about 5 GB of memory while it runs; \(Self.recommendedMemoryGB) GB \
-            is recommended. On this Mac it will be slow (a first answer can take several \
-            minutes) and other apps may slow down. Quit other apps before starting it.
-
-            Plugins other than Gemma (SAM 2, SAM 3, TotalSegmentator) need more memory \
-            and are not recommended on this Mac.
-            """
+        let unrunnable = PluginRuntime.shared.manifest.plugins
+            .filter { PluginStore.unsupportedReason(for: $0, machine: .current,
+                                                    arbiter: ResourceArbiter()) != nil }
+            .map(\.name)
+        alert.informativeText = Self.lowMemoryWarningText(
+            physicalBytes: ProcessInfo.processInfo.physicalMemory,
+            availableGB: MemoryProbe.system().availableGB,
+            unrunnablePlugins: unrunnable)
         alert.addButton(withTitle: "Start Anyway")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return false }
         lowMemoryAcknowledged = true
         return true
+    }
+
+    /// Runs `check` (which may show a modal) on the main actor. Every caller
+    /// is on the main thread; anything else skips the modal and proceeds.
+    private func onMain(_ check: @MainActor () -> Bool) -> Bool {
+        guard Thread.isMainThread else { return true }
+        return MainActor.assumeIsolated { check() }
     }
 
     // MARK: - Install location
@@ -561,16 +637,11 @@ class AIServerManager: ObservableObject {
             return false
         case .notSetup, .ready, .unknown:
             if isServerRunning { return true }
-            if !isSetupComplete && Self.isRunningFromDiskImageOrTranslocation() {
-                _ = askToMoveToApplications()
-                lastStartRefusal = "Move the app to the Applications folder, open it from there, then try again."
+            // startServer() runs the install-location and memory checks.
+            guard startServer() else {
+                if lastStartRefusal == nil { lastStartRefusal = "AI was not started." }
                 return false
             }
-            guard confirmLowMemoryIfNeeded() else {
-                lastStartRefusal = "AI was not started."
-                return false
-            }
-            startServer()
             if case .failed(let message) = setupState {
                 lastStartRefusal = message
                 return false
@@ -633,23 +704,45 @@ class AIServerManager: ObservableObject {
 
     // MARK: - Setup Environment
 
+    /// The checks every start shares, whichever button asked: the install
+    /// location (only when a venv is about to be built), then memory. Sets
+    /// `lastStartRefusal` and returns false when the start must not go on.
+    private func passesStartChecks(buildingEnvironment: Bool) -> Bool {
+        if buildingEnvironment && Self.isRunningFromDiskImageOrTranslocation() {
+            _ = onMain { self.askToMoveToApplications() }
+            lastStartRefusal = "Move the app to the Applications folder, open it from there, then try again."
+            return false
+        }
+        guard onMain({ self.confirmLowMemoryIfNeeded() }) else {
+            lastStartRefusal = "AI was not started."
+            return false
+        }
+        return true
+    }
+
     /// Creates the Python venv and installs all requirements.
-    /// Automatically launches the server on success.
-    func setupEnvironment() {
-        guard setupState == .notSetup || setupState == .unknown else { return }
+    /// Automatically launches the server on success. Returns false when a
+    /// check refused (see `lastStartRefusal`); failures land in `setupState`.
+    @discardableResult
+    func setupEnvironment() -> Bool {
+        guard setupState == .notSetup || setupState == .unknown else { return true }
 
         // Architecture check — fail fast on Intel Macs
         if let archError = checkArchitecture() {
             setupState = .failed(archError)
             appendSetupLog("ERROR: \(archError)\n")
-            return
+            return false
         }
+
+        // A venv built from the DMG breaks once the app moves; and setup
+        // ends by loading the model, so the memory warning belongs here too.
+        guard passesStartChecks(buildingEnvironment: true) else { return false }
 
         // Disk space check — fail fast if insufficient
         if let diskError = checkDiskSpace() {
             setupState = .failed(diskError)
             appendSetupLog("ERROR: \(diskError)\n")
-            return
+            return false
         }
 
         setupState = .installingDeps
@@ -686,8 +779,9 @@ class AIServerManager: ObservableObject {
                 await MainActor.run {
                     self.appendSetupLog("Another copy of the app is setting up local AI; waiting for it to finish…\n")
                 }
-                while !lock.tryAcquire() {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard await lock.acquire(timeout: Self.setupLockTimeout) else {
+                    await self.failSetup(Self.setupLockTimeoutMessage)
+                    return
                 }
                 // It may have completed the very install this one would do.
                 let done = await MainActor.run { self.isSetupComplete }
@@ -799,7 +893,11 @@ class AIServerManager: ObservableObject {
                 self.launchServerProcess()
             }
         }
+        return true
     }
+
+    static let setupLockTimeoutMessage = "Another copy of the app has been setting up local AI for over "
+        + "\(Int(setupLockTimeout / 60)) minutes. Quit the other copy (or wait for it to finish), then press Retry."
 
     private func failSetup(_ message: String) async {
         await MainActor.run {
@@ -867,28 +965,41 @@ class AIServerManager: ObservableObject {
 
     // MARK: - Start Server
 
-    /// Public entry point. Runs setup first if the venv is missing.
-    /// Starting is an explicit request, so it also counts as enabling AI.
-    func startServer() {
+    /// Public entry point for every start button (Enable Local AI, Start AI
+    /// Now, Start AI Server) and for `ensureStarted`. Runs setup first if the
+    /// venv is missing; either way the install-location and low-memory
+    /// checks run first. Starting is an explicit request, so it also counts
+    /// as enabling AI. Returns false when a check refused (`lastStartRefusal`).
+    @discardableResult
+    func startServer() -> Bool {
+        lastStartRefusal = nil
         aiEnabled = true
         // Fail fast on Intel Macs
         if let archError = checkArchitecture() {
             setupState = .failed(archError)
             aiService.serverStatus = .error("Requires Apple Silicon")
-            return
+            return false
         }
 
         if setupState == .unknown { checkSetupState() }
 
         switch setupState {
         case .notSetup:
-            setupEnvironment()
+            return setupEnvironment()
         case .installingDeps:
             appendLog("Setup already in progress…")
+            return true
         case .ready, .unknown:
+            if isServerRunning || aiService.serverStatus.isReady {
+                launchServerProcess()  // logs "already running"
+                return true
+            }
+            guard passesStartChecks(buildingEnvironment: !isSetupComplete) else { return false }
             launchServerProcess()
+            return true
         case .failed:
             retrySetup()
+            return true
         }
     }
 
@@ -1430,6 +1541,16 @@ final class SetupLock: @unchecked Sendable {
         if held { return true }
         held = flock(descriptor, LOCK_EX | LOCK_NB) == 0
         return held
+    }
+
+    /// Wait up to `timeout` for the lock, polling. True when acquired.
+    func acquire(timeout: TimeInterval, pollInterval: TimeInterval = 1) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !tryAcquire() {
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(nanoseconds: UInt64(max(0.01, pollInterval) * 1e9))
+        }
+        return true
     }
 
     func release() {

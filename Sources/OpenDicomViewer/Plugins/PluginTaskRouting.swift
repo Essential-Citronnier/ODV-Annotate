@@ -107,8 +107,13 @@ extension DICOMModel {
     /// path, results are bound to the slice they were computed on, replace the
     /// previous results of this task kind on that slice, and are dropped if a
     /// different study was loaded meanwhile.
-    func runPluginTask(_ ref: PluginTaskRef, for panel: PanelState) {
+    ///
+    /// `retryAs` is what the inspector's Retry repeats if this run fails: the
+    /// user-facing action that routed here (Gemma), or by default this exact
+    /// task -- never a different engine's analysis.
+    func runPluginTask(_ ref: PluginTaskRef, for panel: PanelState, retryAs: AIAction? = nil) {
         guard !panel.aiAnalysisInProgress else { return }
+        panel.lastAIAction = retryAs ?? .pluginTask(ref)
 
         let runtime = PluginRuntime.shared
         guard let plugin = runtime.manifest.plugin(id: ref.pluginID),
@@ -167,7 +172,7 @@ extension DICOMModel {
                 case .failure(let error):
                     if LowMemoryStartPrompt.offerOverride(for: error, pluginID: ref.pluginID,
                                                           runtime: runtime) {
-                        self.runPluginTask(ref, for: panel)
+                        self.runPluginTask(ref, for: panel, retryAs: retryAs)
                     } else {
                         panel.aiError = error.localizedDescription
                     }
@@ -293,9 +298,15 @@ extension DICOMModel {
         for kind in task.outputs {
             switch kind {
             case .text:
+                // A run that declares text replaces the description; an empty
+                // answer clears it rather than leaving the previous run's text
+                // beside this run's findings.
                 if let text = result.text, !text.isEmpty {
                     panel.aiDescription = text
                     panel.aiDescriptionSlice = slice
+                } else {
+                    panel.aiDescription = nil
+                    panel.aiDescriptionSlice = nil
                 }
 
             case .bbox:
