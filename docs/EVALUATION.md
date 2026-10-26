@@ -62,7 +62,7 @@ that is not ours.
 
 dcmqi — QIICR's reference tool — decodes every segment losslessly, with
 direction, spacing and origin preserved: **30/30 structures at Dice 1.000000**
-across 6 cases. A field audit of 15 Segmentation IOD requirements per file passes
+across 6 cases. A field audit of 14 Segmentation IOD requirements per file passes
 on every case. Our own decoder agreeing with our own encoder would prove much
 less, which is why the third-party round trip is the load-bearing check.
 
