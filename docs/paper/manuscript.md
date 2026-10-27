@@ -781,14 +781,12 @@ Daeseong Kim: Conceptualization, Methodology, Software, Validation, Formal analy
 Investigation, Data curation, Writing – original draft, Writing – review & editing,
 Visualization.
 
-**Declaration of competing interest:** <!-- CONFIRM. Elsevier requires an explicit
-statement even when there is nothing to declare; the author must assert it.
-Suggested wording if true: "The author declares no known
-competing financial interests or personal relationships that could have appeared to
-influence the work reported in this paper." -->
+**Declaration of competing interest:** The author declares no known competing
+financial interests or personal relationships that could have appeared to influence the work
+reported in this paper.
 
-**Funding:** <!-- CONFIRM. If none: "This research did not receive any specific grant from
-funding agencies in the public, commercial, or not-for-profit sectors." -->
+**Funding:** This research did not receive any specific grant from funding agencies in the
+public, commercial, or not-for-profit sectors.
 
 **Ethics:** This study used only publicly available, de-identified imaging data and
 involved no human subjects research; institutional review board approval and informed
