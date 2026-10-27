@@ -1,6 +1,6 @@
 # CMPB submission checklist — ODV-Annotate plugin-layer manuscript
 
-Generated 2026-10-18 from `docs/paper/manuscript.md` and `docs/paper/references.md`.
+Generated 2026-10-18, updated 2026-10-27, from `docs/paper/manuscript.md` and `docs/paper/references.md`.
 Every measured value below was computed from the files, not estimated. Re-run the
 measurement cell after any edit pass; a number written here goes stale on the next edit.
 
@@ -8,35 +8,33 @@ measurement cell after any edit pass; a number written here goes stale on the ne
 
 | Item | Measured | Requirement | Status |
 |---|---|---|---|
-| Abstract | 247 words (incl. 6 structured-heading words) | <= 250 (third-party summary; see §D) | pass |
+| Abstract | 246 words (incl. structured-heading words) | <= 250 (third-party summary; see §D) | pass |
 | Abstract structure | Background and Objective / Methods / Results / Conclusions | CMPB structured abstract | pass |
-| Highlights | 5 bullets, 80, 70, 74, 79, 65 characters | 3–5 bullets, <= 85 chars | pass |
+| Highlights | 5 bullets, 80, 70, 79, 79, 65 characters | 3–5 bullets, <= 85 chars | pass |
 | Keywords | 6 | 1–7 | pass |
 | Body (Introduction to Conclusions, incl. tables and legends) | 5397 words | no stated hard limit | see §C |
 | Tables | 4 | — | see §C |
-| Figures | 5 (Fig. 5 not yet produced) | — | see §B |
-| References | 42, all cited, numbered by first appearance | Elsevier numbered | pass |
+| Figures | 5 | — | see §C |
+| References | 43, all cited, numbered by first appearance | Elsevier numbered | pass |
 | Citation numbering | strictly ascending by first appearance, no gaps, none uncited | Vancouver | pass |
 | Cross-references | every Table/Figure cited has a legend; every legend is cited | — | pass |
-| Reference metadata | all 42 resolved from Crossref or the arXiv API | — | pass |
+| Reference metadata | all 43 resolved from Crossref, DataCite or the arXiv API | — | pass |
 
-## B. Blocking — cannot submit until resolved
+## B. Blocking — all resolved as of 2026-10-27
 
-1. **E6 (end-to-end latency) not run.** §3.6 is a placeholder, Figure 5 does not exist, the
-   E6 row of Table 2 is a TODO, and the Abstract carries `TODO(E6)`. Scripts and all four
-   plugin environments with weights are present (`eval/exp6_latency.py`; 13.5 GB under
-   `.eval/plugin-envs/`). A second 16 GB Apple Silicon machine is still unconfirmed.
-2. **E7 (prompt-driven and VLM plugins) not run.** §3.7 is a placeholder.
-3. **Two of four models have no inference evidence.** Table 4 records SAM 3 and Gemma 4 E4B
-   as protocol-conformance only, and §3.3 records that their memory peaks were never
-   measured — in a paper arguing that declarations must be audited. E6 should record peak
-   memory for both, not only latency. SAM 3 weights are now present locally, so the
-   "gated weights unavailable" reason in Table 4 is out of date and must be restated.
-4. **Author-supplied front matter.** Affiliations, ORCID iDs, corresponding-author address,
-   CRediT roles, competing-interest statement, funding statement, generative-AI
-   declaration. Author list settled at two; co-authors of reference 17 should be informed.
-5. **Zenodo DOI.** No tagged release archived; the code-availability statement still
-   carries a CONFIRM.
+`python docs/paper/build_submission.py --check` reports 0 blockers.
+
+1. E6 run on one machine (M5 Max, 128 GB); §3.6, Table 2 and Figure 5 filled. A second
+   16 GB machine was not used; stated as a limitation.
+2. E7 run; §3.7 filled.
+3. Gemma 4 E4B memory and inference measured (§3.3, §3.6, §3.7). SAM 3 was not executed:
+   its gated weights were never obtained (the 10-18 note that they were present was wrong);
+   Table 4 and Limitations say so.
+4. Front matter filled: sole author Daeseong Kim, two affiliations (Yonsei Cancer Center;
+   MSKCC), corresponding author, CRediT, no competing interests, no funding. ORCID is
+   entered in the submission system.
+5. Code archived: GitHub release v2.0.0-cmpb (commit 73f18f8), Zenodo
+   https://doi.org/10.5281/zenodo.23699124 (concept DOI 10.5281/zenodo.23699123), cited as [43].
 
 ## C. Recommended before submission
 

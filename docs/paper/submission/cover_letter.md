@@ -39,7 +39,8 @@ report as an open interoperability defect rather than a solved problem.
 
 All evaluation data are public and de-identified, drawn from The Cancer Imaging Archive
 and the TotalSegmentator reference release, with series pinned by SeriesInstanceUID so the
-evaluation can be reproduced exactly. The software is open source under the MIT licence.
+evaluation can be reproduced exactly. The software is open source under the MIT licence, and the evaluated version is archived
+on Zenodo (https://doi.org/10.5281/zenodo.23699124).
 
 This manuscript is original and is not under consideration elsewhere; I am its sole
 author. It builds on a previously published viewer of which I am a co-author (reference 17 in the
@@ -49,7 +50,6 @@ entire evaluation reported here are new work and do not overlap with that public
 
 <!-- CONFIRM before sending:
  - preferred/opposed reviewers, if the journal invites them
- - Zenodo DOI for the tagged release
  - competing-interest and funding statements consistent with the manuscript -->
 
 Yours sincerely,

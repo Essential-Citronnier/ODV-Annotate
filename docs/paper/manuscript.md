@@ -795,9 +795,9 @@ consent were therefore not required. <!-- CONFIRM this wording with the institut
 **Data availability:** All data are public. The exact series are pinned by
 SeriesInstanceUID in `eval/fetch_data.py`; raw per-case results are in `eval/results/`.
 
-**Code availability:** https://github.com/Essential-Citronnier/ODV-Annotate (MIT licence).
-<!-- CONFIRM: archive a tagged release on Zenodo and cite the DOI here and in the
-reference list. Not yet done as of 2026-10-18. -->
+**Code availability:** https://github.com/Essential-Citronnier/ODV-Annotate (MIT licence). The
+version evaluated here is archived as release v2.0.0-cmpb [43],
+https://doi.org/10.5281/zenodo.23699124.
 
 **Declaration of generative AI and AI-assisted technologies in the writing process:**
 During the preparation of this work the author used Claude (Anthropic) to draft and
@@ -815,7 +815,7 @@ content as needed and take full responsibility for the content of the published 
 <!-- Numbered in order of first citation. Source of truth with verification notes:
 docs/paper/references.md. Copy the list here at submission. -->
 
-See `references.md` (42 entries).
+See `references.md` (43 entries).
 
 ---
 
