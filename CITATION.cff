@@ -10,6 +10,11 @@ abstract: >-
 authors:
   - family-names: Kim
     given-names: Daeseong
+    affiliation: >-
+      Division of Medical Oncology, Department of Internal Medicine, Yonsei Cancer
+      Center, Yonsei University College of Medicine, Seoul, Republic of Korea;
+      Department of Pathology and Laboratory Medicine, Memorial Sloan Kettering
+      Cancer Center, New York, NY, USA
     website: "https://www.lemonaa.com/cv"
 version: 2.0.0
 repository-code: "https://github.com/Essential-Citronnier/ODV-Annotate"
