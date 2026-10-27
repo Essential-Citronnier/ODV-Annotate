@@ -147,8 +147,11 @@ class AIServerManager: ObservableObject {
         return override.isEmpty ? "475b9088d29754a3379866cf5aeb6b41acd313c2" : override
     }
     /// Declared resident memory of the loaded model, as the plugin manifest
-    /// declares it for the same model; the plugin arbiter counts this.
-    static let declaredRamGB: Double = 5.0
+    /// declares it for the same model; the plugin arbiter counts this. Was 5.0
+    /// until the process tree was measured at up to 7.72 GiB while generating
+    /// (eval/results/exp7_prompt_vlm_*_summary.json); the server's own health
+    /// report counts only MLX arrays and agreed with the old figure.
+    static let declaredRamGB: Double = 8.0
 
     /// Whether the pinned model is already on disk -- in the Hugging Face
     /// cache, or installed by the Gemma plugin -- i.e. whether starting the

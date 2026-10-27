@@ -80,7 +80,7 @@ through the layer was lossless across 689 per-structure comparisons (minimum Dic
 1.000000). The arbiter matched its specification in 38/38 scenarios, yet would have
 admitted a job larger than the target machine: TotalSegmentator's declared memory was
 5.5–6.1 times below its measured peak. The Gemma plugin peaked at 1.54 times its
-declaration, which its own health report did not reveal. Evaluation found four defect
+declaration, unseen by its own health report; both were corrected. Evaluation found four defect
 classes that code review had passed. A new process returned its first result in 1.9 s
 (SAM 2) and 3.5 s (Gemma), no slower than the pre-plugin server. <!-- src: EVALUATION.md
 §2–4; exp7 summary; exp6 paper.json -->
@@ -240,7 +240,7 @@ memory row: exp3_FINDINGS.md "Measured table" -->
 | Load vs. inference cost | load dominates | encode dominates; decode cheap | comparable |
 | Input | one rendered slice | slice plus point/box prompts | whole series |
 | Output | text, boxes | 2D masks | 3D DICOM SEG, volumes |
-| Declared peak memory (`ram_gb`) | 5.0 | 3.0 / 6.0 | 25.5 (`total`), 24.0 (`total_lowmem`) |
+| Declared peak memory (`ram_gb`) | 8.0 (5.0 before audit, §3.3) | 3.0 / 6.0 | 25.5 (`total`), 24.0 (`total_lowmem`) |
 | Weight licence gate | open | open / gated download | open; licence key for some tasks |
 | Python stack | MLX | PyTorch | PyTorch + nnU-Net |
 
@@ -516,12 +516,21 @@ the model's arrays but not the interpreter, the image pipeline or generation; it
 therefore agreed with the declaration and gave no sign of the gap. SAM 2 on the GPU
 peaked at 2.74 GiB, under its declared 3.0 but twice its CPU figure, so a declaration
 measured on one device does not carry to another. On the 16 GB machine the arbiter
-targets, the declared figures for Gemma and SAM 2 sum to 8.0 GiB and are admitted
+targets, the declared figures for Gemma and SAM 2 summed to 8.0 GiB and were admitted
 together under the 8 GiB budget; their measured peaks sum to 10.46 GiB. <!-- src: exp7
 summary "peak_memory_gib" and per-case metrics.memory; exp6 health_memory_mb; plugins.json
 --> SAM 3 could not be measured, because its gated weights were not obtained (Table 4).
-<!-- CONFIRM: if the Gemma declaration is raised before submission, add the new figure here
-and to Table 3. -->
+
+The Gemma declaration was raised to 8.0, for the plugin and for the viewer's built-in
+server, which runs the same model. The margin over the largest measured peak is 0.28 GiB
+(3.6%), set from four runs on one machine. On the 16 GB machine the corrected figure fills
+the 8 GiB budget on its own: Gemma is still admitted, but admitting it now evicts a
+resident SAM 2 instead of running beside it, and it also needs 8 GiB of live headroom,
+which a loaded machine may lack (the user can overrule a headroom refusal). Regression
+tests pin both the declaration and the eviction. <!-- src: plugins.json gemma-4-e4b
+ram_gb; AIServerManager.declaredRamGB; ResourceArbiter.swift (budget 0.5 x physical,
+headroom = available - 2.0); PluginResourceDeclarationTests
+testGemmaDeclarationCoversItsMeasuredPeak, testGemmaAndSAM2AreNotCoResidentOnA16GBMachine -->
 
 One cost was invisible to the adapter's own reporting. A TotalSegmentator invocation
 took 76.4 s as a subprocess but 71.2 s as the sum of the adapter's stages; the 5.2 s
@@ -634,7 +643,7 @@ block; EVALUATION.md §4, §6; exp2_REPORT.md -->
 
 | # | Defect | Found by | Consequence if shipped | Fix |
 |---|---|---|---|---|
-| 1 | Self-declared memory too low. TotalSegmentator declared 3.5 GB; measured peak 20.9–23.1 GB (5.5–6.1×), and 25.41 GB over the process tree. Gemma 4 E4B declared 5.0; measured 7.72 GiB (1.54×), while its health report gave 4,910.7 MB | E3, E7 | On 16 GB, admits a job larger than the machine; admits Gemma with SAM 2 at 10.46 GiB measured against an 8 GiB budget | TotalSegmentator: measured declarations (25.5 / 24.0), per-task `ram_gb`, process-tree measurement. Gemma: see §3.3 |
+| 1 | Self-declared memory too low. TotalSegmentator declared 3.5 GB; measured peak 20.9–23.1 GB (5.5–6.1×), and 25.41 GB over the process tree. Gemma 4 E4B declared 5.0; measured 7.72 GiB (1.54×), while its health report gave 4,910.7 MB | E3, E7 | On 16 GB, admits a job larger than the machine; admits Gemma with SAM 2 at 10.46 GiB measured against an 8 GiB budget | TotalSegmentator: measured declarations (25.5 / 24.0), per-task `ram_gb`, process-tree measurement. Gemma: declared 8.0 (plugin and built-in server); on 16 GB, admitting it evicts SAM 2 |
 | 2 | Running one-shot absent from the arbiter's runtime state | E3 | A resident engine admitted alongside the heaviest process | In-flight one-shots counted and non-evictable |
 | 3 | SEG export required Type 2 SliceThickness | E2 | No SEG produced for any series in the public collection | Handle absent slice thickness |
 | 4 | Packaged build: no adapters bundled; bytecode written into the signed bundle by adapters and by the bundled interpreter | E5 | Store lists nothing installable; signature broken on first launch | Bundle adapters; suppress bytecode writes in the bundle |
@@ -666,7 +675,8 @@ The main lesson concerns trust rather than mechanism. The arbiter was correct ag
 its specification in every scenario tested, yet it would have admitted a job larger than
 the target machine, because its specification takes a plugin's self-declared memory as
 given. Correct policy over incorrect declarations is still unsafe. This was not one bad
-number: of the three plugins whose peaks we could measure, two had declared too little.
+number: of the three plugins whose peaks we could measure, two had declared too little,
+and both declarations had to be corrected.
 A host that admits work against declared resources must audit those declarations against
 measurement, and the measurement must match how the plugin actually runs. The corrected
 TotalSegmentator figure was still 1.9 GB low until worker processes were counted; the

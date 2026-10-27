@@ -11,7 +11,7 @@
       "adapter_dir": "gemma",
       "entry": "server.py",
       "requirements": "requirements.txt",
-      "ram_gb": 5.0,
+      "ram_gb": 8.0,
       "disk_gb": 6.7,
       "requires_apple_silicon": true,
       "tasks": [

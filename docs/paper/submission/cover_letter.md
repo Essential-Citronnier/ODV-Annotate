@@ -24,7 +24,8 @@ because one plugin's declared figure was between 5.5 and 6.1 times below its mea
 peak. The corrected figure was itself too low until the measurement counted the model's
 worker processes rather than one process. Nor was it an isolated case: a second plugin's
 declared memory was also low, and that plugin's own health report agreed with the
-declaration rather than with the measurement. Policy correctness is not safety when the
+declaration rather than with the measurement. Both declarations have since been
+corrected to measured values. Policy correctness is not safety when the
 policy's inputs are self-declared; a host that arbitrates local models must audit those
 declarations against measurement of the plugin as it actually runs. The manuscript reports this, and
 three other defect classes that code review had passed, alongside the results that passed.

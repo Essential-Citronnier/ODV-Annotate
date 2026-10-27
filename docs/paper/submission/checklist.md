@@ -8,7 +8,7 @@ measurement cell after any edit pass; a number written here goes stale on the ne
 
 | Item | Measured | Requirement | Status |
 |---|---|---|---|
-| Abstract | 246 words (incl. structured-heading words) | <= 250 (third-party summary; see §D) | pass |
+| Abstract | 247 words (incl. structured-heading words) | <= 250 (third-party summary; see §D) | pass |
 | Abstract structure | Background and Objective / Methods / Results / Conclusions | CMPB structured abstract | pass |
 | Highlights | 5 bullets, 80, 70, 79, 79, 65 characters | 3–5 bullets, <= 85 chars | pass |
 | Keywords | 6 | 1–7 | pass |
@@ -35,6 +35,9 @@ measurement cell after any edit pass; a number written here goes stale on the ne
    entered in the submission system.
 5. Code archived: GitHub release v2.0.0-cmpb (commit 73f18f8), Zenodo
    https://doi.org/10.5281/zenodo.23699124 (concept DOI 10.5281/zenodo.23699123), cited as [43].
+6. Gemma 4 E4B declaration raised 5.0 -> 8.0 (plugin manifest and built-in server) after
+   E7 measured 7.72 GiB; regression tests added. The archived v2.0.0-cmpb predates this
+   change, so a new release is needed for the archive to match the paper.
 
 ## C. Recommended before submission
 

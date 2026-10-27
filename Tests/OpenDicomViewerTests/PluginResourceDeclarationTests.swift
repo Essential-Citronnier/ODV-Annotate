@@ -6,6 +6,9 @@
 //   - TotalSegmentator declared 3.5 GB and peaked at 20.9-23.1 GB across four
 //     runs on two series. On a 16 GB machine the declaration admitted a job
 //     needing more than the whole machine.
+//   - Gemma 4 E4B declared 5.0 and its process tree peaked at 7.72 GiB in
+//     each of four runs; its own health report counted only MLX arrays and
+//     agreed with the declaration. On 16 GB it was admitted beside SAM 2.
 //   - A one-shot invocation never enters the runtime-state table, so residency
 //     accounting could not see the heaviest process on the machine, and a
 //     resident engine could start alongside it.
@@ -92,6 +95,38 @@ final class PluginResourceDeclarationTests: XCTestCase {
                     "\(plugin.id)/\(task.id) resolves to a non-positive declaration")
             }
         }
+    }
+
+    /// Measured natively on the GPU over the process tree, the Gemma server
+    /// peaked at 7.72 GiB (eval/results/exp7_prompt_vlm_apple-m5-max-128-gb_summary.json),
+    /// 1.54x the old 5.0 declaration. The plugin and the built-in server run
+    /// the same model and must declare the same figure.
+    func testGemmaDeclarationCoversItsMeasuredPeak() throws {
+        let manifest = try manifest()
+        let gemma = try XCTUnwrap(manifest.plugin(id: "gemma-4-e4b"))
+        for task in gemma.tasks {
+            let declared = gemma.declaredRAMGB(forTask: task.id)
+            XCTAssertGreaterThanOrEqual(
+                declared, 7.72,
+                "gemma-4-e4b/\(task.id) declares \(declared) GB but was measured at up to 7.72 GiB")
+        }
+        XCTAssertEqual(AIServerManager.declaredRamGB, gemma.ramGB)
+    }
+
+    /// The old declarations (5.0 + 3.0) filled the 16 GB machine's 8 GiB budget
+    /// exactly and were admitted together, though their measured peaks sum to
+    /// 10.46 GiB. With the measured figure, admitting Gemma evicts SAM 2.
+    func testGemmaAndSAM2AreNotCoResidentOnA16GBMachine() throws {
+        let manifest = try manifest()
+        let gemma = try XCTUnwrap(manifest.plugin(id: "gemma-4-e4b"))
+        let sam2 = try XCTUnwrap(manifest.plugin(id: "sam2"))
+        let arbiter = ResourceArbiter(probe: { MemoryStatus(physicalGB: 16.0, availableGB: 14.0) })
+
+        let decision = arbiter.admit(
+            PluginResidency(pluginID: gemma.id, declaredRamGB: gemma.ramGB),
+            residents: [PluginResidency(pluginID: sam2.id, declaredRamGB: sam2.ramGB)])
+        XCTAssertNil(decision.refusalError, "Gemma alone fits the 16 GB budget")
+        XCTAssertEqual(decision.evictions, [sam2.id])
     }
 
     // MARK: - Arbitration against the corrected declaration
