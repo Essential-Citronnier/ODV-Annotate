@@ -9,8 +9,7 @@ Rules for this file:
   Every entry is resolved from fetched metadata; never fill bibliographic fields by hand.
   After inserting or removing a citation, renumber the whole list rather than patching it.
 - CONFIRM marks something only the authors or the journal's guide can settle.
-- TODO(E6)/TODO(E7) marks results that depend on experiments not yet run
-  (see docs/paper/PLAN.md).
+- TODO(...) marks a result still to be filled; none should remain at submission.
 -->
 
 # Title page
@@ -49,7 +48,7 @@ spaces. -->
 
 - One declarative contract hosts four local AI models under three execution models
 - Evaluation on public CT found four defects that code review had missed
-- A plugin under-declared peak memory 6-fold; arbiters must audit, not trust
+- Two of three audited plugins under-declared memory; hosts must audit, not trust
 - Plugin output is DICOM SEG, decoded losslessly by an independent reference tool
 - All inference stays on a consumer Mac; no image leaves the device
 
@@ -59,31 +58,31 @@ spaces. -->
 
 <!-- CMPB uses a structured abstract. CONFIRM headings and word limit in the guide. -->
 
-**Background and Objective:** AI in an image viewer usually means one bespoke integration
-per model, or a remote inference service. Models differ in process lifetime, memory
-footprint, input and output type, dependency stack and licence. We asked whether such
-models can run locally in a clinical viewer under one declarative contract, and whether
-a host can safely admit them against declared resources.
+**Background and Objective:** AI in an image viewer usually means one integration per
+model, or a remote service. Models differ in process lifetime, memory, input and output,
+dependencies and licence. We asked whether such models can run locally under one
+declarative contract, and whether a host can safely admit them against declared
+resources.
 
 **Methods:** We extended an open-source macOS DICOM viewer with a plugin layer: a manifest
-schema, three execution models (resident server, session, one-shot), routing by declared
-output kind, licence gates and a memory arbiter. Four models were integrated: Gemma 4
-E4B, SAM 2, SAM 3 and TotalSegmentator. Evaluation used public CT from The Cancer
-Imaging Archive and TotalSegmentator's reference dataset.
+schema, three execution models (resident server, session, one-shot), routing by output
+kind, licence gates and a memory arbiter, hosting Gemma 4 E4B, SAM 2, SAM 3 and
+TotalSegmentator. We evaluated it on public CT from The Cancer Imaging Archive and the
+TotalSegmentator dataset.
 
-**Results:** An independent decoder (dcmqi) read 30/30 exported structures losslessly;
-routing through the layer was lossless across 689 per-structure comparisons on 7 series
-(minimum Dice 1.000000). <!-- src: EVALUATION.md §2–3 --> The arbiter matched its
-specification in 38 of 38 scenarios, yet would have admitted a job larger than the
-target machine: one plugin declared memory 5.5–6.1 times below its measured peak, and
-the corrected figure was low until worker processes were counted. <!-- src:
-EVALUATION.md §4 --> Four classes of defect that code review had passed were found and
-fixed. TODO(E6): latency per engine.
+**Results:** An independent decoder read 30/30 exported structures losslessly, and routing
+through the layer was lossless across 689 per-structure comparisons (minimum Dice
+1.000000). The arbiter matched its specification in 38/38 scenarios, yet would have
+admitted a job larger than the target machine: TotalSegmentator's declared memory was
+5.5–6.1 times below its measured peak. The Gemma plugin peaked at 1.54 times its
+declaration, which its own health report did not reveal. Evaluation found four defect
+classes that code review had passed. A new process returned its first result in 1.9 s
+(SAM 2) and 3.5 s (Gemma), no slower than the pre-plugin server. <!-- src: EVALUATION.md
+§2–4; exp7 summary; exp6 paper.json -->
 
-**Conclusions:** One contract can host heterogeneous local AI models, but policy
-correctness is not safety: an arbiter correct against its specification is unsafe when
-its inputs are self-declared. Hosts must audit declarations against measurement. The
-software is open source (MIT).
+**Conclusions:** One contract can host heterogeneous local AI models, but an arbiter
+correct against its specification is unsafe when its inputs are self-declared. Hosts
+must audit declarations against measurement. The software is open source (MIT).
 
 **Keywords:** DICOM; medical image viewer; on-device inference; plugin architecture;
 segmentation; software evaluation <!-- CONFIRM max keyword count -->
@@ -150,7 +149,9 @@ DICOM viewer [17]. Its contributions are:
    prompt-driven and vision–language plugins.
 3. Evidence that evaluation, rather than code review, found the architecture's defects.
    The clearest case is a self-declared memory figure about six times too low, which an
-   arbiter correct against its own specification would still have admitted.
+   arbiter correct against its own specification would still have admitted; a second
+   plugin's declaration was also low, and its own health report agreed with the
+   declaration rather than with the measurement.
 4. Open-source code under the MIT licence.
 
 We make no claim about the accuracy or clinical utility of any model. The models are
@@ -496,14 +497,26 @@ runs with the worker count overridden on `total`, the single-worker configuratio
 `total` median on that series, so which multiplier is typical is not established. No
 TotalSegmentator task fits a 16 GB Mac; the peak comes from CPU inference and did not
 change with thread count or grid size. <!-- src: EVALUATION.md §4; exp3_FINDINGS.md
-"Low-memory settings" --> <!-- TODO(E6): re-measure under torch 2.14.1; October runs
-used 2.13.0. -->
+"Low-memory settings" --> <!-- Memory runs used torch 2.13.0; E6 latency used the current lock, 2.14.1. Memory was not
+re-measured under 2.14.1; stated in §4.4. -->
 
 Not every declaration was low. SAM 2 declared 3.0 and peaked at 1.45 GB (1.35 GiB),
 0.45× its declaration. <!-- src: exp3_FINDINGS.md "Measured table" --> The peaks of
 Gemma 4 E4B and SAM 3 were not measured, so two of the four declarations in Table 1
 remain unaudited — a gap in the very property this paper argues a host must check.
-TODO(E6): measure both alongside latency.
+E7 measured them natively, on the GPU, over the process tree. The Gemma 4 E4B plugin
+peaked at 7.66–7.72 GiB in each of 4 runs, 1.54 times its declared 5.0. The plugin's own
+health report gave 4,910.7 MB, because it reports the MLX allocator's peak, which covers
+the model's arrays but not the interpreter, the image pipeline or generation; it
+therefore agreed with the declaration and gave no sign of the gap. SAM 2 on the GPU
+peaked at 2.74 GiB, under its declared 3.0 but twice its CPU figure, so a declaration
+measured on one device does not carry to another. On the 16 GB machine the arbiter
+targets, the declared figures for Gemma and SAM 2 sum to 8.0 GiB and are admitted
+together under the 8 GiB budget; their measured peaks sum to 10.46 GiB. <!-- src: exp7
+summary "peak_memory_gib" and per-case metrics.memory; exp6 health_memory_mb; plugins.json
+--> SAM 3 could not be measured, because its gated weights were not obtained (Table 4).
+<!-- CONFIRM: if the Gemma declaration is raised before submission, add the new figure here
+and to Table 3. -->
 
 One cost was invisible to the adapter's own reporting. A TotalSegmentator invocation
 took 76.4 s as a subprocess but 71.2 s as the sum of the adapter's stages; the 5.2 s
@@ -550,17 +563,60 @@ binds. <!-- src: EVALUATION.md §7 -->
 
 ## 3.6 End-to-end latency (E6)
 
-TODO(E6). Report per engine and per stage (cold start, warm inference, result routing
-and display), median (IQR), on M5 Max/128 GB and a 16 GB Apple Silicon Mac, on an idle
-machine. For SAM 2, report "session open + first click" as the user-facing cold figure,
-since the adapter reports ready before its model is loaded; later clicks are the warm
-figure. For one-shots, include the interpreter-startup gap. Fig. 5.
+Of the cases run, those that met the idle gate were 8 of 10 cold starts for the built-in
+Gemma server, 5 of 10 for the Gemma plugin, 10 of 10 for SAM 2, and 11 of 15 and 15 of 15
+TotalSegmentator runs for `total` and `total_lowmem`; only these are reported (Fig. 5). All
+requests in them succeeded. <!-- src: eval/results/exp6_latency_apple-m5-max-128-gb_paper.json (idle-gated) -->
+
+**Cold start.** From a new process to the first result took a median of 1.94 s (IQR
+1.90–1.96) for SAM 2, 3.51 s (3.48–3.56) for the Gemma plugin and 3.52 s (3.49–3.54) for
+the built-in Gemma server. For SAM 2 most of this is the first session open, 1.25 s,
+because the adapter reports ready (0.61 s after spawn) before it loads the model; a
+client that treats "ready" as "loaded" would under-report its cold start by about two
+thirds. Both Gemma servers reported ready after 2.13–2.14 s.
+
+**Warm requests.** Gemma requests took about a second: 973 ms (IQR 961–976) for
+detection, 876 ms (771–937) for a region description and 1,270 ms (1,251–1,287) for a
+full analysis through the plugin, against 986, 815 and 1,289 ms through the built-in
+server. Routing the same model through the plugin layer therefore cost nothing that this
+measurement resolves. For SAM 2, a click on an open session took 11.1 ms (10.7–11.4,
+n=240). Encoding a new slice took 63.2 ms (62.8–63.6), measured as session open plus
+the first click: on the GPU the adapter's encode returns once the work is queued, and
+the work completes inside the first click (51.1 ms, against 11.1 ms for later clicks),
+so the adapter's self-reported encode time of about 10 ms is not what the user waits
+for. On the GPU encoding cost 5.7 times a decode, against 17.1 times on the CPU (§3.4).
+
+**One-shot segmentation.** TotalSegmentator's `total` task took a median of 57.5 s per
+run (IQR 55.6–64.8; 411–493-slice series), of which 42.2 s was segmentation and 10.1 s
+DICOM SEG export. The `total_lowmem` task took 90.6 s (83.5–97.9), 1.47–1.61 times
+`total` on the same series, almost all of it in segmentation; this settles the multiplier left
+open in §3.3. Outside the adapter's own stages each invocation spent 2.5 s (2.52–2.55),
+the native counterpart of the 5.2 s interpreter and import cost measured in the sandbox.
+Cold starts here are of new processes with the file cache warm; a first run after
+reboot would read weights from disk.
 
 ## 3.7 Prompt-driven and VLM plugins on public CT (E7)
 
-TODO(E7). SAM 2/3: per-structure Dice for a centroid click on the central slice, framed
-as a coordinate-mapping check. Gemma 4 E4B: protocol round trip and box placement,
-reported descriptively.
+Four of the six TotalSegmentator reference cases could be read; the other two are the
+cases ITK rejected in §3.2, and are recorded as failures. <!-- src: eval/results/exp7_prompt_vlm_apple-m5-max-128-gb_summary.json -->
+
+**SAM 2.** All 214 structures large enough to click returned a mask on the slice's own
+grid (0 grid mismatches). The median Dice against the reference was 0.79 (IQR 0.55–0.90),
+170 of 214 masks reached 0.5, and for structures of at least 1,000 pixels the median
+was 0.84. The transposed control separated cleanly: of the 191 structures for which the
+transposed click fell outside the structure, the median control Dice was 0.00 (IQR
+0.00–0.01). The remaining 23 transposed clicks still landed inside their structure,
+mostly midline or large structures (vertebrae, liver, lungs, bladder), and are not
+informative as controls. A transposed axis, a scale error or an inverted run-length phase would each
+have pushed the clicked masks toward the control's distribution; none did. Of the 27 masks below Dice 0.3, 25 were larger than their structure, 22 of them for structures under 1,000 pixels, where a single click returned a surrounding region many times the structure's size; the other 2 were smaller than it. That is what one unrefined click produces from a general-purpose model on small anatomy, not a mapping error, and it is not evaluated further. <!-- src: exp7 jsonl, structures with dice < 0.3 --> The structure centroid fell outside the structure for 58
+of 214 structures, which is why clicks were placed at the most interior pixel instead.
+<!-- src: exp7 summary "control_click_inside_structure",
+"control_transposed_dice_click_outside", "centroid_outside_structure" -->
+
+**Gemma 4 E4B.** All 24 requests (detection and analysis, 3 slices in each of 4 cases)
+completed. They returned 46 boxes; all 46 lay inside the image and all 46 centres lay on
+the body rather than on air. These counts show that boxes come back in the image's
+frame. They say nothing about whether a box marks a real finding.
 
 ## 3.8 Defects found by evaluation
 
@@ -573,7 +629,7 @@ block; EVALUATION.md §4, §6; exp2_REPORT.md -->
 
 | # | Defect | Found by | Consequence if shipped | Fix |
 |---|---|---|---|---|
-| 1 | TotalSegmentator declared 3.5 GB; measured peak 20.9–23.1 GB (5.5–6.1×), and 25.41 GB over the process tree | E3 | On 16 GB, admits a job larger than the machine | Measured declarations (25.5 / 24.0); per-task `ram_gb`; process-tree measurement |
+| 1 | Self-declared memory too low. TotalSegmentator declared 3.5 GB; measured peak 20.9–23.1 GB (5.5–6.1×), and 25.41 GB over the process tree. Gemma 4 E4B declared 5.0; measured 7.72 GiB (1.54×), while its health report gave 4,910.7 MB | E3, E7 | On 16 GB, admits a job larger than the machine; admits Gemma with SAM 2 at 10.46 GiB measured against an 8 GiB budget | TotalSegmentator: measured declarations (25.5 / 24.0), per-task `ram_gb`, process-tree measurement. Gemma: see §3.3 |
 | 2 | Running one-shot absent from the arbiter's runtime state | E3 | A resident engine admitted alongside the heaviest process | In-flight one-shots counted and non-evictable |
 | 3 | SEG export required Type 2 SliceThickness | E2 | No SEG produced for any series in the public collection | Handle absent slice thickness |
 | 4 | Packaged build: no adapters bundled; bytecode written into the signed bundle by adapters and by the bundled interpreter | E5 | Store lists nothing installable; signature broken on first launch | Bundle adapters; suppress bytecode writes in the bundle |
@@ -584,9 +640,9 @@ EVALUATION.md §5, §8 -->
 | Adapter | Verified by execution | Not verified, and why |
 |---|---|---|
 | TotalSegmentator | End-to-end on TCIA CT (E2, 7 series); SEG conformance (E1); native process-tree memory (E3) | Accuracy (not claimed); GPU (ships CPU-only) |
-| SAM 2 | 12/12 protocol round trips with real weights; mask decoded by host (E4) | Accuracy; TODO(E7) coordinate-mapping check |
-| SAM 3 | Protocol conformance; licence gate | Inference and memory: gated weights were unavailable in the August campaign; they have since been obtained, so this is a gap in coverage rather than in access — TODO(E6/E7) |
-| Gemma 4 E4B | Protocol conformance | Inference and memory: no MLX runtime in the August campaign; the runtime is now installed from the shipped lock — TODO(E6/E7) |
+| SAM 2 | 12/12 protocol round trips with real weights, mask decoded by host (E4); latency (E6); coordinate mapping on 214 structures and GPU memory (E7) | Accuracy (not claimed) |
+| SAM 3 | Protocol conformance; licence gate | Inference, latency and memory: its weights are gated by the vendor and were not obtained for this study |
+| Gemma 4 E4B | Protocol conformance; latency against the built-in server (E6); 24/24 requests on public CT and process-tree memory (E7) | Correctness of findings (not claimed) |
 
 ---
 
@@ -604,11 +660,24 @@ detect a single-voxel change.
 The main lesson concerns trust rather than mechanism. The arbiter was correct against
 its specification in every scenario tested, yet it would have admitted a job larger than
 the target machine, because its specification takes a plugin's self-declared memory as
-given. Correct policy over incorrect declarations is still unsafe. A host that admits
-work against declared resources must audit those declarations against measurement, and
-the measurement must match how the plugin actually runs: the corrected TotalSegmentator
-figure was still
-1.9 GB low until worker processes were counted.
+given. Correct policy over incorrect declarations is still unsafe. This was not one bad
+number: of the three plugins whose peaks we could measure, two had declared too little.
+A host that admits work against declared resources must audit those declarations against
+measurement, and the measurement must match how the plugin actually runs. The corrected
+TotalSegmentator figure was still 1.9 GB low until worker processes were counted; the
+SAM 2 figure doubled between CPU and GPU; and the Gemma plugin's own health report,
+which a host might be tempted to use as the audit, measured the model's arrays rather
+than the process and agreed with the wrong declaration. The audit has to be external to
+the plugin.
+
+Through the host's contract the layer was also fast enough to use interactively: a click
+on an open SAM 2 session returned in about 11 ms, a Gemma request in about a second, and
+a whole-body segmentation in about a minute, with no measurable difference between the
+Gemma plugin and the viewer's earlier built-in server. Two timing traps mirrored the
+memory finding. SAM 2 reported "ready" before loading its model, and on the GPU it
+reported an encode time that excluded the work it had queued. Both are self-reports that
+a host would take at face value, and both were corrected only by timing from outside the
+process.
 
 ## 4.2 What review missed and evaluation found
 
@@ -657,10 +726,15 @@ conventional marketplace opens.
 - **Platform.** The software runs on macOS and Apple Silicon only, and MLX is
   platform-specific. TotalSegmentator runs on the CPU, as it ships.
 - **Measurement conditions.** E1–E5 ran in a sandbox with no visible GPU and with process
-  pools replaced by threads, so their timings are CPU-only figures. E6 is native but was
-  run on one high-end machine; the 16 GB configuration the arbiter is designed around
-  was analysed through the arbiter's decisions (E3), not timed. Cold starts were measured
-  without flushing the file cache.
+  pools replaced by threads, so their timings are CPU-only figures. E6 and E7 are native
+  but were run on one high-end machine; the 16 GB configuration the arbiter is designed
+  around was analysed through the arbiter's decisions (E3), not timed. Cold starts were
+  measured without flushing the file cache. Half of the Gemma plugin's cold starts, and 4
+  of 15 `total` runs, did not meet the idle gate and were excluded. TotalSegmentator's
+  peak memory was measured under PyTorch 2.13.0, not under the 2.14.1 the plugin now locks.
+- **SAM 3 was not executed.** Its weights are gated by the vendor and were not obtained,
+  so its declaration is unaudited and its inference unverified; the contract's claim to
+  host it rests on protocol conformance alone.
 - **2D prompts.** Prompt-driven segmentation returns per-slice 2D masks; propagating a prompt
   through a volume is not implemented.
 - **Overlapping structures.** The `seg3d` labelmap encoding clips overlapping structures.
@@ -687,9 +761,10 @@ images, so that radiology and pathology images can be read with local AI in one 
 A single declarative contract with three execution models can host heterogeneous AI
 models locally inside a DICOM viewer, without per-model changes to the viewer and
 without images leaving the device. Evaluation on public CT showed that the layer adds no
-loss and writes standard segmentation objects. It also found four defects that code
-review had passed, the most consequential being a self-declared memory figure that an
-otherwise correct arbiter would have trusted. Hosts that arbitrate local AI models
+loss, writes standard segmentation objects, and returns interactive results in
+milliseconds to seconds. It also found four classes of defect that code review had
+passed, the most consequential being self-declared memory figures, low for two of the
+three plugins measured, that an otherwise correct arbiter would have trusted. Hosts that arbitrate local AI models
 against declared resources should audit those declarations against measurement.
 
 ---
@@ -724,9 +799,13 @@ SeriesInstanceUID in `eval/fetch_data.py`; raw per-case results are in `eval/res
 reference list. Not yet done as of 2026-10-18. -->
 
 **Declaration of generative AI and AI-assisted technologies in the writing process:**
-<!-- CONFIRM. Elsevier requires this statement when such tools were used in writing,
-placed immediately before the reference list, and requires that AI tools are not listed
-as authors. The authors must state which tool was used and for what. -->
+During the preparation of this work the authors used Claude (Anthropic) to draft and
+revise manuscript text, to write evaluation and figure-generation scripts, and to
+retrieve bibliographic metadata from Crossref and DataCite. Every number in the
+manuscript was copied from the evaluation result files, and every reference was checked
+against its DOI record. After using this tool, the authors reviewed and edited the
+content as needed and take full responsibility for the content of the published article.
+<!-- CONFIRM: authors to review this wording; Elsevier places it before the references. -->
 
 ---
 
@@ -762,6 +841,10 @@ dropped structure) showing the comparison's sensitivity.
 implicit embedding cache in a resident server. CPU-only sandbox figures.
 (`eval/figures/exp4_encode_decode.png`)
 
-**Figure 5.** TODO(E6): per-stage latency by engine and machine.
+**Figure 5.** End-to-end latency through the host's contract on an Apple M5 Max (128 GB),
+idle-gated runs only. (A) New process to first result for each server engine; for SAM 2
+this includes the first session open and click. (B) Warm requests, log scale; SAM 2
+encode is session open plus the first click. (C) TotalSegmentator per run: median
+adapter stages (bars) and median process wall time (|). (`eval/figures/exp6_latency.png`)
 
 <!-- CONFIRM display-item allowance; consider moving Fig. 3/4 to supplementary. -->

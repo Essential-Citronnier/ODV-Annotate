@@ -6,8 +6,8 @@ Measured lengths below. -->
 
 - One declarative contract hosts four local AI models under three execution models
 - Evaluation on public CT found four defects that code review had missed
-- A plugin under-declared peak memory 6-fold; arbiters must audit, not trust
+- Two of three audited plugins under-declared memory; hosts must audit, not trust
 - Plugin output is DICOM SEG, decoded losslessly by an independent reference tool
 - All inference stays on a consumer Mac; no image leaves the device
 
-<!-- lengths: 80, 70, 74, 79, 65 -->
+<!-- lengths: 80, 70, 79, 79, 65 -->

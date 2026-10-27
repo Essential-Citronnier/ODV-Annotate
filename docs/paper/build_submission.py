@@ -63,6 +63,22 @@ def blockers(text: str, figures: list[Path]) -> list[str]:
         for line in text.splitlines():
             if marker in line:
                 found.append(f"marker {marker!r}: {line.strip()[:100]}")
+    # Fields whose only content was a CONFIRM comment are empty once comments
+    # are stripped; a desk editor checks every one of these.
+    required = ("**Affiliations:**", "**Corresponding author", "**CRediT authorship",
+                "**Declaration of competing interest:**", "**Funding:**",
+                "**Declaration of generative AI")
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        for field in required:
+            if line.startswith(field):
+                body = line.split(":**", 1)[-1].strip()
+                following = lines[index + 1].strip() if index + 1 < len(lines) else ""
+                if not body and (not following or following.startswith("**")
+                                 or following == "---"):
+                    found.append(f"empty field: {field.strip('*')}")
+    if re.search(r"\^\d\^\s*\^\d\^", text) or re.search(r"\^1\^\s*$", text, re.M):
+        found.append("affiliation lines are empty")
     for figure in figures:
         if not figure.is_file():
             found.append(f"missing figure: {figure.relative_to(REPO)}")

@@ -22,7 +22,9 @@ itself. Our arbiter was correct against its specification in all 38 scenarios te
 would nevertheless have admitted a segmentation job larger than the target machine,
 because one plugin's declared figure was between 5.5 and 6.1 times below its measured
 peak. The corrected figure was itself too low until the measurement counted the model's
-worker processes rather than one process. Policy correctness is not safety when the
+worker processes rather than one process. Nor was it an isolated case: a second plugin's
+declared memory was also low, and that plugin's own health report agreed with the
+declaration rather than with the measurement. Policy correctness is not safety when the
 policy's inputs are self-declared; a host that arbitrates local models must audit those
 declarations against measurement of the plugin as it actually runs. We report this, and
 three other defect classes that code review had passed, alongside the results that passed.

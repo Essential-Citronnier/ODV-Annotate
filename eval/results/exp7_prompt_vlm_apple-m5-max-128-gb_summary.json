@@ -1,0 +1,83 @@
+{
+  "sam2": {
+    "cases_ok": 4,
+    "cases": 6,
+    "unreadable_cases": [
+      "s0189",
+      "s0193"
+    ],
+    "structures_attempted": 214,
+    "structures_scored": 214,
+    "grid_mismatches": 0,
+    "dice": {
+      "n": 214,
+      "median": 0.7869,
+      "q1": 0.5485,
+      "q3": 0.9022,
+      "min": 0.0055,
+      "max": 0.9849
+    },
+    "dice_area_ge_1000px": {
+      "n": 51,
+      "median": 0.8373,
+      "q1": 0.5345,
+      "q3": 0.9288,
+      "min": 0.0055,
+      "max": 0.9849
+    },
+    "dice_ge_0_5": 170,
+    "control_transposed_dice": {
+      "n": 212,
+      "median": 0.0,
+      "q1": 0.0,
+      "q3": 0.0408,
+      "min": 0.0,
+      "max": 0.9731
+    },
+    "control_click_inside_structure": 23,
+    "control_transposed_dice_click_outside": {
+      "n": 191,
+      "median": 0.0,
+      "q1": 0.0,
+      "q3": 0.0101,
+      "min": 0.0,
+      "max": 0.8929
+    },
+    "centroid_outside_structure": 58,
+    "prompt_client_ms": {
+      "n": 214,
+      "median": 46.4,
+      "q1": 46.2,
+      "q3": 46.7,
+      "min": 6.1,
+      "max": 75.3
+    },
+    "peak_memory_gib": 2.741
+  },
+  "gemma-4-e4b": {
+    "cases_ok": 4,
+    "cases": 6,
+    "requests": 24,
+    "requests_ok": 24,
+    "boxes": 46,
+    "boxes_inside_image": 46,
+    "box_centres_on_body": 46,
+    "request_client_ms": {
+      "n": 24,
+      "median": 1665.85,
+      "q1": 1269.025,
+      "q3": 2181.575,
+      "min": 939.7,
+      "max": 2403.6
+    },
+    "spawn_to_ready_s": {
+      "n": 4,
+      "median": 2.116,
+      "q1": 2.1042,
+      "q3": 2.1263,
+      "min": 2.102,
+      "max": 2.128
+    },
+    "peak_memory_gib": 7.724
+  }
+}

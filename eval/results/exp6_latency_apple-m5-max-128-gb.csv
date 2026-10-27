@@ -1,0 +1,37 @@
+engine,measure,unit,n,median,q1,q3,min,max
+gemma-4-e4b,analyze (first),ms,5,1389.9,1371.0,1427.7,1326.6,1439.1
+gemma-4-e4b,analyze (warm),ms,10,1269.75,1251.05,1287.125,1223.2,1311.7
+gemma-4-e4b,describe-roi (warm),ms,15,876.0,770.7,937.0,721.9,1045.1
+gemma-4-e4b,detect-abnormalities (warm),ms,15,973.1,961.1,976.15,927.0,1020.9
+gemma-4-e4b,spawn to first /health,s,5,0.243,0.238,0.244,0.237,0.245
+gemma-4-e4b,spawn to ready,s,5,2.136,2.118,2.147,2.105,2.152
+gemma-4-e4b,stop,s,5,0.209,0.209,0.209,0.196,0.265
+gemma-builtin,analyze (first),ms,8,1387.75,1358.35,1400.725,1280.0,1406.8
+gemma-builtin,analyze (warm),ms,34,1289.2,1249.35,1331.9,1191.3,1973.8
+gemma-builtin,describe-roi (warm),ms,42,814.55,754.95,900.425,624.2,1011.6
+gemma-builtin,detect-abnormalities (warm),ms,42,985.95,968.1,1593.825,913.4,2277.4
+gemma-builtin,spawn to first /health,s,8,0.263,0.245,0.28,0.242,0.444
+gemma-builtin,spawn to ready,s,8,2.133,2.103,2.17,2.052,2.946
+gemma-builtin,stop,s,8,0.255,0.209,0.292,0.209,0.317
+sam2,open + first click,ms,60,63.3,62.875,64.2,62.0,2389.2
+sam2,prompt (first click),ms,60,51.1,50.8,51.525,47.0,87.8
+sam2,prompt (later clicks),ms,240,11.1,10.7,11.4,9.6,13.6
+sam2,session open (first),ms,10,1254.3,1227.575,1271.425,1219.0,2303.2
+sam2,session open (warm),ms,50,12.2,11.7,12.575,11.0,17.2
+sam2,spawn to first /health,s,10,0.609,0.584,0.617,0.581,3.243
+sam2,spawn to ready,s,10,0.609,0.584,0.617,0.581,3.243
+sam2,stop,s,10,0.203,0.183,0.208,0.131,0.239
+totalsegmentator,total: Checking model environment,s,11,0.161,0.142,0.56,0.137,1.528
+totalsegmentator,total: Complete,s,11,2.488,2.474,2.502,2.464,2.517
+totalsegmentator,total: Measuring structures,s,11,3.265,2.852,3.744,2.766,3.815
+totalsegmentator,total: Running segmentation,s,11,42.186,39.431,48.833,37.221,52.42
+totalsegmentator,total: Writing DICOM SEG,s,11,10.106,8.659,11.709,8.458,12.027
+totalsegmentator,total: startup_to_first_progress,s,11,0.05,0.049,0.051,0.048,0.053
+totalsegmentator,total: wall,s,11,57.505,55.611,64.779,54.87,68.879
+totalsegmentator,total_lowmem: Checking model environment,s,15,0.143,0.138,0.153,0.134,0.16
+totalsegmentator,total_lowmem: Complete,s,15,2.478,2.471,2.482,2.465,2.484
+totalsegmentator,total_lowmem: Measuring structures,s,15,3.213,2.733,3.689,2.692,3.749
+totalsegmentator,total_lowmem: Running segmentation,s,15,72.45,69.779,82.096,69.098,82.675
+totalsegmentator,total_lowmem: Writing DICOM SEG,s,15,9.961,8.436,11.703,8.335,11.794
+totalsegmentator,total_lowmem: startup_to_first_progress,s,15,0.05,0.048,0.051,0.047,0.057
+totalsegmentator,total_lowmem: wall,s,15,90.554,83.494,97.921,82.846,98.548

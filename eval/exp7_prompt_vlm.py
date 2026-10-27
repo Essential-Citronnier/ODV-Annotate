@@ -373,15 +373,37 @@ def _q(values: list[float]) -> dict[str, Any]:
             "min": round(values[0], 4), "max": round(values[-1], 4)}
 
 
-def summarise(results: Path) -> dict[str, Any]:
+def control_inside(rows: list[dict], data: Path) -> dict[tuple[str, str], bool]:
+    """Whether each transposed control click itself lands inside the structure.
+
+    A transposed click that still lands inside its structure (a midline
+    vertebra, the liver) is not a negative control, so the control is
+    summarised only where it lands outside. Recomputed from the references;
+    no model is involved.
+    """
+    out: dict[tuple[str, str], bool] = {}
+    for case in sorted({r["metrics"].get("case") for r in rows
+                        if r["case_id"].split("/")[0] in SAM_ENGINES and r["ok"]}):
+        _, targets = structure_targets(data / case)
+        for t in targets:
+            x, y = t["click"]
+            h, w = t["mask"].shape
+            out[(case, t["structure"])] = bool(0 <= y < w and 0 <= x < h
+                                               and t["mask"][x, y])
+    return out
+
+
+def summarise(results: Path, data: Path | None = None) -> dict[str, Any]:
     rows = [json.loads(line) for line in results.read_text().splitlines()[1:]
             if line.strip()]
+    inside = control_inside(rows, data) if data is not None else {}
     summary: dict[str, Any] = {}
     for engine in SAM_ENGINES:
         cases = [r for r in rows if r["case_id"].startswith(engine + "/")]
         if not cases:
             continue
-        structures = [s for r in cases for s in r["metrics"].get("structures", [])]
+        structures = [dict(s, case=r["metrics"].get("case"))
+                      for r in cases for s in r["metrics"].get("structures", [])]
         scored = [s for s in structures if s.get("dice") is not None]
         dices = [s["dice"] for s in scored]
         controls = [s["control_transposed_dice"] for s in scored
@@ -398,6 +420,12 @@ def summarise(results: Path) -> dict[str, Any]:
             "dice_area_ge_1000px": _q(large),
             "dice_ge_0_5": sum(d >= 0.5 for d in dices),
             "control_transposed_dice": _q(controls),
+            "control_click_inside_structure": sum(
+                1 for s in scored if inside.get((s["case"], s["structure"]))),
+            "control_transposed_dice_click_outside": _q([
+                s["control_transposed_dice"] for s in scored
+                if "control_transposed_dice" in s and (s["case"], s["structure"]) in inside
+                and not inside[(s["case"], s["structure"])]]),
             "centroid_outside_structure": sum(1 for s in scored
                                               if not s["centroid_inside"]),
             "prompt_client_ms": _q([s["client_ms"] for s in scored]),
@@ -452,7 +480,8 @@ def main(argv: list[str] | None = None) -> int:
     results = args.results or (repo / "eval/results"
                                / f"{EXPERIMENT}_{host_tag(profile)}.jsonl")
     if args.summary_only:
-        print(json.dumps(summarise(results), indent=2))
+        data = (args.data or repo / ".eval/data/ground_truth").resolve()
+        print(json.dumps(summarise(results, data), indent=2))
         return 0
 
     data = (args.data or repo / ".eval/data/ground_truth").resolve()
@@ -495,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
             recorder.write(result)
             print(f"  ok={result.ok} {result.error or ''}"[:300], flush=True)
 
-    print(json.dumps(summarise(results), indent=2))
+    print(json.dumps(summarise(results, data), indent=2))
     return 0
 
 

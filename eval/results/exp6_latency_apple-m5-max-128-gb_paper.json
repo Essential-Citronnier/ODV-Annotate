@@ -1,0 +1,340 @@
+{
+  "machine": "Apple M5 Max / 128 GB",
+  "gated_only": true,
+  "servers": {
+    "gemma-builtin": {
+      "cycles": 8,
+      "spawn_to_ready_s": {
+        "n": 8,
+        "median": 2.133,
+        "q1": 2.103,
+        "q3": 2.17,
+        "min": 2.052,
+        "max": 2.946
+      },
+      "time_to_first_result_s": {
+        "n": 8,
+        "median": 3.524,
+        "q1": 3.492,
+        "q3": 3.539,
+        "min": 3.332,
+        "max": 4.353
+      },
+      "warm_request_ms": {
+        "detect-abnormalities": {
+          "n": 42,
+          "median": 985.95,
+          "q1": 968.1,
+          "q3": 1593.825,
+          "min": 913.4,
+          "max": 2277.4
+        },
+        "describe-roi": {
+          "n": 42,
+          "median": 814.55,
+          "q1": 754.95,
+          "q3": 900.425,
+          "min": 624.2,
+          "max": 1011.6
+        },
+        "analyze": {
+          "n": 34,
+          "median": 1289.2,
+          "q1": 1249.35,
+          "q3": 1331.9,
+          "min": 1191.3,
+          "max": 1973.8
+        }
+      }
+    },
+    "gemma-4-e4b": {
+      "cycles": 5,
+      "spawn_to_ready_s": {
+        "n": 5,
+        "median": 2.136,
+        "q1": 2.118,
+        "q3": 2.147,
+        "min": 2.105,
+        "max": 2.152
+      },
+      "time_to_first_result_s": {
+        "n": 5,
+        "median": 3.508,
+        "q1": 3.476,
+        "q3": 3.564,
+        "min": 3.474,
+        "max": 3.591
+      },
+      "warm_request_ms": {
+        "detect-abnormalities": {
+          "n": 15,
+          "median": 973.1,
+          "q1": 961.1,
+          "q3": 976.15,
+          "min": 927.0,
+          "max": 1020.9
+        },
+        "describe-roi": {
+          "n": 15,
+          "median": 876.0,
+          "q1": 770.7,
+          "q3": 937.0,
+          "min": 721.9,
+          "max": 1045.1
+        },
+        "analyze": {
+          "n": 10,
+          "median": 1269.75,
+          "q1": 1251.05,
+          "q3": 1287.125,
+          "min": 1223.2,
+          "max": 1311.7
+        }
+      }
+    },
+    "sam2": {
+      "cycles": 10,
+      "spawn_to_ready_s": {
+        "n": 10,
+        "median": 0.609,
+        "q1": 0.584,
+        "q3": 0.617,
+        "min": 0.581,
+        "max": 3.243
+      },
+      "time_to_first_result_s": {
+        "n": 10,
+        "median": 1.94,
+        "q1": 1.896,
+        "q3": 1.956,
+        "min": 1.885,
+        "max": 5.632
+      },
+      "warm_request_ms": {
+        "later click (decode)": {
+          "n": 240,
+          "median": 11.1,
+          "q1": 10.7,
+          "q3": 11.4,
+          "min": 9.6,
+          "max": 13.6
+        },
+        "open + first click (encode)": {
+          "n": 50,
+          "median": 63.2,
+          "q1": 62.8,
+          "q3": 63.6,
+          "min": 62.0,
+          "max": 64.8
+        }
+      }
+    }
+  },
+  "oneshot": {
+    "total": {
+      "runs": 11,
+      "series": [
+        "tcia_1556218467652708",
+        "tcia_2121018880599426",
+        "tcia_7962814028413347"
+      ],
+      "wall_s": {
+        "n": 11,
+        "median": 57.505,
+        "q1": 55.611,
+        "q3": 64.779,
+        "min": 54.87,
+        "max": 68.879
+      },
+      "outside_adapter_s": {
+        "n": 11,
+        "median": 2.54,
+        "q1": 2.523,
+        "q3": 2.552,
+        "min": 2.515,
+        "max": 2.569
+      },
+      "stages_s": {
+        "startup_to_first_progress": {
+          "n": 11,
+          "median": 0.05,
+          "q1": 0.049,
+          "q3": 0.051,
+          "min": 0.048,
+          "max": 0.053
+        },
+        "Checking model environment": {
+          "n": 11,
+          "median": 0.161,
+          "q1": 0.142,
+          "q3": 0.56,
+          "min": 0.137,
+          "max": 1.528
+        },
+        "Running segmentation": {
+          "n": 11,
+          "median": 42.186,
+          "q1": 39.431,
+          "q3": 48.833,
+          "min": 37.221,
+          "max": 52.42
+        },
+        "Measuring structures": {
+          "n": 11,
+          "median": 3.265,
+          "q1": 2.852,
+          "q3": 3.744,
+          "min": 2.766,
+          "max": 3.815
+        },
+        "Writing DICOM SEG": {
+          "n": 11,
+          "median": 10.106,
+          "q1": 8.659,
+          "q3": 11.709,
+          "min": 8.458,
+          "max": 12.027
+        },
+        "Complete": {
+          "n": 11,
+          "median": 2.488,
+          "q1": 2.474,
+          "q3": 2.502,
+          "min": 2.464,
+          "max": 2.517
+        }
+      },
+      "wall_s_by_series": {
+        "tcia_1556218467652708": {
+          "n": 4,
+          "median": 56.263,
+          "q1": 54.983,
+          "q3": 58.773,
+          "min": 54.87,
+          "max": 62.576
+        },
+        "tcia_2121018880599426": {
+          "n": 4,
+          "median": 56.34,
+          "q1": 55.764,
+          "q3": 57.756,
+          "min": 55.303,
+          "max": 60.734
+        },
+        "tcia_7962814028413347": {
+          "n": 3,
+          "median": 67.03,
+          "q1": 67.007,
+          "q3": 67.954,
+          "min": 66.983,
+          "max": 68.879
+        }
+      }
+    },
+    "total_lowmem": {
+      "runs": 15,
+      "series": [
+        "tcia_1556218467652708",
+        "tcia_2121018880599426",
+        "tcia_7962814028413347"
+      ],
+      "wall_s": {
+        "n": 15,
+        "median": 90.554,
+        "q1": 83.494,
+        "q3": 97.921,
+        "min": 82.846,
+        "max": 98.548
+      },
+      "outside_adapter_s": {
+        "n": 15,
+        "median": 2.527,
+        "q1": 2.523,
+        "q3": 2.532,
+        "min": 2.514,
+        "max": 2.533
+      },
+      "stages_s": {
+        "startup_to_first_progress": {
+          "n": 15,
+          "median": 0.05,
+          "q1": 0.048,
+          "q3": 0.051,
+          "min": 0.047,
+          "max": 0.057
+        },
+        "Checking model environment": {
+          "n": 15,
+          "median": 0.143,
+          "q1": 0.138,
+          "q3": 0.153,
+          "min": 0.134,
+          "max": 0.16
+        },
+        "Running segmentation": {
+          "n": 15,
+          "median": 72.45,
+          "q1": 69.779,
+          "q3": 82.096,
+          "min": 69.098,
+          "max": 82.675
+        },
+        "Measuring structures": {
+          "n": 15,
+          "median": 3.213,
+          "q1": 2.733,
+          "q3": 3.689,
+          "min": 2.692,
+          "max": 3.749
+        },
+        "Writing DICOM SEG": {
+          "n": 15,
+          "median": 9.961,
+          "q1": 8.436,
+          "q3": 11.703,
+          "min": 8.335,
+          "max": 11.794
+        },
+        "Complete": {
+          "n": 15,
+          "median": 2.478,
+          "q1": 2.471,
+          "q3": 2.482,
+          "min": 2.465,
+          "max": 2.484
+        }
+      },
+      "wall_s_by_series": {
+        "tcia_1556218467652708": {
+          "n": 5,
+          "median": 83.338,
+          "q1": 83.146,
+          "q3": 83.432,
+          "min": 82.846,
+          "max": 83.556
+        },
+        "tcia_2121018880599426": {
+          "n": 5,
+          "median": 90.554,
+          "q1": 90.536,
+          "q3": 90.739,
+          "min": 90.332,
+          "max": 90.881
+        },
+        "tcia_7962814028413347": {
+          "n": 5,
+          "median": 98.378,
+          "q1": 98.189,
+          "q3": 98.502,
+          "min": 97.654,
+          "max": 98.548
+        }
+      }
+    },
+    "lowmem_over_total_by_series": [
+      1.481,
+      1.607,
+      1.468
+    ]
+  }
+}
