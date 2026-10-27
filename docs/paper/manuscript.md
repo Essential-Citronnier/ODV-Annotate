@@ -28,16 +28,21 @@ auditing result is a single observation. -->
 **Running title:** Auditing declared resources in a DICOM viewer plugin layer
 <!-- 58 characters. CONFIRM the journal's running-title character limit. -->
 
-**Authors:** Daeseong Kim^1^, JoonNyung Heo^2,\*^
-<!-- CONFIRM: author order and ORCID iDs. Author list settled 2026-10-18 as the two
-contributors to this work; the ten-author list of the host-viewer paper [6] is not
-carried over. Confirm with the co-authors of [17] before submission. -->
+**Author:** Daeseong Kim^1,2^
+<!-- Sole author, settled 2026-10-27 (supersedes the two-author list of 2026-10-18).
+ORCID is entered in the submission system. -->
 
 **Affiliations:**
-^1^ <!-- CONFIRM: department, institution, city, country --> ^2^ <!-- CONFIRM:
-department, institution, city, country -->
+^1^ Division of Medical Oncology, Department of Internal Medicine, Yonsei Cancer Center,
+Yonsei University College of Medicine, Seoul, Republic of Korea\
+^2^ Department of Pathology and Laboratory Medicine, Memorial Sloan Kettering Cancer
+Center, New York, NY, USA
 
-**Corresponding author (\*):** <!-- CONFIRM: name, full postal address, email -->
+**Corresponding author:** Daeseong Kim, Division of Medical Oncology, Department of
+Internal Medicine, Yonsei Cancer Center, Yonsei University College of Medicine, 50-1
+Yonsei-ro, Seodaemun-gu, Seoul 03722, Republic of Korea. Email: lemonaatree@gmail.com
+<!-- Postal address is the Yonsei Cancer Center street address; swap the email for an
+institutional one if preferred. -->
 
 ---
 
@@ -772,15 +777,13 @@ against declared resources should audit those declarations against measurement.
 # Declarations
 
 **CRediT authorship contribution statement:**
-<!-- CONFIRM. Template for the two-author list; delete roles that do not apply. Daeseong
-Kim: Conceptualization, Methodology, Software, Validation, Formal analysis,
-Investigation, Data curation, Writing – original draft, Visualization. JoonNyung Heo:
-Conceptualization, Software, Resources, Writing – review & editing, Supervision, Project
-administration. -->
+Daeseong Kim: Conceptualization, Methodology, Software, Validation, Formal analysis,
+Investigation, Data curation, Writing – original draft, Writing – review & editing,
+Visualization.
 
 **Declaration of competing interest:** <!-- CONFIRM. Elsevier requires an explicit
-statement even when there is nothing to declare; the authors must assert this
-themselves. Suggested wording if true: "The authors declare that they have no known
+statement even when there is nothing to declare; the author must assert it.
+Suggested wording if true: "The author declares no known
 competing financial interests or personal relationships that could have appeared to
 influence the work reported in this paper." -->
 
@@ -799,13 +802,13 @@ SeriesInstanceUID in `eval/fetch_data.py`; raw per-case results are in `eval/res
 reference list. Not yet done as of 2026-10-18. -->
 
 **Declaration of generative AI and AI-assisted technologies in the writing process:**
-During the preparation of this work the authors used Claude (Anthropic) to draft and
+During the preparation of this work the author used Claude (Anthropic) to draft and
 revise manuscript text, to write evaluation and figure-generation scripts, and to
 retrieve bibliographic metadata from Crossref and DataCite. Every number in the
 manuscript was copied from the evaluation result files, and every reference was checked
-against its DOI record. After using this tool, the authors reviewed and edited the
+against its DOI record. After using this tool, the author reviewed and edited the
 content as needed and take full responsibility for the content of the published article.
-<!-- CONFIRM: authors to review this wording; Elsevier places it before the references. -->
+<!-- CONFIRM: author to review this wording; Elsevier places it before the references. -->
 
 ---
 
