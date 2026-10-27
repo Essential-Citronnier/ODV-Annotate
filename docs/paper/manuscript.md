@@ -1,9 +1,9 @@
 <!--
 Manuscript for Computer Methods and Programs in Biomedicine (CMPB, Elsevier).
-Status: FULL DRAFT, except §3.6 (E6) and §3.7 (E7), whose experiments have not run.
+Status: FULL DRAFT. §3.6 (E6) and §3.7 (E7) are filled from eval/results once their runs finish.
 
 Rules for this file:
-- Every number is copied from a results file and carries a <!-- src: ... --> pointer.
+- Every number is copied from a results file and carries an HTML-comment "src:" pointer.
   Never restate a number from memory; if a source changes, re-copy it.
 - Citations are keyed to docs/paper/references.md and numbered by first appearance.
   Every entry is resolved from fetched metadata; never fill bibliographic fields by hand.
@@ -146,7 +146,8 @@ DICOM viewer [17]. Its contributions are:
    one-shot) that host four heterogeneous models with no per-model changes to the viewer.
 2. An evaluation on public CT that is reproducible from pinned series identifiers,
    covering standard conformance, pipeline fidelity, resource arbitration, the session
-   model, deployability and TODO(E6) latency.
+   model, deployability, end-to-end latency, and a coordinate-mapping check of the
+   prompt-driven and vision–language plugins.
 3. Evidence that evaluation, rather than code review, found the architecture's defects.
    The clearest case is a self-declared memory figure about six times too low, which an
    arbiter correct against its own specification would still have admitted.
@@ -304,8 +305,7 @@ eval/fetch_data.py PINNED_TCIA --> [31,32,33]. Series identifiers are pinned in 
 acquisition script rather than discovered by query, because archive query results are
 not stable across API revisions. For the hygiene check in §3.2 we also used cases from
 the TotalSegmentator reference dataset (Zenodo record 10047292, CC BY 4.0) <!-- src:
-eval/fetch_data.py --> [34]. TODO(E7, optional): a few TCIA *Pancreas-CT* series, for
-anatomical diversity. All data are public and de-identified, and their use required no
+eval/fetch_data.py --> [34], which E7 also uses. All data are public and de-identified, and their use required no
 ethics approval or data use agreement. <!-- CONFIRM wording with the institution -->
 
 **Experiments.** Seven experiments addressed the questions in Table 2.
@@ -319,8 +319,8 @@ ethics approval or data use agreement. <!-- CONFIRM wording with the institution
 | E3 | Do declared resources match measured ones, and does arbitration follow the specification? | process-tree peak memory; scenario pass rate |
 | E4 | Does the session model pay for itself? | encode/decode cost ratio; implicit-cache overhead |
 | E5 | Does the packaged application work as shipped? | deployability checks |
-| E6 | What is end-to-end latency on real hardware? | per-stage wall time, median (IQR), two machines — TODO(E6) |
-| E7 | Do prompt-driven and VLM plugins return correct output on public CT? | SAM 2/3 click-prompt Dice against reference masks; Gemma round trip — TODO(E7) |
+| E6 | What is end-to-end latency through the host's contract? | per-stage wall time, median (IQR), idle-gated runs only |
+| E7 | Do prompt-driven and VLM plugins return output where the prompt and image say they should? | per-structure Dice for one interior click, with a transposed-click control; Gemma round trip and box placement; process-tree peak memory |
 
 E1 tested conformance of the DICOM Segmentation objects [35,36] written by the
 TotalSegmentator adapter's shipped encoder, which uses highdicom [37]. Encoding derived
@@ -357,16 +357,42 @@ no machine-specific paths, a virtual environment with pip created by the bundled
 interpreter, every adapter parsing its command line under that interpreter before its
 dependencies are installed, and a valid code signature. <!-- src: EVALUATION.md §6 -->
 
-E6 measures end-to-end latency per engine and stage (cold start, warm inference, result
-routing and display) through the host's own HTTP and command-line contract, on an idle
-machine, on two Apple Silicon configurations. TODO(E6): describe machines, repetitions
-and idle gate once run. <!-- src: eval/README.md, eval/exp6_latency.py -->
+E6 measured end-to-end latency through the host's own contract: loopback HTTP for the
+resident and session engines, and the command line for the one-shot engine, timed from
+outside each process so that interpreter start-up, imports, model loading and
+serialisation are all included. Four engines were measured: the Gemma 4 E4B plugin; the
+viewer's earlier built-in Gemma server, which serves the same weights and is included as
+the pre-plugin baseline; SAM 2; and TotalSegmentator's `total` and `total_lowmem` tasks.
+Each resident or session engine was cold-started 10 times; each start was followed by
+requests on 9 slices (3 positions in each of 3 pinned TCIA series), all three Gemma
+tasks, or for SAM a session opened on each slice and 5 clicks per session.
+TotalSegmentator ran 5 times per task on each of the 3 series. "Cold" here means a new
+process; the operating system's file cache was not flushed, so weights may have been
+read from memory. Before each case the harness waited (up to 10 or 30 min) for the 1-minute
+load average to fall to 2.0 or below, and recorded whether it did; only cases that met
+this idle gate are summarised. Every engine's environment was checked against its
+dependency lock before it ran, and engines that differed would have been skipped. E6 ran
+natively on one machine, an Apple M5 Max MacBook Pro with 128 GB of memory. <!-- src:
+eval/README.md "Experiment 6"; eval/exp6_latency.py; .eval/exp6_run.log invocation -->
 
-E7 places a click at the centroid of each reference structure on its central slice and
-compares the SAM 2 and SAM 3 masks with the reference mask. Its purpose is to verify the
-coordinate mapping between viewer, adapter and model, not to measure accuracy. For Gemma
-4 E4B it checks the protocol round trip and whether returned boxes lie inside the image.
-TODO(E7).
+E7 checked that prompts and results keep their geometry through the protocol. For SAM 2,
+each reference structure in the TotalSegmentator cases was located on its central axial
+slice (weighted by voxel count), the slice was rendered in a soft-tissue window and sent
+to open a session, and one foreground click was sent at the interior pixel farthest from
+the structure's boundary. We did not click at the centroid, as first planned, because the
+centroid of a non-convex structure such as the colon can lie outside it, which would test
+click placement rather than mapping. Structures smaller than 100 pixels on their slice
+were skipped. The returned run-length mask was decoded and compared with the reference
+by Dice. A transposed click, with x and y exchanged as a transposed mapping would send
+it, served as a negative control for every structure: the check is meaningful only if
+the control scores clearly lower. For Gemma 4 E4B, the detection and analysis tasks were
+sent on 3 slices of each case, and we recorded whether each request completed, whether
+each returned box lay inside the image, and whether its centre lay on the body rather
+than on air (body: the largest connected region above −500 HU, holes filled). Every
+server in E7 ran under the same process-tree memory sampler as E3, which gives a measured
+peak for the two plugins whose declarations E3 could not audit. E7 did not run at the
+same time as E6. Neither part of E7 measures accuracy. <!-- src: eval/exp7_prompt_vlm.py
+-->
 
 **Environment and reporting.** Each case produces one JSON record. Failures are recorded
 rather than dropped. Each result file carries the machine profile, accelerator
@@ -631,8 +657,10 @@ conventional marketplace opens.
 - **Platform.** The software runs on macOS and Apple Silicon only, and MLX is
   platform-specific. TotalSegmentator runs on the CPU, as it ships.
 - **Measurement conditions.** E1–E5 ran in a sandbox with no visible GPU and with process
-  pools replaced by threads, so their timings are CPU-only figures. TODO(E6): restate once
-  native, idle, two-machine latency is available.
+  pools replaced by threads, so their timings are CPU-only figures. E6 is native but was
+  run on one high-end machine; the 16 GB configuration the arbiter is designed around
+  was analysed through the arbiter's decisions (E3), not timed. Cold starts were measured
+  without flushing the file cache.
 - **2D prompts.** Prompt-driven segmentation returns per-slice 2D masks; propagating a prompt
   through a volume is not implemented.
 - **Overlapping structures.** The `seg3d` labelmap encoding clips overlapping structures.
