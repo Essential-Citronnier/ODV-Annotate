@@ -1,6 +1,7 @@
-# Cover letter
+28 October 2026
 
-<!-- CONFIRM: addressee, date, corresponding author block. -->
+The Editor-in-Chief\
+Computer Methods and Programs in Biomedicine
 
 Dear Editors,
 
