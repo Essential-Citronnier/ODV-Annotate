@@ -9,6 +9,7 @@ Outputs go to docs/paper/submission/build/ (git-ignored except by choice):
                     references (inlined from references.md), tables, legends
   highlights.docx   Elsevier asks for highlights as a separate file
   cover_letter.docx
+  Supplementary_Material.docx  supplementary.md, figures embedded
   Fig1.png ... FigN.png  copied from the paths named in the figure legends
 
 HTML comments (source pointers, CONFIRM notes) are stripped from every output.
@@ -87,8 +88,9 @@ def blockers(text: str, figures: list[Path]) -> list[str]:
 
 def pandoc(markdown: str, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
+    # Image paths in the supplement are relative to the repository root.
     subprocess.run(["pandoc", "--from", "markdown+superscript", "--to", "docx",
-                    "--output", str(target)],
+                    "--resource-path", str(REPO), "--output", str(target)],
                    input=markdown.encode(), check=True)
 
 
@@ -100,7 +102,10 @@ def main() -> int:
     args = parser.parse_args()
 
     text, figures = manuscript_text()
+    supplement = strip_comments((HERE / "supplementary.md").read_text())
+    supplement_figures = [REPO / p for p in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", supplement)]
     problems = blockers(text, figures)
+    problems += [f"supplement: {p}" for p in blockers(supplement, supplement_figures)]
     for problem in problems:
         print(f"  [blocker] {problem}")
     print(f"{len(problems)} blocker(s)")
@@ -118,6 +123,7 @@ def main() -> int:
            OUT / "highlights.docx")
     pandoc(strip_comments((HERE / "submission/cover_letter.md").read_text()),
            OUT / f"cover_letter{suffix}.docx")
+    pandoc(supplement, OUT / f"Supplementary_Material{suffix}.docx")
     for index, figure in enumerate(figures, start=1):
         if figure.is_file():
             shutil.copy2(figure, OUT / f"Fig{index}{figure.suffix}")

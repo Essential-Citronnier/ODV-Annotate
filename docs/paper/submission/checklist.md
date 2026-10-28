@@ -8,14 +8,14 @@ measurement cell after any edit pass; a number written here goes stale on the ne
 
 | Item | Measured | Requirement | Status |
 |---|---|---|---|
-| Abstract | 247 words (incl. structured-heading words) | <= 250 (third-party summary; see §D) | pass |
+| Abstract | 247 words (incl. structured-heading words) | <= 350 (Elsevier guide copy, 2026-10-28) | pass |
 | Abstract structure | Background and Objectives / Methods / Results / Conclusions | CMPB structured abstract | pass |
 | Highlights | 5 bullets, 80, 70, 79, 79, 65 characters | 3–5 bullets, <= 85 chars | pass |
-| Keywords | 6 | 1–7 | pass |
-| Body (Introduction to Conclusions, incl. tables and legends) | 5397 words | no stated hard limit | see §C |
+| Keywords | 6 | 3–6 | pass |
+| Body (Introduction to Conclusions) | 3,734 words of prose + 625 in tables (2026-10-28) | should not normally exceed 3,500 (excl. abstract) | near; detail moved to supplementary.md |
 | Tables | 4 | — | see §C |
-| Figures | 5 | — | see §C |
-| References | 43, all cited, numbered by first appearance | Elsevier numbered | pass |
+| Figures | 3 main + 2 supplementary (former Figs. 3–4) | no stated limit | pass |
+| References | 43 of max 50, all cited, numbered by first appearance | Elsevier numbered | pass |
 | Citation numbering | strictly ascending by first appearance, no gaps, none uncited | Vancouver | pass |
 | Cross-references | every Table/Figure cited has a legend; every legend is cited | — | pass |
 | Reference metadata | all 43 resolved from Crossref, DataCite or the arXiv API | — | pass |
@@ -41,12 +41,9 @@ measurement cell after any edit pass; a number written here goes stale on the ne
 
 ## C. Recommended before submission
 
-- **Display items.** 4 tables + 5 figures is high for a full-length article. The draft's own
-  note to move Figures 3 and 4 to supplementary material is sound and would also reduce the
-  body count, since the legends are counted above.
-- **Body length.** 5397 words is long for CMPB in practice. §2 (Methods) is the
-  natural donor; a Supplementary Methods file can carry the protocol detail with a pointer
-  left at each excision.
+- **Display items.** Done 2026-10-28: Figures 3 and 4 moved to the supplement.
+- **Body length.** Done 2026-10-28: cut from 6,486 to about 3,730 words of prose; protocol
+  and result detail moved verbatim to `supplementary.md`, with a pointer at each excision.
 - **Graphical abstract.** Encouraged by Elsevier, not present. Figure 1 would adapt.
 - **Title.** Three candidates are retained in the title-page comment; the choice is the
   authors'.
@@ -91,7 +88,7 @@ differs, the publisher text wins.
 | `submission/highlights.md` | 5 bullets, measured lengths recorded |
 | `submission/checklist.md` | this file |
 | `REVIEW_2026-10-18.md` | the review these revisions respond to |
-| Figures 1–4 | exist (`docs/figures/`, `eval/figures/`) |
-| Figure 5 | not produced — depends on E6 |
-| Supplementary methods | not written |
+| Figures 1–3 | exist; Fig. 3 is `eval/figures/exp6_latency.png` |
+| Figures S1–S2 | former Figs. 3–4, embedded in Supplementary_Material.docx |
+| `supplementary.md` | Sections S1–S2, built to Supplementary_Material.docx |
 | Graphical abstract | not produced |
