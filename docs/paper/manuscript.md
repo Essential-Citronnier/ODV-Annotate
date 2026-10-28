@@ -35,8 +35,8 @@ ORCID is entered in the submission system. -->
 **Affiliations:**
 ^1^ Division of Medical Oncology, Department of Internal Medicine, Yonsei Cancer Center,
 Yonsei University College of Medicine, Seoul, Republic of Korea\
-^2^ Department of Pathology and Laboratory Medicine, Memorial Sloan Kettering Cancer
-Center, New York, NY, USA
+^2^ David M. Rubenstein Center for Pancreas Cancer Research, Memorial Sloan
+Kettering Cancer Center, New York, NY, USA
 
 **Corresponding author:** Daeseong Kim, Division of Medical Oncology, Department of
 Internal Medicine, Yonsei Cancer Center, Yonsei University College of Medicine, 50-1

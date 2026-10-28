@@ -58,6 +58,6 @@ Yours sincerely,
 Daeseong Kim\
 Division of Medical Oncology, Department of Internal Medicine, Yonsei Cancer Center,
 Yonsei University College of Medicine, Seoul, Republic of Korea\
-Department of Pathology and Laboratory Medicine, Memorial Sloan Kettering Cancer Center,
-New York, NY, USA\
+David M. Rubenstein Center for Pancreas Cancer Research, Memorial Sloan Kettering
+Cancer Center, New York, NY, USA\
 lemonaatree@gmail.com
