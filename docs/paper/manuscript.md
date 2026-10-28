@@ -806,8 +806,8 @@ consent were therefore not required. <!-- CONFIRM this wording with the institut
 SeriesInstanceUID in `eval/fetch_data.py`; raw per-case results are in `eval/results/`.
 
 **Code availability:** https://github.com/Essential-Citronnier/ODV-Annotate (MIT licence). The
-version evaluated here is archived as release v2.0.0-cmpb [43],
-https://doi.org/10.5281/zenodo.23699124.
+version described here is archived as release v2.0.1-cmpb [43],
+https://doi.org/10.5281/zenodo.23734091.
 
 **Declaration of generative AI and AI-assisted technologies in the writing process:**
 During the preparation of this work the author used Claude (Anthropic) to draft and

@@ -33,11 +33,11 @@ measurement cell after any edit pass; a number written here goes stale on the ne
 4. Front matter filled: sole author Daeseong Kim, two affiliations (Yonsei Cancer Center;
    MSKCC), corresponding author, CRediT, no competing interests, no funding. ORCID is
    entered in the submission system.
-5. Code archived: GitHub release v2.0.0-cmpb (commit 73f18f8), Zenodo
-   https://doi.org/10.5281/zenodo.23699124 (concept DOI 10.5281/zenodo.23699123), cited as [43].
+5. Code archived: GitHub release v2.0.1-cmpb (commit 68e36b1), Zenodo
+   https://doi.org/10.5281/zenodo.23734091 (concept DOI 10.5281/zenodo.23699123), cited as [43].
 6. Gemma 4 E4B declaration raised 5.0 -> 8.0 (plugin manifest and built-in server) after
-   E7 measured 7.72 GiB; regression tests added. The archived v2.0.0-cmpb predates this
-   change, so a new release is needed for the archive to match the paper.
+   E7 measured 7.72 GiB; regression tests added. v2.0.1-cmpb includes this change and
+   supersedes v2.0.0-cmpb (10.5281/zenodo.23699124), which predates it.
 
 ## C. Recommended before submission
 
