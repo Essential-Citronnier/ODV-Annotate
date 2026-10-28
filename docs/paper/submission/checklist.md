@@ -9,7 +9,7 @@ measurement cell after any edit pass; a number written here goes stale on the ne
 | Item | Measured | Requirement | Status |
 |---|---|---|---|
 | Abstract | 247 words (incl. structured-heading words) | <= 250 (third-party summary; see §D) | pass |
-| Abstract structure | Background and Objective / Methods / Results / Conclusions | CMPB structured abstract | pass |
+| Abstract structure | Background and Objectives / Methods / Results / Conclusions | CMPB structured abstract | pass |
 | Highlights | 5 bullets, 80, 70, 79, 79, 65 characters | 3–5 bullets, <= 85 chars | pass |
 | Keywords | 6 | 1–7 | pass |
 | Body (Introduction to Conclusions, incl. tables and legends) | 5397 words | no stated hard limit | see §C |

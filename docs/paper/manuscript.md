@@ -63,7 +63,7 @@ spaces. -->
 
 <!-- CMPB uses a structured abstract. CONFIRM headings and word limit in the guide. -->
 
-**Background and Objective:** AI in an image viewer usually means one integration per
+**Background and Objectives:** AI in an image viewer usually means one integration per
 model, or a remote service. Models differ in process lifetime, memory, input and output,
 dependencies and licence. We asked whether such models can run locally under one
 declarative contract, and whether a host can safely admit them against declared
