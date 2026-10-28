@@ -16,7 +16,7 @@ authors:
       Department of Pathology and Laboratory Medicine, Memorial Sloan Kettering
       Cancer Center, New York, NY, USA
     website: "https://www.lemonaa.com/cv"
-version: 2.0.0
+version: 2.0.1-cmpb
 repository-code: "https://github.com/Essential-Citronnier/ODV-Annotate"
 url: "https://github.com/Essential-Citronnier/ODV-Annotate"
 license: MIT
