@@ -1,6 +1,8 @@
 # CMPB submission checklist — ODV-Annotate plugin-layer manuscript
 
 Generated 2026-10-18, updated 2026-10-27, from `docs/paper/manuscript.md` and `docs/paper/references.md`.
+**Submitted 2026-10-28 — manuscript number CMPB-D-26-08974.**
+
 Every measured value below was computed from the files, not estimated. Re-run the
 measurement cell after any edit pass; a number written here goes stale on the next edit.
 
